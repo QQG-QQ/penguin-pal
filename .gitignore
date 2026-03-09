@@ -1,0 +1,19 @@
+﻿# Node / frontend
+node_modules/
+dist/
+.vite/
+*.log
+
+# Tauri / Rust build outputs
+src-tauri/target/
+
+# Local artifacts and temp
+artifacts/
+*.tmp
+*.temp
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

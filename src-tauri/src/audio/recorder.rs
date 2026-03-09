@@ -1,0 +1,15 @@
+use crate::app_state::AudioStage;
+
+pub fn input_mode() -> &'static str {
+    "press-to-talk"
+}
+
+pub fn stage() -> AudioStage {
+    AudioStage {
+        id: "recorder".to_string(),
+        title: "按住说话".to_string(),
+        summary: "当前版本前端优先使用 Web Speech 入口，后续可以切换为本地采集管线。"
+            .to_string(),
+        status: "ready".to_string(),
+    }
+}

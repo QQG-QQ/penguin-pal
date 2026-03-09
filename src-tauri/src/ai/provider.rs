@@ -1,0 +1,235 @@
+use crate::app_state::{ChatMessage, ProviderConfig, ProviderKind};
+use reqwest::Client;
+use serde_json::{json, Value};
+
+pub async fn respond(
+    provider: &ProviderConfig,
+    api_key: Option<String>,
+    history: &[ChatMessage],
+) -> Result<(String, String), String> {
+    if matches!(provider.kind, ProviderKind::Mock) {
+        return Ok((mock_reply(history), "Mock Assistant".to_string()));
+    }
+
+    if !provider.allow_network {
+        return Ok((
+            "当前处于离线安全模式，已阻止外网 AI 调用。若要连接真实模型，请在设置中显式开启网络访问。"
+                .to_string(),
+            "Offline Guard".to_string(),
+        ));
+    }
+
+    match provider.kind {
+        ProviderKind::OpenAi => {
+            let key = required_key(api_key, "OpenAI")?;
+            call_openai_like(
+                provider,
+                Some(key.as_str()),
+                history,
+                "https://api.openai.com/v1",
+                "OpenAI",
+            )
+            .await
+        }
+        ProviderKind::Anthropic => {
+            let key = required_key(api_key, "Anthropic")?;
+            call_anthropic(provider, &key, history).await
+        }
+        ProviderKind::OpenAiCompatible => {
+            let base_url = provider
+                .base_url
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "http://127.0.0.1:11434/v1".to_string());
+            call_openai_like(
+                provider,
+                api_key.as_deref().filter(|value| !value.trim().is_empty()),
+                history,
+                &base_url,
+                "OpenAI-Compatible",
+            )
+            .await
+        }
+        ProviderKind::Mock => unreachable!(),
+    }
+}
+
+pub fn fallback_reply(error: &str) -> String {
+    format!(
+        "外部 AI 调用失败：{}。\n我没有执行任何桌面动作，也不会绕过白名单。你可以检查 API Key、模型地址或切回 Mock 模式。",
+        error
+    )
+}
+
+fn required_key(api_key: Option<String>, provider: &str) -> Result<String, String> {
+    api_key
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{provider} 尚未配置 API Key"))
+}
+
+fn mock_reply(history: &[ChatMessage]) -> String {
+    let latest = history
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+        .unwrap_or_default();
+
+    if latest.contains("安全") || latest.contains("权限") {
+        return "当前桌宠运行在严格白名单模式。AI 只能提出建议，真正的系统动作只能通过动作面板，并且高风险操作必须人工确认。"
+            .to_string();
+    }
+
+    if latest.contains("记事本")
+        || latest.contains("计算器")
+        || latest.contains("控制电脑")
+        || latest.contains("打开")
+    {
+        return "桌面控制已经被收口到白名单动作层，目前开放的是示例级动作。未来即使接入真实模型，也不会允许自由命令执行。"
+            .to_string();
+    }
+
+    if latest.contains("语音") {
+        return "现在可以按住语音键讲话，松开后自动转写并发送。回复完成后，如果开启了语音回复，会使用系统 TTS 播报。"
+            .to_string();
+    }
+
+    "桌宠 UI、对话壳和安全网关已经连通。你现在可以继续微调人设、模型和动作白名单。".to_string()
+}
+
+async fn call_openai_like(
+    provider: &ProviderConfig,
+    api_key: Option<&str>,
+    history: &[ChatMessage],
+    base_url: &str,
+    label: &str,
+) -> Result<(String, String), String> {
+    let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let client = Client::new();
+    let payload = json!({
+        "model": provider.model,
+        "temperature": 0.4,
+        "messages": build_openai_messages(provider, history),
+    });
+
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error| error.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("{label} 请求失败({status}): {body}"));
+    }
+
+    let value: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+    let reply = extract_openai_content(&value)
+        .ok_or_else(|| format!("{label} 返回内容为空或格式不兼容"))?;
+
+    Ok((reply, label.to_string()))
+}
+
+async fn call_anthropic(
+    provider: &ProviderConfig,
+    api_key: &str,
+    history: &[ChatMessage],
+) -> Result<(String, String), String> {
+    let endpoint = provider
+        .base_url
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
+    let client = Client::new();
+    let payload = json!({
+        "model": provider.model,
+        "system": provider.system_prompt,
+        "max_tokens": 1024,
+        "messages": build_anthropic_messages(history),
+    });
+
+    let response = client
+        .post(endpoint)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let status = response.status();
+    let body = response.text().await.map_err(|error| error.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("Anthropic 请求失败({status}): {body}"));
+    }
+
+    let value: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+    let reply = value
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+        .map(|text| text.to_string())
+        .ok_or_else(|| "Anthropic 返回内容为空或格式不兼容".to_string())?;
+
+    Ok((reply, "Anthropic".to_string()))
+}
+
+fn build_openai_messages(provider: &ProviderConfig, history: &[ChatMessage]) -> Vec<Value> {
+    let mut messages = Vec::new();
+
+    if !provider.system_prompt.trim().is_empty() {
+        messages.push(json!({
+            "role": "system",
+            "content": provider.system_prompt,
+        }));
+    }
+
+    messages.extend(history.iter().map(|message| {
+        json!({
+            "role": message.role,
+            "content": message.content,
+        })
+    }));
+
+    messages
+}
+
+fn build_anthropic_messages(history: &[ChatMessage]) -> Vec<Value> {
+    history
+        .iter()
+        .filter(|message| message.role == "user" || message.role == "assistant")
+        .map(|message| {
+            json!({
+                "role": message.role,
+                "content": message.content,
+            })
+        })
+        .collect()
+}
+
+fn extract_openai_content(value: &Value) -> Option<String> {
+    let content = value
+        .get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?;
+
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+
+    content
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .collect::<String>()
+        })
+        .filter(|text| !text.is_empty())
+}
