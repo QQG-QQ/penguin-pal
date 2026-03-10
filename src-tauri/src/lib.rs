@@ -49,34 +49,105 @@ fn codex_auth_path() -> Option<PathBuf> {
     Some(PathBuf::from(home_dir).join(".codex").join("auth.json"))
 }
 
-fn inspect_codex_cli_status() -> CodexCliStatus {
-    let version_output = Command::new("codex").arg("--version").output();
-    let (installed, version) = match version_output {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let parsed = if !stdout.is_empty() {
-                Some(stdout)
-            } else if !stderr.is_empty() {
-                Some(stderr)
-            } else {
-                None
-            };
-            (true, parsed)
+fn first_non_empty_output(output: &std::process::Output) -> Option<String> {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Some(stdout);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return Some(stderr);
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_codex_from_where(command: &str) -> Option<String> {
+    let output = Command::new("cmd")
+        .args(["/C", "where", command])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn resolve_codex_command() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(explicit) = env::var_os("CODEX_BIN") {
+            let path = PathBuf::from(explicit);
+            if path.is_file() {
+                return Some(path.to_string_lossy().to_string());
+            }
         }
-        Err(_) => (false, None),
-    };
+
+        if let Some(path) = resolve_codex_from_where("codex") {
+            return Some(path);
+        }
+        if let Some(path) = resolve_codex_from_where("codex.cmd") {
+            return Some(path);
+        }
+
+        if let Some(appdata) = env::var_os("APPDATA") {
+            let npm_bin = PathBuf::from(appdata).join("npm").join("codex.cmd");
+            if npm_bin.is_file() {
+                return Some(npm_bin.to_string_lossy().to_string());
+            }
+        }
+
+        None
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Some("codex".to_string())
+    }
+}
+
+fn read_codex_version(command: &str) -> Option<String> {
+    let output = Command::new(command)
+        .arg("--version")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    first_non_empty_output(&output)
+}
+
+fn inspect_codex_cli_status() -> CodexCliStatus {
+    let codex_command = resolve_codex_command();
+    let version = codex_command
+        .as_deref()
+        .and_then(|command| read_codex_version(command));
+    let installed = version.is_some();
 
     let auth_path = codex_auth_path();
-    let logged_in = auth_path
+    let auth_file_exists = auth_path
         .as_ref()
         .is_some_and(|path| path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false));
+    let logged_in = installed && auth_file_exists;
     let auth_path_label = auth_path
         .as_ref()
         .map(|path| path.to_string_lossy().to_string());
 
     let message = if !installed {
-        "未检测到 codex 命令，请先安装 Codex CLI 并加入 PATH。".to_string()
+        if auth_file_exists {
+            "检测到 Codex 凭据文件，但当前进程无法调用 codex 命令。请把 Codex CLI 所在目录加入 PATH 后重启桌宠。".to_string()
+        } else {
+            "未检测到 codex 命令，请先安装 Codex CLI 并加入 PATH。".to_string()
+        }
     } else if logged_in {
         "Codex CLI 已登录。".to_string()
     } else {
@@ -104,17 +175,26 @@ fn start_codex_cli_login() -> Result<CodexCliStatus, String> {
         return Err(status.message);
     }
 
+    let codex_command = resolve_codex_command()
+        .ok_or_else(|| "未找到 codex 命令，请检查 PATH 配置。".to_string())?;
+
     #[cfg(target_os = "windows")]
     {
+        let wrapped = if codex_command.contains(' ') {
+            format!("\"{}\"", codex_command)
+        } else {
+            codex_command.clone()
+        };
+        let login_cmd = format!("{wrapped} login");
         Command::new("cmd")
-            .args(["/C", "start", "", "cmd", "/K", "codex login"])
+            .args(["/C", "start", "", "cmd", "/K", &login_cmd])
             .spawn()
             .map_err(|error| format!("启动 codex login 失败：{error}"))?;
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new("codex")
+        Command::new(codex_command)
             .arg("login")
             .spawn()
             .map_err(|error| format!("启动 codex login 失败：{error}"))?;

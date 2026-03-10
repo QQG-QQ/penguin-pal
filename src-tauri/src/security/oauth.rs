@@ -142,6 +142,10 @@ pub async fn exchange_code(
 pub fn ensure_supported_provider(provider: &ProviderConfig) -> Result<(), String> {
     match provider.kind {
         ProviderKind::Mock => Err("Mock Provider 不支持 OAuth 登录。".to_string()),
+        ProviderKind::CodexCli => Err(
+            "Codex CLI Provider 不使用通用 OAuth 字段，请直接在设置中执行 codex login。"
+                .to_string(),
+        ),
         ProviderKind::Anthropic => Err(
             "Anthropic 当前未接入 OAuth bearer token，这个版本仅支持 API Key。"
                 .to_string(),

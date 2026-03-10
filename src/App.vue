@@ -36,6 +36,7 @@ import type {
 
 const providerDefaults: Record<ProviderKind, string> = {
   mock: 'penguin-guardian',
+  codexCli: 'gpt-5-codex',
   openAi: 'gpt-4.1-mini',
   anthropic: 'claude-3-5-sonnet-latest',
   openAiCompatible: 'llama3.1'
@@ -384,6 +385,24 @@ const toggleApprovalCheck = (checkId: string, checked: boolean) => {
 
 const persistSettings = async (draft: ProviderConfigInput) => {
   const nextDraft = JSON.parse(JSON.stringify(draft)) as ProviderConfigInput
+
+  if (nextDraft.kind === 'codexCli') {
+    nextDraft.authMode = 'oauth'
+    nextDraft.baseUrl = null
+    nextDraft.oauthAuthorizeUrl = null
+    nextDraft.oauthTokenUrl = null
+    nextDraft.oauthClientId = null
+    nextDraft.oauthScopes = ''
+    nextDraft.oauthRedirectUrl = DEFAULT_OAUTH_REDIRECT_URL
+  } else {
+    nextDraft.authMode = 'apiKey'
+    nextDraft.oauthAuthorizeUrl = null
+    nextDraft.oauthTokenUrl = null
+    nextDraft.oauthClientId = null
+    nextDraft.oauthScopes = ''
+    nextDraft.clearOAuthToken = true
+  }
+
   if (!nextDraft.model.trim()) {
     nextDraft.model = providerDefaults[nextDraft.kind]
   }
@@ -533,9 +552,19 @@ const maybeHandleLocalCommand = async (content: string) => {
   }
 
   if (
-    ['打开设置', '显示设置', '模型设置', '安全设置', '系统设置', '打开配置', 'oauth设置', 'oauth登录'].some((token) =>
-      normalized.includes(normalizeCommand(token))
-    )
+    [
+      '打开设置',
+      '显示设置',
+      '模型设置',
+      '安全设置',
+      '系统设置',
+      '打开配置',
+      'oauth设置',
+      'oauth登录',
+      'codex登录',
+      'codex login',
+      '登录codex'
+    ].some((token) => normalized.includes(normalizeCommand(token)))
   ) {
     const opened = await openDrawer('settings')
     announce(
@@ -807,7 +836,12 @@ const refreshCodexLoginStatus = async (silent = false) => {
   }
 }
 
-const beginOAuthLogin = async (_draft: ProviderConfigInput) => {
+const beginOAuthLogin = async (draft: ProviderConfigInput) => {
+  if (draft.kind !== 'codexCli') {
+    announce('请先把 Provider 切换到 Codex CLI，再执行一键登录。', 'guarded')
+    return
+  }
+
   authBusy.value = true
   oauthNotice.value = '正在启动 codex login...'
 

@@ -16,6 +16,7 @@ import type {
 
 const providerModels: Record<ProviderKind, string> = {
   mock: 'penguin-guardian',
+  codexCli: 'gpt-5-codex',
   openAi: 'gpt-4.1-mini',
   anthropic: 'claude-3-5-sonnet-latest',
   openAiCompatible: 'llama3.1'

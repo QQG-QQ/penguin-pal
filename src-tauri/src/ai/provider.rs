@@ -4,6 +4,8 @@ use crate::{
 };
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::{env, path::PathBuf, process::Command};
+use tauri::async_runtime;
 
 pub async fn respond(
     provider: &ProviderConfig,
@@ -23,6 +25,10 @@ pub async fn respond(
                 .to_string(),
             "Offline Guard".to_string(),
         ));
+    }
+
+    if matches!(provider.kind, ProviderKind::CodexCli) {
+        return call_codex_cli(provider, permission_level, allowed_actions, history).await;
     }
 
     match provider.kind {
@@ -77,15 +83,130 @@ pub async fn respond(
             )
             .await
         }
-        ProviderKind::Mock => unreachable!(),
+        ProviderKind::Mock | ProviderKind::CodexCli => unreachable!(),
     }
 }
 
 pub fn fallback_reply(error: &str) -> String {
     format!(
-        "外部 AI 调用失败：{}。\n我没有执行任何桌面动作，也不会绕过白名单。你可以检查 API Key、OAuth 配置、模型地址或切回 Mock 模式。",
+        "外部 AI 调用失败：{}。\n我没有执行任何桌面动作，也不会绕过白名单。你可以检查当前 provider 的登录状态、API Key、模型地址或切回 Mock 模式。",
         error
     )
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_codex_from_where(command: &str) -> Option<String> {
+    let output = Command::new("cmd")
+        .args(["/C", "where", command])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn resolve_codex_command() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(explicit) = env::var_os("CODEX_BIN") {
+            let path = PathBuf::from(explicit);
+            if path.is_file() {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+
+        if let Some(path) = resolve_codex_from_where("codex") {
+            return Some(path);
+        }
+        if let Some(path) = resolve_codex_from_where("codex.cmd") {
+            return Some(path);
+        }
+
+        if let Some(appdata) = env::var_os("APPDATA") {
+            let npm_bin = PathBuf::from(appdata).join("npm").join("codex.cmd");
+            if npm_bin.is_file() {
+                return Some(npm_bin.to_string_lossy().to_string());
+            }
+        }
+
+        None
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Some("codex".to_string())
+    }
+}
+
+fn run_codex_exec(prompt: &str) -> Result<String, String> {
+    let command = resolve_codex_command()
+        .ok_or_else(|| "未检测到 codex 命令，请先安装 Codex CLI 并加入 PATH。".to_string())?;
+
+    let output = Command::new(command)
+        .arg("exec")
+        .arg("--skip-git-repo-check")
+        .arg("--sandbox")
+        .arg("read-only")
+        .arg("--ask-for-approval")
+        .arg("never")
+        .arg(prompt)
+        .output()
+        .map_err(|error| format!("执行 codex exec 失败：{error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !output.status.success() {
+        return Err(if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "codex exec 返回失败状态，但没有可读错误输出。".to_string()
+        });
+    }
+
+    if !stdout.is_empty() {
+        return Ok(stdout);
+    }
+
+    if !stderr.is_empty() {
+        return Ok(stderr);
+    }
+
+    Err("codex exec 没有返回可用文本。".to_string())
+}
+
+async fn call_codex_cli(
+    provider: &ProviderConfig,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    history: &[ChatMessage],
+) -> Result<(String, String), String> {
+    let user_prompt = history
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "当前没有可发送给 Codex CLI 的用户消息。".to_string())?;
+
+    let system_prompt = guardrails::compose_system_prompt(provider, permission_level, allowed_actions);
+    let prompt = format!(
+        "{system_prompt}\n\n用户输入：\n{user_prompt}\n\n请直接输出最终答复，不要输出命令行日志。"
+    );
+
+    let reply = async_runtime::spawn_blocking(move || run_codex_exec(&prompt))
+        .await
+        .map_err(|error| format!("等待 Codex CLI 响应失败：{error}"))??;
+
+    Ok((reply, "Codex CLI".to_string()))
 }
 
 fn credential_for_openai(

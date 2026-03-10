@@ -36,20 +36,132 @@ const cloneDraft = (value: ProviderConfigInput): ProviderConfigInput =>
 
 const localDraft = ref<ProviderConfigInput>(cloneDraft(props.draft))
 
+const providerOptions: Array<{ label: string; value: ProviderKind }> = [
+  { label: 'Codex CLI', value: 'codexCli' },
+  { label: 'OpenAI', value: 'openAi' },
+  { label: 'Anthropic', value: 'anthropic' },
+  { label: 'OpenAI-Compatible', value: 'openAiCompatible' },
+  { label: 'Mock', value: 'mock' }
+]
+
+type ModelPreset = {
+  id: string
+  label: string
+  kind: ProviderKind
+  model: string
+  baseUrl: string | null
+  authMode: ProviderConfigInput['authMode']
+}
+
+const presetOptions: ModelPreset[] = [
+  {
+    id: 'codex-cli',
+    label: 'Codex CLI（官方登录）',
+    kind: 'codexCli',
+    model: 'gpt-5-codex',
+    baseUrl: null,
+    authMode: 'oauth'
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI 官方',
+    kind: 'openAi',
+    model: 'gpt-4.1-mini',
+    baseUrl: null,
+    authMode: 'apiKey'
+  },
+  {
+    id: 'anthropic',
+    label: 'Anthropic 官方',
+    kind: 'anthropic',
+    model: 'claude-3-5-sonnet-latest',
+    baseUrl: null,
+    authMode: 'apiKey'
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    kind: 'openAiCompatible',
+    model: 'openai/gpt-4.1-mini',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    authMode: 'apiKey'
+  },
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    kind: 'openAiCompatible',
+    model: 'deepseek-chat',
+    baseUrl: 'https://api.deepseek.com/v1',
+    authMode: 'apiKey'
+  },
+  {
+    id: 'ollama',
+    label: 'Ollama（本地）',
+    kind: 'openAiCompatible',
+    model: 'llama3.1',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    authMode: 'apiKey'
+  }
+]
+
+const selectedPreset = ref('custom')
+const applyingPreset = ref(false)
+const isCodexProvider = ref(localDraft.value.kind === 'codexCli')
+
+const applyProviderRules = () => {
+  isCodexProvider.value = localDraft.value.kind === 'codexCli'
+  localDraft.value.authMode = isCodexProvider.value ? 'oauth' : 'apiKey'
+  if (isCodexProvider.value) {
+    localDraft.value.baseUrl = null
+    localDraft.value.oauthAuthorizeUrl = null
+    localDraft.value.oauthTokenUrl = null
+    localDraft.value.oauthClientId = null
+    localDraft.value.oauthScopes = ''
+  }
+}
+
+watch(
+  () => localDraft.value.kind,
+  () => {
+    if (!applyingPreset.value) {
+      selectedPreset.value = 'custom'
+    }
+    applyProviderRules()
+  },
+  { immediate: true }
+)
+
 watch(
   () => props.draft,
   (value) => {
     localDraft.value = cloneDraft(value)
+    selectedPreset.value = 'custom'
+    applyProviderRules()
   },
   { deep: true, immediate: true }
 )
 
-const providerOptions: Array<{ label: string; value: ProviderKind }> = [
-  { label: 'Mock', value: 'mock' },
-  { label: 'OpenAI', value: 'openAi' },
-  { label: 'Anthropic', value: 'anthropic' },
-  { label: 'OpenAI-Compatible', value: 'openAiCompatible' }
-]
+const applyPreset = (presetId: string) => {
+  applyingPreset.value = true
+  selectedPreset.value = presetId
+  const preset = presetOptions.find((item) => item.id === presetId)
+  if (!preset) {
+    applyingPreset.value = false
+    return
+  }
+
+  localDraft.value.kind = preset.kind
+  localDraft.value.model = preset.model
+  localDraft.value.baseUrl = preset.baseUrl
+  localDraft.value.authMode = preset.authMode
+  localDraft.value.oauthAuthorizeUrl = null
+  localDraft.value.oauthTokenUrl = null
+  localDraft.value.oauthClientId = null
+  localDraft.value.oauthScopes = ''
+  localDraft.value.clearOAuthToken = true
+  applyProviderRules()
+  applyingPreset.value = false
+}
 
 const clearApiKey = () => {
   localDraft.value.apiKey = ''
@@ -57,6 +169,11 @@ const clearApiKey = () => {
 }
 
 const save = () => {
+  if (isCodexProvider.value || localDraft.value.kind === 'mock') {
+    localDraft.value.apiKey = ''
+    localDraft.value.clearApiKey = true
+  }
+
   if (localDraft.value.apiKey?.trim()) {
     localDraft.value.clearApiKey = false
   }
@@ -97,6 +214,23 @@ const save = () => {
     </div>
 
     <section v-if="section === 'settings'" class="panel-grid">
+      <label class="field full-row">
+        <span>快速预设</span>
+        <select
+          :value="selectedPreset"
+          @change="applyPreset(($event.target as HTMLSelectElement).value)"
+        >
+          <option value="custom">自定义（保持当前）</option>
+          <option
+            v-for="preset in presetOptions"
+            :key="preset.id"
+            :value="preset.id"
+          >
+            {{ preset.label }}
+          </option>
+        </select>
+      </label>
+
       <label class="field">
         <span>Provider</span>
         <select v-model="localDraft.kind">
@@ -110,12 +244,13 @@ const save = () => {
         </select>
       </label>
 
-      <label class="field">
+      <label class="field" aria-label="auth-mode">
         <span>认证方式</span>
-        <select v-model="localDraft.authMode">
-          <option value="apiKey">API Key</option>
-          <option value="oauth">OAuth (PKCE)</option>
-        </select>
+        <input
+          :value="isCodexProvider ? 'Codex CLI OAuth 登录' : 'API Key'"
+          type="text"
+          readonly
+        />
       </label>
 
       <label class="field full-row">
@@ -123,16 +258,16 @@ const save = () => {
         <input v-model="localDraft.model" type="text" placeholder="例如 gpt-4.1-mini" />
       </label>
 
-      <label class="field full-row">
+      <label v-if="!isCodexProvider" class="field full-row">
         <span>Base URL</span>
         <input
           v-model="localDraft.baseUrl"
           type="text"
-          placeholder="OpenAI-compatible 可填写自定义网关"
+          placeholder="OpenAI-compatible 可填写自定义网关（本地 Ollama 也走这里）"
         />
       </label>
 
-      <template v-if="localDraft.authMode === 'apiKey'">
+      <template v-if="!isCodexProvider && localDraft.kind !== 'mock'">
         <label class="field full-row">
           <span>API Key</span>
           <input
@@ -149,12 +284,12 @@ const save = () => {
         </div>
       </template>
 
-      <template v-else>
+      <template v-if="isCodexProvider">
         <section class="oauth-shell full-row">
           <div class="oauth-header">
             <div>
               <strong>Codex CLI 登录</strong>
-              <p>会在系统终端执行 <code>codex login</code>，登录完成后回到这里刷新状态。</p>
+              <p>会在系统终端执行 <code>codex login</code>，完成后即可直接对话。</p>
             </div>
             <span class="oauth-status">{{ codexStatus.loggedIn ? '已登录' : '未登录' }}</span>
           </div>
@@ -183,7 +318,7 @@ const save = () => {
             <p v-if="codexStatus.version">版本：{{ codexStatus.version }}</p>
             <p v-if="codexStatus.authPath">凭据路径：{{ codexStatus.authPath }}</p>
             <p>{{ codexStatus.message }}</p>
-            <p>通用 OAuth 字段对官方 Codex 登录不生效，保持为空即可。</p>
+            <p>Codex CLI Provider 不使用通用 OAuth 字段，只看本机 codex 登录状态。</p>
             <p v-if="oauthNotice">{{ oauthNotice }}</p>
           </div>
         </section>

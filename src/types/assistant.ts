@@ -1,6 +1,6 @@
 export type PetMode = 'idle' | 'listening' | 'thinking' | 'speaking' | 'guarded'
 
-export type ProviderKind = 'mock' | 'openAi' | 'anthropic' | 'openAiCompatible'
+export type ProviderKind = 'mock' | 'codexCli' | 'openAi' | 'anthropic' | 'openAiCompatible'
 export type ProviderAuthMode = 'apiKey' | 'oauth'
 export type OAuthStatus = 'signedOut' | 'pending' | 'authorized' | 'error'
 

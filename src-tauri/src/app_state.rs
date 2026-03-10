@@ -32,6 +32,7 @@ impl Default for PetMode {
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     Mock,
+    CodexCli,
     OpenAi,
     Anthropic,
     OpenAiCompatible,
@@ -41,6 +42,7 @@ impl ProviderKind {
     pub fn default_model(&self) -> &'static str {
         match self {
             Self::Mock => "penguin-guardian",
+            Self::CodexCli => "gpt-5-codex",
             Self::OpenAi => "gpt-4.1-mini",
             Self::Anthropic => "claude-3-5-sonnet-latest",
             Self::OpenAiCompatible => "llama3.1",
@@ -50,6 +52,7 @@ impl ProviderKind {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Mock => "Mock",
+            Self::CodexCli => "Codex CLI",
             Self::OpenAi => "OpenAI",
             Self::Anthropic => "Anthropic",
             Self::OpenAiCompatible => "OpenAI-Compatible",
