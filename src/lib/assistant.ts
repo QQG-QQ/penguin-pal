@@ -209,9 +209,49 @@ let fallbackOAuthStateValue = 'demo-oauth-state'
 const isTauriRuntime = () =>
   typeof window !== 'undefined' && typeof window.__TAURI_INTERNALS__ !== 'undefined'
 
+const normalizeRuntimeError = (error: unknown): Error => {
+  if (error instanceof Error) {
+    return error
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return new Error(error)
+  }
+
+  if (typeof error === 'number' || typeof error === 'boolean' || typeof error === 'bigint') {
+    return new Error(String(error))
+  }
+
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>
+    const message = [record.message, record.error, record.cause].find(
+      (value) => typeof value === 'string' && value.trim()
+    )
+    if (typeof message === 'string') {
+      return new Error(message)
+    }
+
+    try {
+      const serialized = JSON.stringify(record)
+      if (serialized && serialized !== '{}' && serialized !== 'null') {
+        return new Error(serialized)
+      }
+    } catch {
+      // ignore JSON serialization errors and fall back to default message
+    }
+
+    const text = String(error)
+    if (text && text !== '[object Object]') {
+      return new Error(text)
+    }
+  }
+
+  return new Error('Tauri backend call failed')
+}
+
 const rethrowIfDesktopRuntime = (error: unknown): void => {
   if (isTauriRuntime()) {
-    throw error instanceof Error ? error : new Error('Tauri backend call failed')
+    throw normalizeRuntimeError(error)
   }
 }
 
