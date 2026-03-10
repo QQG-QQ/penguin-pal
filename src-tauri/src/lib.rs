@@ -7,7 +7,7 @@ mod tray;
 mod window;
 
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     ai::{guardrails, memory, provider},
@@ -27,51 +27,6 @@ fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
         &allowed_actions,
     );
     runtime.to_snapshot(audio::default_audio_profile(), allowed_actions, ai_constraints)
-}
-
-#[tauri::command]
-fn show_settings_window(app: AppHandle) -> Result<bool, String> {
-    if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.unminimize();
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(true);
-    }
-
-    let config = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|window| window.label == "settings")
-        .ok_or_else(|| "未找到 settings 窗口配置".to_string())?;
-
-    let window = WebviewWindowBuilder::from_config(&app, config)
-        .map_err(|error| error.to_string())?
-        .build()
-        .map_err(|error| error.to_string())?;
-    let _ = window.unminimize();
-    window.show().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())?;
-    Ok(true)
-}
-
-#[tauri::command]
-fn hide_settings_window(app: AppHandle) -> Result<bool, String> {
-    if let Some(window) = app.get_webview_window("settings") {
-        window.hide().map_err(|error| error.to_string())?;
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-#[tauri::command]
-fn start_main_window_drag(app: AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "未找到主窗口".to_string())?;
-    window.start_dragging().map_err(|error| error.to_string())
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
@@ -687,9 +642,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            show_settings_window,
-            hide_settings_window,
-            start_main_window_drag,
             get_assistant_snapshot,
             save_provider_config,
             start_oauth_sign_in,

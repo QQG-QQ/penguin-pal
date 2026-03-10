@@ -493,19 +493,9 @@ const maybeHandleLocalCommand = async (content: string) => {
   }
 
   if (
-    [
-      '打开设置',
-      '显示设置',
-      '模型设置',
-      '安全设置',
-      '系统设置',
-      '打开配置',
-      'oauth设置',
-      'oauth登录',
-      '打开设备',
-      '显示设备',
-      '设备设置'
-    ].some((token) => normalized.includes(normalizeCommand(token)))
+    ['打开设置', '显示设置', '模型设置', '安全设置', '系统设置', '打开配置', 'oauth设置', 'oauth登录'].some((token) =>
+      normalized.includes(normalizeCommand(token))
+    )
   ) {
     const opened = await openDrawer('settings')
     announce(
