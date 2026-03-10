@@ -13,15 +13,13 @@
     "windows": [
       {
         "title": "PenguinPal",
-        "width": 460,
-        "height": 920,
+        "width": 320,
+        "height": 540,
         "resizable": false,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "x": 1420,
-        "y": 120
+        "skipTaskbar": true
       }
     ],
     "trayIcon": {

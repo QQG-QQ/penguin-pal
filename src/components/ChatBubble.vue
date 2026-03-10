@@ -26,8 +26,8 @@ const modeLabel = computed(() => {
   return map[props.mode]
 })
 
-const visibleMessages = computed(() => props.messages.slice(-8))
-const visibleAudit = computed(() => props.auditTrail.slice(0, 3))
+const visibleMessages = computed(() => props.messages.slice(-4))
+const visibleAudit = computed(() => props.auditTrail.slice(0, 2))
 
 const formatTime = (value: number) =>
   new Intl.DateTimeFormat('zh-CN', {
@@ -40,8 +40,8 @@ const formatTime = (value: number) =>
   <section class="chat-panel">
     <header class="panel-header">
       <div>
-        <p class="eyebrow">Phase 2-5 Console</p>
-        <h2>对话与审计</h2>
+        <p class="eyebrow">Pet Chat</p>
+        <h2>最近对话</h2>
       </div>
       <button class="close-btn" type="button" @click="$emit('close')">
         收起
@@ -51,7 +51,7 @@ const formatTime = (value: number) =>
     <div class="status-row">
       <span class="status-pill">{{ modeLabel }}</span>
       <span class="status-pill status-provider">{{ providerLabel }}</span>
-      <span class="status-pill">L{{ permissionLevel }} 白名单</span>
+      <span class="status-pill">L{{ permissionLevel }}</span>
     </div>
 
     <div class="messages">
@@ -68,14 +68,14 @@ const formatTime = (value: number) =>
       </article>
 
       <div v-if="visibleMessages.length === 0" class="empty">
-        现在还没有对话记录。你可以输入文字，或者按住语音键直接和她说话。
+        现在还没有对话记录。输入文字或按住说话，她就会开始回应。
       </div>
     </div>
 
     <section class="audit-panel">
       <div class="audit-header">
         <h3>安全审计</h3>
-        <span>最近 3 条</span>
+        <span>最近 2 条</span>
       </div>
 
       <div v-if="visibleAudit.length === 0" class="audit-empty">
@@ -99,28 +99,29 @@ const formatTime = (value: number) =>
 
 <style scoped>
 .chat-panel {
-  width: min(100%, 360px);
-  padding: 18px;
-  border-radius: 28px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(242, 249, 252, 0.98));
-  color: #143040;
+  width: 100%;
+  padding: 14px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #153748;
   box-shadow:
-    0 24px 48px rgba(10, 24, 37, 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    0 14px 26px rgba(8, 22, 34, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
 }
 
-.panel-header {
+.panel-header,
+.audit-header,
+.audit-topline {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
+  gap: 10px;
+  align-items: center;
 }
 
 .panel-header h2,
 .audit-header h3 {
   margin: 4px 0 0;
-  font-size: 20px;
+  font-size: 18px;
 }
 
 .eyebrow {
@@ -132,9 +133,10 @@ const formatTime = (value: number) =>
 }
 
 .close-btn {
-  padding: 10px 12px;
+  min-height: 32px;
+  padding: 0 11px;
   border: none;
-  border-radius: 14px;
+  border-radius: 999px;
   background: rgba(20, 48, 64, 0.08);
   color: #17384b;
   cursor: pointer;
@@ -144,14 +146,14 @@ const formatTime = (value: number) =>
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 16px 0;
+  margin: 12px 0;
 }
 
 .status-pill {
   display: inline-flex;
   align-items: center;
-  min-height: 30px;
-  padding: 0 12px;
+  min-height: 28px;
+  padding: 0 11px;
   border-radius: 999px;
   background: rgba(17, 87, 122, 0.09);
   color: #17445b;
@@ -164,26 +166,25 @@ const formatTime = (value: number) =>
 
 .messages {
   display: grid;
-  gap: 10px;
-  max-height: 260px;
+  gap: 8px;
+  max-height: 152px;
   overflow-y: auto;
-  padding-right: 4px;
 }
 
 .message {
-  padding: 12px 14px;
-  border-radius: 18px;
+  padding: 10px 12px;
+  border-radius: 16px;
 }
 
 .message.user {
-  margin-left: 28px;
+  margin-left: 18px;
   background: linear-gradient(135deg, #0f7aa5, #1798aa);
   color: #f4fbff;
 }
 
 .message.assistant,
 .message.system {
-  margin-right: 28px;
+  margin-right: 18px;
   background: rgba(15, 54, 77, 0.08);
 }
 
@@ -191,7 +192,7 @@ const formatTime = (value: number) =>
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 6px;
+  margin-bottom: 5px;
   color: rgba(20, 48, 64, 0.64);
   font-size: 11px;
   letter-spacing: 0.04em;
@@ -201,42 +202,34 @@ const formatTime = (value: number) =>
 .message p,
 .audit-entry p {
   margin: 0;
-  line-height: 1.5;
+  line-height: 1.45;
   white-space: pre-wrap;
 }
 
 .empty,
 .audit-empty {
-  padding: 18px;
-  border-radius: 18px;
+  padding: 14px;
+  border-radius: 16px;
   background: rgba(14, 48, 68, 0.06);
   color: rgba(20, 48, 64, 0.72);
   text-align: center;
 }
 
 .audit-panel {
-  margin-top: 18px;
-  padding: 14px;
-  border-radius: 20px;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 18px;
   background: rgba(17, 38, 48, 0.05);
 }
 
-.audit-header,
-.audit-topline {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  align-items: center;
-}
-
 .audit-header {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   color: rgba(20, 48, 64, 0.74);
   font-size: 12px;
 }
 
 .audit-entry {
-  padding: 12px 0;
+  padding-top: 10px;
   border-top: 1px solid rgba(18, 58, 76, 0.08);
 }
 

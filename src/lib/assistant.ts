@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import type {
   ActionExecutionResult,
   AssistantSnapshot,
@@ -284,5 +285,18 @@ export const clearConversation = async (): Promise<AssistantSnapshot> => {
   } catch {
     fallbackSnapshot = buildFallbackSnapshot()
     return clone(fallbackSnapshot)
+  }
+}
+
+export const hideAssistantWindow = async (): Promise<boolean> => {
+  if (!isTauriRuntime()) {
+    return false
+  }
+
+  try {
+    await getCurrentWindow().hide()
+    return true
+  } catch (error) {
+    throw error instanceof Error ? error : new Error('桌宠隐藏失败，请改用托盘菜单恢复或退出。')
   }
 }

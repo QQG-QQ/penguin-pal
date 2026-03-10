@@ -14,10 +14,10 @@ const emit = defineEmits<{
 <template>
   <section class="control-panel">
     <div class="panel-copy">
-      <p class="eyebrow">Phase 4 Security Gate</p>
-      <h2>白名单动作</h2>
+      <p class="eyebrow">Action Gate</p>
+      <h2>受控动作</h2>
       <p>
-        AI 只能建议动作，真正执行必须走这个白名单面板。高风险动作一律要求人工确认。
+        AI 只能建议动作，真正执行必须走白名单。高风险动作一律要求人工确认。
       </p>
     </div>
 
@@ -43,27 +43,26 @@ const emit = defineEmits<{
     </div>
 
     <div class="security-note">
-      当前权限等级：L{{ permissionLevel }}。L3 保留给未来自动化能力，当前版本不会开放自由脚本执行。
+      当前权限等级：L{{ permissionLevel }}。桌宠不会开放自由脚本执行或未确认的高危系统操作。
     </div>
   </section>
 </template>
 
 <style scoped>
 .control-panel {
-  width: min(100%, 360px);
-  padding: 18px;
-  border-radius: 28px;
-  background:
-    linear-gradient(180deg, rgba(6, 23, 35, 0.95), rgba(11, 30, 44, 0.98));
+  width: 100%;
+  padding: 14px;
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(7, 28, 41, 0.96), rgba(10, 24, 38, 0.98));
   color: #ebf7fb;
   box-shadow:
-    0 20px 40px rgba(5, 14, 24, 0.24),
+    0 16px 32px rgba(5, 14, 24, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 .panel-copy h2 {
   margin: 4px 0 8px;
-  font-size: 20px;
+  font-size: 18px;
 }
 
 .panel-copy p {
@@ -82,14 +81,14 @@ const emit = defineEmits<{
 
 .action-grid {
   display: grid;
-  gap: 10px;
-  margin: 16px 0;
+  gap: 8px;
+  margin: 14px 0;
 }
 
 .action-card {
-  padding: 14px;
+  padding: 12px;
   border: 1px solid rgba(186, 233, 241, 0.08);
-  border-radius: 20px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.06);
   color: inherit;
   text-align: left;
@@ -105,33 +104,34 @@ const emit = defineEmits<{
 .action-foot {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
 }
 
 .action-topline strong {
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .action-topline span,
 .action-foot span {
-  color: rgba(215, 238, 245, 0.7);
-  font-size: 12px;
+  color: rgba(215, 238, 245, 0.72);
+  font-size: 11px;
 }
 
 .action-summary {
   display: block;
-  margin: 8px 0 10px;
+  margin: 6px 0 8px;
   color: rgba(235, 247, 251, 0.84);
-  line-height: 1.5;
+  line-height: 1.45;
+  font-size: 13px;
 }
 
 .security-note {
   padding: 12px 14px;
-  border-radius: 18px;
+  border-radius: 16px;
   background: rgba(255, 177, 83, 0.12);
   color: #ffd9a4;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
 }
 </style>
