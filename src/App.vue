@@ -42,6 +42,14 @@ const providerDefaults: Record<ProviderKind, string> = {
   openAiCompatible: 'llama3.1'
 }
 
+const providerLabels: Record<ProviderKind, string> = {
+  mock: 'Mock',
+  codexCli: 'Codex CLI',
+  openAi: 'OpenAI',
+  anthropic: 'Anthropic',
+  openAiCompatible: 'OpenAI-Compatible'
+}
+
 const DEFAULT_OAUTH_REDIRECT_URL = 'http://127.0.0.1:8976/oauth/callback'
 
 const actionCommandMap: Record<string, string[]> = {
@@ -164,6 +172,7 @@ let speechPlaybackActive = false
 
 const isSettingsView = computed(() => windowView.value === 'settings')
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
+const activeProviderLabel = computed(() => providerLabels[snapshot.value.provider.kind])
 
 const canSubmitApproval = computed(() => {
   if (!pendingApproval.value || busy.value) {
@@ -813,7 +822,7 @@ const saveSettings = async (draft: ProviderConfigInput) => {
   try {
     const nextSnapshot = await persistSettings(draft)
     await syncSnapshot(nextSnapshot)
-    announce('设置已经保存。')
+    announce(`设置已经保存，当前对话引擎：${providerLabels[nextSnapshot.provider.kind]}。`)
   } catch (error) {
     announce(error instanceof Error ? error.message : '保存配置失败', 'guarded')
   } finally {
@@ -848,10 +857,12 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
   oauthNotice.value = '正在启动 codex login...'
 
   try {
+    const nextSnapshot = await persistSettings(draft)
+    await syncSnapshot(nextSnapshot)
     const status = await startCodexCliLogin()
     codexStatus.value = status
     oauthNotice.value = status.message
-    announce(status.message)
+    announce(`${status.message} 当前聊天已切换到 Codex CLI。`)
   } catch (error) {
     const message = resolveErrorMessage(error, '启动 codex login 失败')
     oauthNotice.value = message
@@ -921,6 +932,7 @@ onBeforeUnmount(() => {
       :oauth-busy="authBusy"
       :oauth-notice="oauthNotice"
       :codex-status="codexStatus"
+      :current-provider-label="activeProviderLabel"
       :actions="snapshot.allowedActions"
       :permission-level="snapshot.permissionLevel"
       :ai-constraints="snapshot.aiConstraints"

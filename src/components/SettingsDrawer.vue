@@ -17,6 +17,7 @@ const props = defineProps<{
   oauthBusy: boolean
   oauthNotice: string
   codexStatus: CodexCliStatus
+  currentProviderLabel: string
   actions: DesktopAction[]
   permissionLevel: number
   aiConstraints: AiConstraintProfile
@@ -319,6 +320,7 @@ const save = () => {
             <p v-if="codexStatus.version">版本：{{ codexStatus.version }}</p>
             <p v-if="codexStatus.runtimePath">运行时路径：{{ codexStatus.runtimePath }}</p>
             <p v-if="codexStatus.authPath">凭据路径：{{ codexStatus.authPath }}</p>
+            <p>当前聊天引擎：{{ currentProviderLabel }}</p>
             <p>{{ codexStatus.message }}</p>
             <p>Codex CLI Provider 会优先使用桌宠自己的私有运行时和私有登录目录，不依赖系统全局安装。</p>
             <p v-if="oauthNotice">{{ oauthNotice }}</p>

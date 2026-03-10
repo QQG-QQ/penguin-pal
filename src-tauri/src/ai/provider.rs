@@ -5,7 +5,11 @@ use crate::{
 };
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::{path::Path, process::Command};
+use std::{
+    io::Write,
+    path::Path,
+    process::{Command, Stdio},
+};
 use tauri::async_runtime;
 
 pub async fn respond(
@@ -106,7 +110,7 @@ pub fn fallback_reply(error: &str) -> String {
 }
 
 fn run_codex_exec(command: &str, home_root: &Path, prompt: &str) -> Result<String, String> {
-    let output = {
+    let mut child = {
         let mut cmd = Command::new(command);
         apply_private_env(&mut cmd, home_root);
         cmd
@@ -117,9 +121,21 @@ fn run_codex_exec(command: &str, home_root: &Path, prompt: &str) -> Result<Strin
         .arg("read-only")
         .arg("--ask-for-approval")
         .arg("never")
-        .arg(prompt)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("执行 codex exec 失败：{error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|error| format!("写入 Codex CLI 输入失败：{error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("等待 codex exec 完成失败：{error}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
