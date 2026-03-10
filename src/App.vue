@@ -1029,6 +1029,10 @@ body {
   width: 100%;
   height: 100%;
   background: linear-gradient(180deg, #f5fbfc, #e7f1f5);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .app-shell {
