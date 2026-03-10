@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "PenguinPal",
-        "width": 320,
-        "height": 540,
+        "width": 296,
+        "height": 430,
         "resizable": false,
         "decorations": false,
         "transparent": true,

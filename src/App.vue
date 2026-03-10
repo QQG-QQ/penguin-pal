@@ -1,7 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import ChatBubble from './components/ChatBubble.vue'
-import ControlPanel from './components/ControlPanel.vue'
 import InputBox from './components/InputBox.vue'
 import Penguin from './components/Penguin.vue'
 import SettingsDrawer from './components/SettingsDrawer.vue'
@@ -20,11 +18,11 @@ import {
 } from './lib/assistant'
 import type {
   ActionApprovalRequest,
+  AssistantSnapshot,
   DesktopAction,
   PetMode,
   ProviderConfigInput,
-  ProviderKind,
-  AssistantSnapshot
+  ProviderKind
 } from './types/assistant'
 
 const providerDefaults: Record<ProviderKind, string> = {
@@ -32,6 +30,14 @@ const providerDefaults: Record<ProviderKind, string> = {
   openAi: 'gpt-4.1-mini',
   anthropic: 'claude-3-5-sonnet-latest',
   openAiCompatible: 'llama3.1'
+}
+
+const actionCommandMap: Record<string, string[]> = {
+  open_notepad: ['打开记事本', '记事本'],
+  open_calculator: ['打开计算器', '计算器'],
+  open_downloads: ['打开下载目录', '下载目录', 'downloads'],
+  focus_window: ['唤起桌宠', '聚焦桌宠', '显示桌宠'],
+  show_window: ['显示主面板', '显示窗口']
 }
 
 const emptySnapshot = (): AssistantSnapshot => ({
@@ -73,21 +79,21 @@ const emptySnapshot = (): AssistantSnapshot => ({
   }
 })
 
-const toDraft = (snapshot: AssistantSnapshot): ProviderConfigInput => ({
-  kind: snapshot.provider.kind,
-  model: snapshot.provider.model || providerDefaults[snapshot.provider.kind],
-  baseUrl: snapshot.provider.baseUrl,
-  systemPrompt: snapshot.provider.systemPrompt,
-  allowNetwork: snapshot.provider.allowNetwork,
-  voiceReply: snapshot.provider.voiceReply,
-  retainHistory: snapshot.provider.retainHistory,
-  permissionLevel: snapshot.permissionLevel,
-  authMode: snapshot.provider.authMode,
-  oauthAuthorizeUrl: snapshot.provider.oauth.authorizeUrl,
-  oauthTokenUrl: snapshot.provider.oauth.tokenUrl,
-  oauthClientId: snapshot.provider.oauth.clientId,
-  oauthRedirectUrl: snapshot.provider.oauth.redirectUrl,
-  oauthScopes: snapshot.provider.oauth.scopes.join(' '),
+const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
+  kind: state.provider.kind,
+  model: state.provider.model || providerDefaults[state.provider.kind],
+  baseUrl: state.provider.baseUrl,
+  systemPrompt: state.provider.systemPrompt,
+  allowNetwork: state.provider.allowNetwork,
+  voiceReply: state.provider.voiceReply,
+  retainHistory: state.provider.retainHistory,
+  permissionLevel: state.permissionLevel,
+  authMode: state.provider.authMode,
+  oauthAuthorizeUrl: state.provider.oauth.authorizeUrl,
+  oauthTokenUrl: state.provider.oauth.tokenUrl,
+  oauthClientId: state.provider.oauth.clientId,
+  oauthRedirectUrl: state.provider.oauth.redirectUrl,
+  oauthScopes: state.provider.oauth.scopes.join(' '),
   apiKey: '',
   clearApiKey: false,
   clearOAuthToken: false
@@ -95,40 +101,27 @@ const toDraft = (snapshot: AssistantSnapshot): ProviderConfigInput => ({
 
 const snapshot = ref<AssistantSnapshot>(emptySnapshot())
 const settingsDraft = ref<ProviderConfigInput>(toDraft(snapshot.value))
-const expanded = ref(false)
-const panelMode = ref<'chat' | 'actions'>('chat')
 const showSettings = ref(false)
+const drawerSection = ref<'settings' | 'actions'>('settings')
 const messageDraft = ref('')
+const bubbleText = ref('')
 const busy = ref(false)
 const savingSettings = ref(false)
 const authBusy = ref(false)
-const feedback = ref('管理员企鹅待命中。点击她展开对话，或直接隐藏到托盘。')
 const pendingApproval = ref<ActionApprovalRequest | null>(null)
 const approvalPhrase = ref('')
 const approvalChecks = ref<Record<string, boolean>>({})
 const listening = ref(false)
 const visualMode = ref<PetMode | null>(null)
+const microphoneAvailable = ref(false)
 
 let recognition: SpeechRecognition | null = null
 let recognitionBuffer = ''
 let submitVoiceAfterStop = false
-
-const quickPrompts = [
-  '今天有什么需要我记住的？',
-  '告诉我当前安全边界',
-  '打开受控动作面板'
-]
-
-const providerLabel = computed(() => {
-  const labels: Record<ProviderKind, string> = {
-    mock: 'Mock',
-    openAi: 'OpenAI',
-    anthropic: 'Anthropic',
-    openAiCompatible: 'OpenAI-Compatible'
-  }
-
-  return labels[snapshot.value.provider.kind]
-})
+let bubbleTimer: number | null = null
+let speechSession = 0
+let mediaDevicesCleanup: (() => void) | null = null
+let microphonePermissionRequested = false
 
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
 
@@ -142,46 +135,109 @@ const canSubmitApproval = computed(() => {
   return phraseMatches && checksReady
 })
 
-const voiceSupported = computed(
+const speechRecognitionSupported = computed(
   () =>
     typeof window !== 'undefined' &&
     Boolean(window.SpeechRecognition || window.webkitSpeechRecognition)
+)
+
+const voiceInputAvailable = computed(
+  () => speechRecognitionSupported.value && microphoneAvailable.value
 )
 
 const voiceReplySupported = computed(
   () => typeof window !== 'undefined' && 'speechSynthesis' in window
 )
 
+const normalizeCommand = (value: string) => value.replace(/\s+/g, '').toLowerCase()
+
 const applySnapshot = (nextSnapshot: AssistantSnapshot) => {
   snapshot.value = nextSnapshot
   settingsDraft.value = toDraft(nextSnapshot)
 }
 
-const resetVisualModeSoon = (delay = 800) => {
+const clearBubbleTimer = () => {
+  if (bubbleTimer !== null) {
+    window.clearTimeout(bubbleTimer)
+    bubbleTimer = null
+  }
+}
+
+const clearBubble = () => {
+  clearBubbleTimer()
+  bubbleText.value = ''
+}
+
+const resetVisualModeSoon = (delay = 700) => {
   window.setTimeout(() => {
-    if (!listening.value && !busy.value) {
+    if (!listening.value && !busy.value && !bubbleText.value) {
       visualMode.value = null
     }
   }, delay)
 }
 
-const openChatPanel = () => {
-  panelMode.value = 'chat'
-  expanded.value = true
+const showBubble = (content: string, mode: PetMode = 'speaking', duration = 4200) => {
+  const session = ++speechSession
+  if (voiceReplySupported.value) {
+    window.speechSynthesis.cancel()
+  }
+  clearBubbleTimer()
+  bubbleText.value = content
+  visualMode.value = mode
+  bubbleTimer = window.setTimeout(() => {
+    if (session !== speechSession) {
+      return
+    }
+    bubbleText.value = ''
+    resetVisualModeSoon(0)
+  }, duration)
 }
 
-const openActionPanel = () => {
-  panelMode.value = 'actions'
-  expanded.value = true
-}
-
-const togglePanel = () => {
-  if (expanded.value) {
-    expanded.value = false
+const speakReply = (content: string) => {
+  if (!snapshot.value.provider.voiceReply || !voiceReplySupported.value) {
+    showBubble(content, 'speaking')
     return
   }
 
-  openChatPanel()
+  const session = ++speechSession
+  clearBubbleTimer()
+  window.speechSynthesis.cancel()
+
+  const utterance = new SpeechSynthesisUtterance(content)
+  utterance.lang = 'zh-CN'
+  utterance.rate = 1
+  utterance.pitch = 1.04
+  utterance.onstart = () => {
+    if (session !== speechSession) {
+      return
+    }
+    bubbleText.value = content
+    visualMode.value = 'speaking'
+  }
+  utterance.onend = () => {
+    if (session !== speechSession) {
+      return
+    }
+    bubbleText.value = ''
+    resetVisualModeSoon()
+  }
+  utterance.onerror = () => {
+    if (session !== speechSession) {
+      return
+    }
+    showBubble(content, 'speaking')
+  }
+
+  window.speechSynthesis.speak(utterance)
+}
+
+const announce = (content: string, mode: PetMode = 'speaking') => {
+  if (mode === 'speaking') {
+    speakReply(content)
+    return
+  }
+
+  showBubble(content, mode)
 }
 
 const clearPendingApproval = () => {
@@ -210,77 +266,245 @@ const toggleApprovalCheck = (checkId: string, checked: boolean) => {
   }
 }
 
-const speakReply = (content: string) => {
-  if (!snapshot.value.provider.voiceReply || !voiceReplySupported.value) {
-    visualMode.value = null
+const persistSettings = async (draft: ProviderConfigInput) => {
+  const nextDraft = JSON.parse(JSON.stringify(draft)) as ProviderConfigInput
+  if (!nextDraft.model.trim()) {
+    nextDraft.model = providerDefaults[nextDraft.kind]
+  }
+
+  const nextSnapshot = await saveProviderConfig(nextDraft)
+  applySnapshot(nextSnapshot)
+  return nextSnapshot
+}
+
+const refreshMicrophoneAvailability = async (requestPermission = false) => {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
+    microphoneAvailable.value = false
+    return false
+  }
+
+  const detect = async () => {
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    return devices.some((device) => device.kind === 'audioinput')
+  }
+
+  try {
+    let available = await detect()
+
+    if (
+      !available &&
+      requestPermission &&
+      !microphonePermissionRequested &&
+      navigator.mediaDevices.getUserMedia
+    ) {
+      microphonePermissionRequested = true
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream.getTracks().forEach((track) => track.stop())
+      available = await detect()
+    }
+
+    microphoneAvailable.value = available
+    return available
+  } catch {
+    microphoneAvailable.value = false
+    return false
+  }
+}
+
+const setupMediaDeviceWatcher = () => {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.addEventListener) {
+    mediaDevicesCleanup = null
     return
   }
 
-  window.speechSynthesis.cancel()
-
-  const utterance = new SpeechSynthesisUtterance(content)
-  utterance.lang = 'zh-CN'
-  utterance.rate = 1
-  utterance.pitch = 1.05
-  utterance.onstart = () => {
-    visualMode.value = 'speaking'
-    feedback.value = '正在通过系统语音播报回复...'
-  }
-  utterance.onend = () => {
-    visualMode.value = null
-  }
-  utterance.onerror = () => {
-    feedback.value = '系统语音播报失败，但文字回复已送达。'
-    visualMode.value = 'guarded'
-    resetVisualModeSoon()
+  const onDeviceChange = () => {
+    void refreshMicrophoneAvailability()
   }
 
-  window.speechSynthesis.speak(utterance)
+  navigator.mediaDevices.addEventListener('devicechange', onDeviceChange)
+  mediaDevicesCleanup = () => {
+    navigator.mediaDevices.removeEventListener('devicechange', onDeviceChange)
+  }
 }
 
 const loadSnapshot = async () => {
   try {
     const loaded = await getAssistantSnapshot()
     applySnapshot(loaded)
-    feedback.value = `管理员企鹅已就位。当前 Provider：${providerLabel.value}。`
   } catch (error) {
-    feedback.value =
-      error instanceof Error ? error.message : '加载助手状态失败，已保留本地默认配置。'
+    announce(
+      error instanceof Error ? error.message : '加载助手状态失败，已保留本地默认配置。',
+      'guarded'
+    )
   }
 }
 
-const sendMessage = async (value = messageDraft.value) => {
-  const content = value.trim()
+const findDirectAction = (content: string) => {
+  const normalized = normalizeCommand(content)
 
-  if (!content || busy.value) {
+  return (
+    snapshot.value.allowedActions.find((action) => {
+      const keywords = actionCommandMap[action.id] ?? [action.title]
+      return keywords.some((keyword) => normalized.includes(normalizeCommand(keyword)))
+    }) ?? null
+  )
+}
+
+const openDrawer = (section: 'settings' | 'actions') => {
+  drawerSection.value = section
+  showSettings.value = true
+}
+
+const hidePet = async () => {
+  showSettings.value = false
+
+  try {
+    const hidden = await hideAssistantWindow()
+    if (!hidden) {
+      announce('当前不是 Tauri 运行时，已仅收起弹出的浮层。', 'guarded')
+    }
+  } catch (error) {
+    announce(error instanceof Error ? error.message : '隐藏桌宠失败', 'guarded')
+  }
+}
+
+const resetConversation = async (announceAfter = false) => {
+  try {
+    const nextSnapshot = await clearConversation()
+    applySnapshot(nextSnapshot)
+    clearPendingApproval()
+    if (announceAfter) {
+      announce('对话已经清空，重新回到默认陪伴状态。')
+    }
+  } catch (error) {
+    announce(error instanceof Error ? error.message : '清空会话失败', 'guarded')
+  }
+}
+
+const triggerAction = async (action: DesktopAction) => {
+  if (busy.value) {
     return
   }
 
   busy.value = true
+  visualMode.value = 'guarded'
+
+  try {
+    const result = await requestDesktopAction(action.id)
+    applySnapshot(result.snapshot)
+    showSettings.value = false
+    setPendingApproval(result.approvalRequest)
+    announce(result.message, result.approvalRequest ? 'guarded' : 'speaking')
+  } catch (error) {
+    announce(error instanceof Error ? error.message : '动作执行失败', 'guarded')
+  } finally {
+    busy.value = false
+    resetVisualModeSoon(900)
+  }
+}
+
+const handleActionTrigger = (action: DesktopAction) => {
+  void triggerAction(action)
+}
+
+const maybeHandleLocalCommand = async (content: string) => {
+  const normalized = normalizeCommand(content)
+  if (!normalized) {
+    return false
+  }
+
+  if (
+    ['打开设置', '显示设置', '模型设置', '安全设置', '系统设置', '打开配置', 'oauth设置', 'oauth登录'].some((token) =>
+      normalized.includes(normalizeCommand(token))
+    )
+  ) {
+    openDrawer('settings')
+    announce('设置已经打开，你可以调整模型、OAuth、安全边界和受控动作。')
+    return true
+  }
+
+  if (['关闭设置', '收起设置'].some((token) => normalized.includes(normalizeCommand(token)))) {
+    showSettings.value = false
+    announce('设置已经收起。')
+    return true
+  }
+
+  if (
+    ['打开动作面板', '显示动作面板', '受控动作', '动作面板', '打开动作', '动作设置'].some((token) =>
+      normalized.includes(normalizeCommand(token))
+    )
+  ) {
+    openDrawer('actions')
+    announce('动作页已经打开。高风险动作仍然需要逐项确认。')
+    return true
+  }
+
+  if (
+    ['关闭动作面板', '收起动作面板'].some((token) => normalized.includes(normalizeCommand(token)))
+  ) {
+    if (drawerSection.value === 'actions') {
+      showSettings.value = false
+    }
+    announce('动作列表已经收起。')
+    return true
+  }
+
+  if (['清空对话', '清空会话', '重置会话'].some((token) => normalized.includes(normalizeCommand(token)))) {
+    await resetConversation(true)
+    return true
+  }
+
+  if (
+    ['隐藏到托盘', '隐藏桌宠', '收起桌宠', '关闭桌宠', '最小化到托盘'].some((token) =>
+      normalized.includes(normalizeCommand(token))
+    )
+  ) {
+    await hidePet()
+    return true
+  }
+
+  const directAction = findDirectAction(content)
+  if (directAction) {
+    await triggerAction(directAction)
+    return true
+  }
+
+  return false
+}
+
+const sendMessage = async (value = messageDraft.value) => {
+  const content = value.trim()
+  if (!content || busy.value) {
+    return
+  }
+
   messageDraft.value = ''
-  feedback.value = '正在请求助手回复并校验安全边界...'
+  if (voiceReplySupported.value) {
+    window.speechSynthesis.cancel()
+  }
+  clearBubble()
+
+  if (await maybeHandleLocalCommand(content)) {
+    return
+  }
+
+  busy.value = true
   visualMode.value = 'thinking'
-  openChatPanel()
 
   try {
     const response = await sendChatMessage(content)
     applySnapshot(response.snapshot)
-    feedback.value = `${response.providerLabel} 已回复。`
-    speakReply(response.reply.content)
-    if (!snapshot.value.provider.voiceReply || !voiceReplySupported.value) {
-      resetVisualModeSoon()
-    }
+    announce(response.reply.content)
   } catch (error) {
-    visualMode.value = 'guarded'
-    feedback.value = error instanceof Error ? error.message : '消息发送失败'
-    resetVisualModeSoon(1400)
+    announce(error instanceof Error ? error.message : '消息发送失败', 'guarded')
   } finally {
     busy.value = false
+    resetVisualModeSoon(900)
   }
 }
 
 const ensureRecognition = () => {
-  if (!voiceSupported.value) {
+  if (!voiceInputAvailable.value) {
     return null
   }
 
@@ -312,9 +536,7 @@ const ensureRecognition = () => {
   recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
     listening.value = false
     submitVoiceAfterStop = false
-    feedback.value = `语音识别失败：${event.error}`
-    visualMode.value = 'guarded'
-    resetVisualModeSoon(1600)
+    announce(`语音识别失败：${event.error}`, 'guarded')
   }
 
   recognition.onend = () => {
@@ -325,28 +547,29 @@ const ensureRecognition = () => {
     submitVoiceAfterStop = false
 
     if (shouldSend) {
-      feedback.value = '语音转写完成，正在发送...'
       void sendMessage(transcript)
       return
     }
 
-    feedback.value = '已结束语音输入。'
-    resetVisualModeSoon()
+    resetVisualModeSoon(200)
   }
 
   return recognition
 }
 
-const startListening = () => {
+const startListening = async () => {
   if (busy.value || listening.value) {
     return
   }
 
-  const instance = ensureRecognition()
+  let instance = ensureRecognition()
+  if (!instance && speechRecognitionSupported.value) {
+    await refreshMicrophoneAvailability(true)
+    instance = ensureRecognition()
+  }
+
   if (!instance) {
-    feedback.value = '当前环境不支持语音输入，请改用文字对话。'
-    visualMode.value = 'guarded'
-    resetVisualModeSoon()
+    announce('当前没有检测到可用麦克风或语音识别环境，请改用文字输入。', 'guarded')
     return
   }
 
@@ -355,14 +578,14 @@ const startListening = () => {
     submitVoiceAfterStop = false
     listening.value = true
     visualMode.value = 'listening'
-    feedback.value = '按住说话中，松开后会自动转写并发送。'
-    openChatPanel()
+    if (voiceReplySupported.value) {
+      window.speechSynthesis.cancel()
+    }
+    clearBubble()
     instance.start()
   } catch {
-    feedback.value = '语音输入正在占用中，请稍后再试。'
     listening.value = false
-    visualMode.value = 'guarded'
-    resetVisualModeSoon()
+    announce('语音输入正在占用中，请稍后再试。', 'guarded')
   }
 }
 
@@ -373,35 +596,7 @@ const stopListening = () => {
 
   submitVoiceAfterStop = true
   visualMode.value = 'thinking'
-  feedback.value = '已松开，正在结束录音并转写...'
   recognition.stop()
-}
-
-const triggerAction = async (action: DesktopAction) => {
-  if (busy.value) {
-    return
-  }
-
-  busy.value = true
-  feedback.value = `正在申请动作：${action.title}`
-  visualMode.value = 'guarded'
-  openActionPanel()
-
-  try {
-    const result = await requestDesktopAction(action.id)
-    applySnapshot(result.snapshot)
-    feedback.value = result.message
-    setPendingApproval(result.approvalRequest)
-  } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '动作执行失败'
-  } finally {
-    busy.value = false
-    resetVisualModeSoon(1200)
-  }
-}
-
-const handleActionTrigger = (action: DesktopAction) => {
-  void triggerAction(action)
 }
 
 const confirmPendingAction = async () => {
@@ -410,7 +605,6 @@ const confirmPendingAction = async () => {
   }
 
   busy.value = true
-  feedback.value = `正在执行确认后的动作：${pendingApproval.value.action.title}`
   visualMode.value = 'guarded'
 
   try {
@@ -423,13 +617,13 @@ const confirmPendingAction = async () => {
       acknowledgedChecks
     )
     applySnapshot(result.snapshot)
-    feedback.value = result.message
     clearPendingApproval()
+    announce(result.message)
   } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '动作确认失败'
+    announce(error instanceof Error ? error.message : '动作确认失败', 'guarded')
   } finally {
     busy.value = false
-    resetVisualModeSoon(1200)
+    resetVisualModeSoon(900)
   }
 }
 
@@ -441,23 +635,12 @@ const cancelPendingAction = async () => {
   try {
     const nextSnapshot = await cancelDesktopActionApproval(pendingApproval.value.id)
     applySnapshot(nextSnapshot)
-    feedback.value = '本次动作授权已取消。'
+    announce('本次动作授权已取消。', 'guarded')
   } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '取消动作授权失败'
+    announce(error instanceof Error ? error.message : '取消动作授权失败', 'guarded')
   } finally {
     clearPendingApproval()
   }
-}
-
-const persistSettings = async (draft: ProviderConfigInput) => {
-  const nextDraft = JSON.parse(JSON.stringify(draft)) as ProviderConfigInput
-  if (!nextDraft.model.trim()) {
-    nextDraft.model = providerDefaults[nextDraft.kind]
-  }
-
-  const nextSnapshot = await saveProviderConfig(nextDraft)
-  applySnapshot(nextSnapshot)
-  return nextSnapshot
 }
 
 const saveSettings = async (draft: ProviderConfigInput) => {
@@ -465,9 +648,9 @@ const saveSettings = async (draft: ProviderConfigInput) => {
 
   try {
     await persistSettings(draft)
-    feedback.value = '模型和安全配置已保存。'
+    announce('设置已经保存。')
   } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '保存配置失败'
+    announce(error instanceof Error ? error.message : '保存配置失败', 'guarded')
   } finally {
     savingSettings.value = false
   }
@@ -480,16 +663,16 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
     await persistSettings(draft)
     const result = await startOAuthSignIn()
     applySnapshot(result.snapshot)
-    feedback.value = result.message
+    announce(result.message)
     if (result.authorizationUrl && typeof window !== 'undefined') {
       try {
         window.open(result.authorizationUrl, '_blank', 'noopener,noreferrer')
       } catch {
-        // Ignore browser open failure and keep the URL visible inside settings drawer.
+        announce('浏览器没有自动打开，你可以在设置浮层里复制授权链接。', 'guarded')
       }
     }
   } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '生成 OAuth 授权链接失败'
+    announce(error instanceof Error ? error.message : '生成 OAuth 授权链接失败', 'guarded')
   } finally {
     authBusy.value = false
   }
@@ -501,9 +684,9 @@ const finishOAuthLogin = async (callbackUrl: string) => {
   try {
     const result = await completeOAuthSignIn(callbackUrl)
     applySnapshot(result.snapshot)
-    feedback.value = result.message
+    announce(result.message)
   } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '完成 OAuth 登录失败'
+    announce(error instanceof Error ? error.message : '完成 OAuth 登录失败', 'guarded')
   } finally {
     authBusy.value = false
   }
@@ -515,74 +698,24 @@ const disconnectOAuthLogin = async () => {
   try {
     const result = await disconnectOAuthSignIn()
     applySnapshot(result.snapshot)
-    feedback.value = result.message
+    announce(result.message)
   } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '退出 OAuth 登录失败'
+    announce(error instanceof Error ? error.message : '退出 OAuth 登录失败', 'guarded')
   } finally {
     authBusy.value = false
   }
 }
 
-const toggleVoiceReply = (value: boolean) => {
-  settingsDraft.value = {
-    ...settingsDraft.value,
-    voiceReply: value
-  }
-  snapshot.value = {
-    ...snapshot.value,
-    provider: {
-      ...snapshot.value.provider,
-      voiceReply: value
-    }
-  }
-}
-
-const fillPrompt = (prompt: string) => {
-  if (prompt.includes('动作面板')) {
-    feedback.value = '已打开受控动作面板。'
-    openActionPanel()
-    return
-  }
-
-  messageDraft.value = prompt
-  openChatPanel()
-}
-
-const hidePet = async () => {
-  expanded.value = false
-  showSettings.value = false
-
-  try {
-    const hidden = await hideAssistantWindow()
-    if (!hidden) {
-      feedback.value = '当前不是 Tauri 运行时，已仅收起桌宠面板。'
-      return
-    }
-
-    feedback.value = '桌宠已隐藏到托盘，可随时恢复。'
-  } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '隐藏桌宠失败'
-  }
-}
-
-const resetConversation = async () => {
-  try {
-    const nextSnapshot = await clearConversation()
-    applySnapshot(nextSnapshot)
-    clearPendingApproval()
-    feedback.value = '对话历史已清空，并重新回到安全欢迎态。'
-    openChatPanel()
-  } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '清空会话失败'
-  }
-}
-
 onMounted(() => {
   void loadSnapshot()
+  void refreshMicrophoneAvailability(true)
+  setupMediaDeviceWatcher()
 })
 
 onBeforeUnmount(() => {
   recognition?.stop()
+  clearBubbleTimer()
+  mediaDevicesCleanup?.()
   if (voiceReplySupported.value) {
     window.speechSynthesis.cancel()
   }
@@ -591,118 +724,37 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-shell">
-    <div class="background-layer layer-a" />
-    <div class="background-layer layer-b" />
+    <div class="pet-stack">
+      <Penguin :mode="activeMode" :bubble-text="bubbleText" />
 
-    <transition name="panel">
-      <section v-if="expanded" class="pet-panel">
-        <header class="panel-toolbar">
-          <div class="panel-tabs">
-            <button
-              type="button"
-              class="panel-tab"
-              :class="{ active: panelMode === 'chat' }"
-              @click="panelMode = 'chat'"
-            >
-              对话
-            </button>
-            <button
-              type="button"
-              class="panel-tab"
-              :class="{ active: panelMode === 'actions' }"
-              @click="panelMode = 'actions'"
-            >
-              动作
-            </button>
-          </div>
-
-          <div class="panel-actions">
-            <button class="panel-chip" type="button" @click="showSettings = true">
-              设置
-            </button>
-            <button class="panel-chip muted" type="button" @click="resetConversation">
-              清空
-            </button>
-            <button class="panel-chip subtle" type="button" @click="expanded = false">
-              收起
-            </button>
-          </div>
-        </header>
-
-        <ChatBubble
-          v-if="panelMode === 'chat'"
-          :messages="snapshot.messages"
-          :mode="activeMode"
-          :provider-label="providerLabel"
-          :permission-level="snapshot.permissionLevel"
-          :audit-trail="snapshot.auditTrail"
-          @close="expanded = false"
-        />
-
-        <ControlPanel
-          v-else
-          :actions="snapshot.allowedActions"
-          :permission-level="snapshot.permissionLevel"
-          @trigger="handleActionTrigger"
-        />
-
-        <div v-if="panelMode === 'chat'" class="quick-prompts">
-          <button
-            v-for="prompt in quickPrompts"
-            :key="prompt"
-            type="button"
-            class="quick-prompt"
-            @click="fillPrompt(prompt)"
-          >
-            {{ prompt }}
-          </button>
-        </div>
-
-        <InputBox
-          v-if="panelMode === 'chat'"
-          v-model="messageDraft"
-          :busy="busy"
-          :listening="listening"
-          :voice-supported="voiceSupported"
-          :voice-reply-enabled="settingsDraft.voiceReply"
-          @send="sendMessage()"
-          @voice-start="startListening"
-          @voice-stop="stopListening"
-          @toggle-voice-reply="toggleVoiceReply"
-        />
-      </section>
-    </transition>
-
-    <div class="status-bubble" :class="`mode-${activeMode}`">
-      <span class="status-kicker">{{ expanded ? '桌宠面板已展开' : '点击企鹅展开面板' }}</span>
-      <p>{{ feedback }}</p>
+      <InputBox
+        v-model="messageDraft"
+        :busy="busy"
+        :listening="listening"
+        :voice-supported="voiceInputAvailable"
+        @send="sendMessage()"
+        @voice-start="startListening"
+        @voice-stop="stopListening"
+      />
     </div>
-
-    <Penguin
-      :mode="activeMode"
-      :subtitle="feedback"
-      :permission-level="snapshot.permissionLevel"
-      :expanded="expanded"
-      @activate="togglePanel"
-      @open-actions="openActionPanel"
-      @open-settings="showSettings = true"
-      @hide="hidePet"
-    />
-
-    <p class="pet-hint">托盘始终保留。隐藏后可从托盘或任务区图标恢复。</p>
 
     <SettingsDrawer
       :open="showSettings"
+      :section="drawerSection"
       :draft="settingsDraft"
       :saving="savingSettings"
-      :voice-supported="voiceSupported"
+      :voice-input-available="voiceInputAvailable"
       :oauth-state="snapshot.provider.oauth"
       :oauth-busy="authBusy"
+      :actions="snapshot.allowedActions"
+      :permission-level="snapshot.permissionLevel"
       @close="showSettings = false"
       @save="saveSettings"
+      @section-change="drawerSection = $event"
       @oauth-start="beginOAuthLogin"
       @oauth-complete="finishOAuthLogin"
       @oauth-disconnect="disconnectOAuthLogin"
+      @trigger-action="handleActionTrigger"
     />
 
     <transition name="confirm">
@@ -797,171 +849,25 @@ body {
   position: relative;
   width: 100%;
   height: 100%;
-  padding: 12px 10px 14px;
   display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 6px 8px 10px;
   overflow: hidden;
 }
 
-.background-layer {
-  position: absolute;
-  border-radius: 999px;
-  filter: blur(36px);
-  pointer-events: none;
-}
-
-.layer-a {
-  top: 10px;
-  left: -48px;
-  width: 180px;
-  height: 180px;
-  background: rgba(153, 234, 248, 0.2);
-}
-
-.layer-b {
-  right: -54px;
-  bottom: 24px;
-  width: 190px;
-  height: 190px;
-  background: rgba(255, 180, 113, 0.16);
-}
-
-.pet-panel,
-.status-bubble,
-.pet-hint {
+.pet-stack,
+.confirm-shell {
   position: relative;
   z-index: 2;
 }
 
-.pet-panel {
-  width: min(100%, 300px);
+.pet-stack {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 28px;
-  background: rgba(243, 250, 252, 0.84);
-  color: #143648;
-  backdrop-filter: blur(16px);
-  box-shadow:
-    0 20px 38px rgba(4, 17, 30, 0.18),
-    inset 0 1px 0 rgba(255, 255, 255, 0.72);
-}
-
-.panel-toolbar,
-.panel-tabs,
-.panel-actions,
-.quick-prompts,
-.confirm-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.panel-toolbar {
-  justify-content: space-between;
-  align-items: flex-start;
-}
-
-.panel-actions {
-  justify-content: flex-end;
-}
-
-.panel-tab,
-.panel-chip,
-.quick-prompt,
-.confirm-button {
-  min-height: 34px;
-  padding: 0 12px;
-  border: none;
-  border-radius: 999px;
-  cursor: pointer;
-}
-
-.panel-tab {
-  background: rgba(17, 59, 79, 0.08);
-  color: #305364;
-}
-
-.panel-tab.active {
-  background: linear-gradient(135deg, #0b6a8a, #16a085);
-  color: #effbff;
-}
-
-.panel-chip {
-  background: rgba(255, 255, 255, 0.92);
-  color: #17384b;
-}
-
-.panel-chip.muted {
-  background: rgba(17, 45, 63, 0.88);
-  color: rgba(241, 250, 255, 0.9);
-}
-
-.panel-chip.subtle {
-  background: rgba(17, 59, 79, 0.08);
-  color: #35576a;
-}
-
-.quick-prompts {
-  margin-top: -2px;
-}
-
-.quick-prompt {
-  background: rgba(11, 84, 116, 0.1);
-  color: #1c556f;
-}
-
-.status-bubble {
-  width: min(100%, 286px);
-  padding: 11px 14px;
-  border-radius: 20px;
-  background: rgba(8, 30, 44, 0.82);
-  color: #eef8fb;
-  backdrop-filter: blur(12px);
-  box-shadow: 0 16px 28px rgba(5, 16, 27, 0.22);
-}
-
-.status-bubble.mode-listening {
-  background: rgba(11, 92, 84, 0.86);
-}
-
-.status-bubble.mode-thinking {
-  background: rgba(98, 67, 24, 0.86);
-}
-
-.status-bubble.mode-speaking {
-  background: rgba(90, 49, 79, 0.84);
-}
-
-.status-bubble.mode-guarded {
-  background: rgba(97, 33, 33, 0.88);
-}
-
-.status-kicker {
-  display: block;
-  margin-bottom: 4px;
-  color: rgba(211, 233, 242, 0.78);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.status-bubble p,
-.pet-hint,
-.confirm-panel p {
-  margin: 0;
-  line-height: 1.5;
-}
-
-.pet-hint {
-  width: min(100%, 286px);
-  color: rgba(219, 240, 247, 0.72);
-  font-size: 12px;
-  text-align: center;
+  align-items: center;
+  gap: 6px;
+  width: min(100%, 284px);
 }
 
 .confirm-shell {
@@ -969,8 +875,16 @@ body {
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(4, 15, 24, 0.48);
+  padding: 12px;
+  background: rgba(4, 15, 24, 0.34);
   backdrop-filter: blur(10px);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
 }
 
 .confirm-panel {
@@ -979,20 +893,46 @@ body {
   border-radius: 28px;
   background: linear-gradient(180deg, rgba(251, 253, 254, 0.98), rgba(232, 243, 247, 0.98));
   color: #17384b;
-  box-shadow: 0 24px 56px rgba(5, 16, 28, 0.24);
+  box-shadow:
+    0 28px 48px rgba(5, 16, 27, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.confirm-panel h2 {
+  margin: 4px 0 0;
+  font-size: 20px;
 }
 
 .eyebrow {
-  margin: 0 0 4px;
-  color: #5a7988;
+  margin: 0;
+  color: rgba(210, 236, 245, 0.78);
   font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
-.confirm-panel h2 {
-  margin: 0 0 10px;
-  font-size: 22px;
+.panel-chip,
+.confirm-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.panel-chip {
+  background: rgba(255, 255, 255, 0.92);
+  color: #17384b;
+}
+
+.panel-chip.muted {
+  background: rgba(17, 45, 63, 0.9);
+  color: rgba(241, 250, 255, 0.92);
+}
+
+.confirm-panel p {
+  margin: 0;
+  line-height: 1.5;
 }
 
 .approval-list {
@@ -1038,12 +978,8 @@ body {
   font-size: 12px;
 }
 
-.confirm-actions {
-  margin-top: 16px;
-}
-
 .confirm-button {
-  background: linear-gradient(135deg, #0d7195, #17a58b);
+  background: linear-gradient(135deg, #0e7998, #18a07f);
   color: #effbff;
 }
 
@@ -1052,31 +988,13 @@ body {
   cursor: not-allowed;
 }
 
-.panel-enter-active,
-.panel-leave-active,
 .confirm-enter-active,
 .confirm-leave-active {
-  transition: opacity 0.18s ease;
+  transition: opacity 0.2s ease;
 }
 
-.panel-enter-active .pet-panel,
-.panel-leave-active .pet-panel,
-.confirm-enter-active .confirm-panel,
-.confirm-leave-active .confirm-panel {
-  transition: transform 0.18s ease;
-}
-
-.panel-enter-from,
-.panel-leave-to,
 .confirm-enter-from,
 .confirm-leave-to {
   opacity: 0;
-}
-
-.panel-enter-from .pet-panel,
-.panel-leave-to .pet-panel,
-.confirm-enter-from .confirm-panel,
-.confirm-leave-to .confirm-panel {
-  transform: translateY(12px);
 }
 </style>
