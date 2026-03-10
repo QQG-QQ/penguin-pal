@@ -1,6 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
 import { emit, emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import type {
   ActionApprovalRequest,
@@ -286,45 +285,13 @@ export const openSettingsWindow = async (section: SettingsSection = 'settings'):
     return browserSettingsWindow !== null
   }
 
-  const existing = await WebviewWindow.getByLabel(SETTINGS_WINDOW_LABEL)
-  if (existing) {
-    try {
-      await existing.unminimize()
-    } catch {
-      // no-op
-    }
-    await existing.show()
-    await existing.setFocus()
-    await emitTo(SETTINGS_WINDOW_LABEL, SETTINGS_SECTION_EVENT, { section })
-    return true
+  const opened = await safeInvoke<boolean>('show_settings_window')
+  if (!opened) {
+    return false
   }
 
-  return await new Promise<boolean>((resolve) => {
-    const settingsWindow = new WebviewWindow(SETTINGS_WINDOW_LABEL, {
-      url,
-      title: 'PenguinPal 设置',
-      width: 820,
-      height: 760,
-      minWidth: 680,
-      minHeight: 620,
-      resizable: true,
-      decorations: true,
-      transparent: false,
-      center: true,
-      focus: true,
-      alwaysOnTop: false,
-      skipTaskbar: false
-    })
-
-    void settingsWindow.once('tauri://created', async () => {
-      await emitTo(SETTINGS_WINDOW_LABEL, SETTINGS_SECTION_EVENT, { section })
-      resolve(true)
-    })
-
-    void settingsWindow.once('tauri://error', () => {
-      resolve(false)
-    })
-  })
+  await emitTo(SETTINGS_WINDOW_LABEL, SETTINGS_SECTION_EVENT, { section })
+  return true
 }
 
 export const closeSettingsWindow = async (): Promise<boolean> => {
@@ -338,19 +305,15 @@ export const closeSettingsWindow = async (): Promise<boolean> => {
     return false
   }
 
-  const currentWindow = getCurrentWindow()
-  if (currentWindow.label === SETTINGS_WINDOW_LABEL) {
-    await currentWindow.hide()
-    return true
+  return safeInvoke<boolean>('hide_settings_window')
+}
+
+export const startMainWindowDrag = async (): Promise<void> => {
+  if (!isTauriRuntime()) {
+    return
   }
 
-  const existing = await WebviewWindow.getByLabel(SETTINGS_WINDOW_LABEL)
-  if (!existing) {
-    return false
-  }
-
-  await existing.hide()
-  return true
+  await safeInvoke<void>('start_main_window_drag')
 }
 
 const safeInvoke = async <T>(

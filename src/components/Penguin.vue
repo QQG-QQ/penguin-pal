@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { computed } from 'vue'
 import guardedArt from '../../penguin/penguin-guarded-cutout.png'
 import idleArt from '../../penguin/penguin-idle-cutout.png'
 import listeningArt from '../../penguin/penguin-listening-cutout.png'
 import speakingArt from '../../penguin/penguin-speaking-cutout.png'
 import thinkingArt from '../../penguin/penguin-thinking-cutout.png'
+import { startMainWindowDrag } from '../lib/assistant'
 import type { PetMode } from '../types/assistant'
 
 const props = defineProps<{
@@ -26,12 +26,12 @@ const artwork = computed(() => {
 })
 
 const startDrag = async (event: MouseEvent) => {
-  if (event.buttons !== 1 || typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+  if (event.buttons !== 1) {
     return
   }
 
   try {
-    await getCurrentWindow().startDragging()
+    await startMainWindowDrag()
   } catch {
     // Keep the declarative drag region as the primary path and only use this as a fallback.
   }
