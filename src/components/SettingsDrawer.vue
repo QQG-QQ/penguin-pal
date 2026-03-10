@@ -16,6 +16,7 @@ const props = defineProps<{
   voiceInputAvailable: boolean
   oauthState: OAuthState
   oauthBusy: boolean
+  oauthNotice: string
   actions: DesktopAction[]
   permissionLevel: number
   aiConstraints: AiConstraintProfile
@@ -300,6 +301,7 @@ const copyPendingUrl = async () => {
             <p>令牌状态：{{ oauthState.accessTokenLoaded ? '已加载到内存' : '未加载' }}</p>
             <p v-if="oauthState.accountHint">当前账号：{{ oauthState.accountHint }}</p>
             <p v-if="oauthState.lastError">最近错误：{{ oauthState.lastError }}</p>
+            <p v-if="oauthNotice">{{ oauthNotice }}</p>
           </div>
         </section>
       </template>

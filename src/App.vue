@@ -127,6 +127,7 @@ const bubbleText = ref('')
 const busy = ref(false)
 const savingSettings = ref(false)
 const authBusy = ref(false)
+const oauthNotice = ref('')
 const pendingApproval = ref<ActionApprovalRequest | null>(null)
 const approvalPhrase = ref('')
 const approvalChecks = ref<Record<string, boolean>>({})
@@ -752,12 +753,14 @@ const saveSettings = async (draft: ProviderConfigInput) => {
 
 const beginOAuthLogin = async (draft: ProviderConfigInput) => {
   authBusy.value = true
+  oauthNotice.value = '正在打开浏览器并等待 OAuth 授权回调...'
 
   try {
     const nextSnapshot = await persistSettings(draft)
     await syncSnapshot(nextSnapshot)
     const result = await startOAuthSignInAuto()
     await syncSnapshot(result.snapshot)
+    oauthNotice.value = result.message
     announce(result.message)
     if (result.authorizationUrl && typeof window !== 'undefined') {
       try {
@@ -767,7 +770,9 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
       }
     }
   } catch (error) {
-    announce(error instanceof Error ? error.message : '一键 OAuth 登录失败', 'guarded')
+    const message = error instanceof Error ? error.message : '一键 OAuth 登录失败'
+    oauthNotice.value = message
+    announce(message, 'guarded')
   } finally {
     authBusy.value = false
   }
@@ -779,9 +784,12 @@ const finishOAuthLogin = async (callbackUrl: string) => {
   try {
     const result = await completeOAuthSignIn(callbackUrl)
     await syncSnapshot(result.snapshot)
+    oauthNotice.value = result.message
     announce(result.message)
   } catch (error) {
-    announce(error instanceof Error ? error.message : '完成 OAuth 登录失败', 'guarded')
+    const message = error instanceof Error ? error.message : '完成 OAuth 登录失败'
+    oauthNotice.value = message
+    announce(message, 'guarded')
   } finally {
     authBusy.value = false
   }
@@ -793,9 +801,12 @@ const disconnectOAuthLogin = async () => {
   try {
     const result = await disconnectOAuthSignIn()
     await syncSnapshot(result.snapshot)
+    oauthNotice.value = result.message
     announce(result.message)
   } catch (error) {
-    announce(error instanceof Error ? error.message : '退出 OAuth 登录失败', 'guarded')
+    const message = error instanceof Error ? error.message : '退出 OAuth 登录失败'
+    oauthNotice.value = message
+    announce(message, 'guarded')
   } finally {
     authBusy.value = false
   }
@@ -859,6 +870,7 @@ onBeforeUnmount(() => {
       :voice-input-available="voiceInputAvailable"
       :oauth-state="snapshot.provider.oauth"
       :oauth-busy="authBusy"
+      :oauth-notice="oauthNotice"
       :actions="snapshot.allowedActions"
       :permission-level="snapshot.permissionLevel"
       :ai-constraints="snapshot.aiConstraints"

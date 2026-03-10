@@ -189,8 +189,8 @@ fn required_field<'a>(value: Option<&'a String>, label: &str) -> Result<&'a str,
 pub fn open_authorization_in_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
+        Command::new("explorer")
+            .arg(url)
             .spawn()
             .map_err(|error| format!("无法打开系统浏览器: {error}"))?;
         return Ok(());
