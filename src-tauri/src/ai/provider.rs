@@ -1,16 +1,19 @@
 use crate::{
     ai::guardrails,
+    codex_runtime::apply_private_env,
     app_state::{AuthMode, ChatMessage, DesktopAction, ProviderConfig, ProviderKind},
 };
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::{env, path::PathBuf, process::Command};
+use std::{path::Path, process::Command};
 use tauri::async_runtime;
 
 pub async fn respond(
     provider: &ProviderConfig,
     api_key: Option<String>,
     oauth_access_token: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     history: &[ChatMessage],
@@ -28,7 +31,15 @@ pub async fn respond(
     }
 
     if matches!(provider.kind, ProviderKind::CodexCli) {
-        return call_codex_cli(provider, permission_level, allowed_actions, history).await;
+        return call_codex_cli(
+            provider,
+            codex_command,
+            codex_home,
+            permission_level,
+            allowed_actions,
+            history,
+        )
+        .await;
     }
 
     match provider.kind {
@@ -94,61 +105,12 @@ pub fn fallback_reply(error: &str) -> String {
     )
 }
 
-#[cfg(target_os = "windows")]
-fn resolve_codex_from_where(command: &str) -> Option<String> {
-    let output = Command::new("cmd")
-        .args(["/C", "where", command])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn run_codex_exec(command: &str, home_root: &Path, prompt: &str) -> Result<String, String> {
+    let output = {
+        let mut cmd = Command::new(command);
+        apply_private_env(&mut cmd, home_root);
+        cmd
     }
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
-fn resolve_codex_command() -> Option<String> {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(explicit) = env::var_os("CODEX_BIN") {
-            let path = PathBuf::from(explicit);
-            if path.is_file() {
-                return Some(path.to_string_lossy().to_string());
-            }
-        }
-
-        if let Some(path) = resolve_codex_from_where("codex") {
-            return Some(path);
-        }
-        if let Some(path) = resolve_codex_from_where("codex.cmd") {
-            return Some(path);
-        }
-
-        if let Some(appdata) = env::var_os("APPDATA") {
-            let npm_bin = PathBuf::from(appdata).join("npm").join("codex.cmd");
-            if npm_bin.is_file() {
-                return Some(npm_bin.to_string_lossy().to_string());
-            }
-        }
-
-        None
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Some("codex".to_string())
-    }
-}
-
-fn run_codex_exec(prompt: &str) -> Result<String, String> {
-    let command = resolve_codex_command()
-        .ok_or_else(|| "未检测到 codex 命令，请先安装 Codex CLI 并加入 PATH。".to_string())?;
-
-    let output = Command::new(command)
         .arg("exec")
         .arg("--skip-git-repo-check")
         .arg("--sandbox")
@@ -185,6 +147,8 @@ fn run_codex_exec(prompt: &str) -> Result<String, String> {
 
 async fn call_codex_cli(
     provider: &ProviderConfig,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     history: &[ChatMessage],
@@ -202,7 +166,15 @@ async fn call_codex_cli(
         "{system_prompt}\n\n用户输入：\n{user_prompt}\n\n请直接输出最终答复，不要输出命令行日志。"
     );
 
-    let reply = async_runtime::spawn_blocking(move || run_codex_exec(&prompt))
+    let command = codex_command
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "未检测到桌宠内置 Codex 运行时。请先把 Codex 私有运行时打包进应用资源。".to_string())?;
+    let home_root = codex_home
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "当前未初始化桌宠私有 Codex 凭据目录。".to_string())?;
+
+    let reply = async_runtime::spawn_blocking(move || run_codex_exec(&command, &home_root, &prompt))
         .await
         .map_err(|error| format!("等待 Codex CLI 响应失败：{error}"))??;
 

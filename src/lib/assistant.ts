@@ -212,6 +212,8 @@ const fallbackCodexStatus = (): CodexCliStatus => ({
   version: null,
   loggedIn: false,
   authPath: null,
+  runtimePath: null,
+  source: '未找到',
   message: '浏览器调试模式下无法检测本机 Codex CLI。'
 })
 

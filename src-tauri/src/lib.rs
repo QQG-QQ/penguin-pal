@@ -1,5 +1,6 @@
 mod ai;
 mod app_state;
+mod codex_runtime;
 mod audio;
 mod desktop;
 mod security;
@@ -7,7 +8,7 @@ mod tray;
 mod window;
 
 use serde::{Deserialize, Serialize};
-use std::{env, path::PathBuf, process::Command, sync::Mutex, time::Duration};
+use std::{process::Command, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
@@ -17,6 +18,7 @@ use crate::{
         AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult, PetMode,
         ProviderConfigInput, RuntimeState, DEFAULT_OAUTH_REDIRECT_URL,
     },
+    codex_runtime::{apply_private_env, private_auth_path, resolve_for_app},
     security::{audit, oauth, policy},
 };
 
@@ -37,16 +39,9 @@ struct CodexCliStatus {
     version: Option<String>,
     logged_in: bool,
     auth_path: Option<String>,
+    runtime_path: Option<String>,
+    source: String,
     message: String,
-}
-
-fn codex_auth_path() -> Option<PathBuf> {
-    let home_dir = if cfg!(target_os = "windows") {
-        env::var_os("USERPROFILE")
-    } else {
-        env::var_os("HOME")
-    }?;
-    Some(PathBuf::from(home_dir).join(".codex").join("auth.json"))
 }
 
 fn first_non_empty_output(output: &std::process::Output) -> Option<String> {
@@ -63,58 +58,13 @@ fn first_non_empty_output(output: &std::process::Output) -> Option<String> {
     None
 }
 
-#[cfg(target_os = "windows")]
-fn resolve_codex_from_where(command: &str) -> Option<String> {
-    let output = Command::new("cmd")
-        .args(["/C", "where", command])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn read_codex_version(command: &str, app: &AppHandle) -> Option<String> {
+    let runtime = resolve_for_app(app).ok()?;
+    let output = {
+        let mut cmd = Command::new(command);
+        apply_private_env(&mut cmd, &runtime.home_root);
+        cmd
     }
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
-fn resolve_codex_command() -> Option<String> {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(explicit) = env::var_os("CODEX_BIN") {
-            let path = PathBuf::from(explicit);
-            if path.is_file() {
-                return Some(path.to_string_lossy().to_string());
-            }
-        }
-
-        if let Some(path) = resolve_codex_from_where("codex") {
-            return Some(path);
-        }
-        if let Some(path) = resolve_codex_from_where("codex.cmd") {
-            return Some(path);
-        }
-
-        if let Some(appdata) = env::var_os("APPDATA") {
-            let npm_bin = PathBuf::from(appdata).join("npm").join("codex.cmd");
-            if npm_bin.is_file() {
-                return Some(npm_bin.to_string_lossy().to_string());
-            }
-        }
-
-        None
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Some("codex".to_string())
-    }
-}
-
-fn read_codex_version(command: &str) -> Option<String> {
-    let output = Command::new(command)
         .arg("--version")
         .output()
         .ok()?;
@@ -126,32 +76,51 @@ fn read_codex_version(command: &str) -> Option<String> {
     first_non_empty_output(&output)
 }
 
-fn inspect_codex_cli_status() -> CodexCliStatus {
-    let codex_command = resolve_codex_command();
-    let version = codex_command
-        .as_deref()
-        .and_then(|command| read_codex_version(command));
+fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
+    let runtime = match resolve_for_app(app) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return CodexCliStatus {
+                installed: false,
+                version: None,
+                logged_in: false,
+                auth_path: None,
+                runtime_path: None,
+                source: "未找到".to_string(),
+                message: error,
+            }
+        }
+    };
+
+    let command_label = runtime
+        .command
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
+    let version = runtime
+        .command
+        .as_ref()
+        .and_then(|path| read_codex_version(&path.to_string_lossy(), app));
     let installed = version.is_some();
 
-    let auth_path = codex_auth_path();
-    let auth_file_exists = auth_path
-        .as_ref()
-        .is_some_and(|path| path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false));
+    let auth_path = private_auth_path(app).ok();
+    let auth_file_exists = auth_path.as_ref().is_some_and(|path| {
+        path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
+    });
     let logged_in = installed && auth_file_exists;
     let auth_path_label = auth_path
         .as_ref()
         .map(|path| path.to_string_lossy().to_string());
 
     let message = if !installed {
-        if auth_file_exists {
-            "检测到 Codex 凭据文件，但当前进程无法调用 codex 命令。请把 Codex CLI 所在目录加入 PATH 后重启桌宠。".to_string()
+        if runtime.source == "未找到" {
+            "未检测到桌宠内置 Codex 运行时。请把 Codex 私有运行时打包进应用资源后再试；开发期仍可临时回退到系统安装。".to_string()
         } else {
-            "未检测到 codex 命令，请先安装 Codex CLI 并加入 PATH。".to_string()
+            format!("已发现 {}，但当前无法执行 Codex CLI。", runtime.source)
         }
     } else if logged_in {
-        "Codex CLI 已登录。".to_string()
+        format!("Codex CLI 已登录，当前来源：{}。", runtime.source)
     } else {
-        "Codex CLI 未登录，请点击按钮启动 codex login。".to_string()
+        format!("Codex CLI 未登录，请点击按钮启动登录。当前来源：{}。", runtime.source)
     };
 
     CodexCliStatus {
@@ -159,48 +128,54 @@ fn inspect_codex_cli_status() -> CodexCliStatus {
         version,
         logged_in,
         auth_path: auth_path_label,
+        runtime_path: command_label,
+        source: runtime.source.to_string(),
         message,
     }
 }
 
 #[tauri::command]
-fn get_codex_cli_status() -> CodexCliStatus {
-    inspect_codex_cli_status()
+fn get_codex_cli_status(app: AppHandle) -> CodexCliStatus {
+    inspect_codex_cli_status(&app)
 }
 
 #[tauri::command]
-fn start_codex_cli_login() -> Result<CodexCliStatus, String> {
-    let status = inspect_codex_cli_status();
+fn start_codex_cli_login(app: AppHandle) -> Result<CodexCliStatus, String> {
+    let status = inspect_codex_cli_status(&app);
     if !status.installed {
         return Err(status.message);
     }
 
-    let codex_command = resolve_codex_command()
-        .ok_or_else(|| "未找到 codex 命令，请检查 PATH 配置。".to_string())?;
+    let runtime = resolve_for_app(&app)?;
+    let codex_command = runtime
+        .command
+        .ok_or_else(|| "未找到桌宠可用的 Codex 运行时。".to_string())?;
+    let wrapped = if codex_command.to_string_lossy().contains(' ') {
+        format!("\"{}\"", codex_command.to_string_lossy())
+    } else {
+        codex_command.to_string_lossy().to_string()
+    };
+    let login_cmd = format!("{wrapped} --login || {wrapped} login || {wrapped}");
 
     #[cfg(target_os = "windows")]
     {
-        let wrapped = if codex_command.contains(' ') {
-            format!("\"{}\"", codex_command)
-        } else {
-            codex_command.clone()
-        };
-        let login_cmd = format!("{wrapped} login");
-        Command::new("cmd")
-            .args(["/C", "start", "", "cmd", "/K", &login_cmd])
+        let mut cmd = Command::new("cmd");
+        apply_private_env(&mut cmd, &runtime.home_root);
+        cmd.args(["/C", "start", "", "cmd", "/K", &login_cmd])
             .spawn()
             .map_err(|error| format!("启动 codex login 失败：{error}"))?;
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new(codex_command)
-            .arg("login")
+        let mut cmd = Command::new("sh");
+        apply_private_env(&mut cmd, &runtime.home_root);
+        cmd.args(["-lc", &login_cmd])
             .spawn()
             .map_err(|error| format!("启动 codex login 失败：{error}"))?;
     }
 
-    let mut next = inspect_codex_cli_status();
+    let mut next = inspect_codex_cli_status(&app);
     next.message = "已启动 codex login，请在新终端完成登录后点击“刷新状态”。".to_string();
     Ok(next)
 }
@@ -737,6 +712,8 @@ async fn send_chat_message(
         provider_config,
         api_key,
         oauth_access_token,
+        codex_command,
+        codex_home,
         history_window,
         permission_level,
         allowed_actions,
@@ -748,10 +725,18 @@ async fn send_chat_message(
         memory::trim_history(&mut runtime.messages);
         save(&app, &runtime)?;
         let allowed_actions = policy::actions_for_level(runtime.permission_level);
+        let codex_runtime = resolve_for_app(&app).ok();
         (
             runtime.provider.clone(),
             runtime.api_key.clone(),
             runtime.oauth_access_token.clone(),
+            codex_runtime
+                .as_ref()
+                .and_then(|item| item.command.as_ref())
+                .map(|path| path.to_string_lossy().to_string()),
+            codex_runtime
+                .as_ref()
+                .map(|item| item.home_root.to_string_lossy().to_string()),
             memory::context_window(&runtime.messages),
             runtime.permission_level,
             allowed_actions,
@@ -762,6 +747,8 @@ async fn send_chat_message(
         &provider_config,
         api_key,
         oauth_access_token,
+        codex_command,
+        codex_home,
         permission_level,
         &allowed_actions,
         &history_window,

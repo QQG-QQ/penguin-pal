@@ -157,5 +157,7 @@ export interface CodexCliStatus {
   version: string | null
   loggedIn: boolean
   authPath: string | null
+  runtimePath: string | null
+  source: string
   message: string
 }

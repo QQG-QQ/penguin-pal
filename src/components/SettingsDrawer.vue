@@ -315,10 +315,12 @@ const save = () => {
 
           <div class="oauth-meta full-row">
             <p>Codex CLI：{{ codexStatus.installed ? '已安装' : '未安装' }}</p>
+            <p>运行时来源：{{ codexStatus.source }}</p>
             <p v-if="codexStatus.version">版本：{{ codexStatus.version }}</p>
+            <p v-if="codexStatus.runtimePath">运行时路径：{{ codexStatus.runtimePath }}</p>
             <p v-if="codexStatus.authPath">凭据路径：{{ codexStatus.authPath }}</p>
             <p>{{ codexStatus.message }}</p>
-            <p>Codex CLI Provider 不使用通用 OAuth 字段，只看本机 codex 登录状态。</p>
+            <p>Codex CLI Provider 会优先使用桌宠自己的私有运行时和私有登录目录，不依赖系统全局安装。</p>
             <p v-if="oauthNotice">{{ oauthNotice }}</p>
           </div>
         </section>

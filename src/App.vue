@@ -106,6 +106,8 @@ const emptyCodexStatus = (): CodexCliStatus => ({
   version: null,
   loggedIn: false,
   authPath: null,
+  runtimePath: null,
+  source: '未找到',
   message: '尚未检测 Codex CLI 登录状态。'
 })
 
