@@ -6,7 +6,8 @@ mod security;
 mod tray;
 mod window;
 
-use std::{sync::Mutex, time::Duration};
+use serde::{Deserialize, Serialize};
+use std::{env, path::PathBuf, process::Command, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
@@ -27,6 +28,101 @@ fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
         &allowed_actions,
     );
     runtime.to_snapshot(audio::default_audio_profile(), allowed_actions, ai_constraints)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCliStatus {
+    installed: bool,
+    version: Option<String>,
+    logged_in: bool,
+    auth_path: Option<String>,
+    message: String,
+}
+
+fn codex_auth_path() -> Option<PathBuf> {
+    let home_dir = if cfg!(target_os = "windows") {
+        env::var_os("USERPROFILE")
+    } else {
+        env::var_os("HOME")
+    }?;
+    Some(PathBuf::from(home_dir).join(".codex").join("auth.json"))
+}
+
+fn inspect_codex_cli_status() -> CodexCliStatus {
+    let version_output = Command::new("codex").arg("--version").output();
+    let (installed, version) = match version_output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let parsed = if !stdout.is_empty() {
+                Some(stdout)
+            } else if !stderr.is_empty() {
+                Some(stderr)
+            } else {
+                None
+            };
+            (true, parsed)
+        }
+        Err(_) => (false, None),
+    };
+
+    let auth_path = codex_auth_path();
+    let logged_in = auth_path
+        .as_ref()
+        .is_some_and(|path| path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false));
+    let auth_path_label = auth_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
+
+    let message = if !installed {
+        "未检测到 codex 命令，请先安装 Codex CLI 并加入 PATH。".to_string()
+    } else if logged_in {
+        "Codex CLI 已登录。".to_string()
+    } else {
+        "Codex CLI 未登录，请点击按钮启动 codex login。".to_string()
+    };
+
+    CodexCliStatus {
+        installed,
+        version,
+        logged_in,
+        auth_path: auth_path_label,
+        message,
+    }
+}
+
+#[tauri::command]
+fn get_codex_cli_status() -> CodexCliStatus {
+    inspect_codex_cli_status()
+}
+
+#[tauri::command]
+fn start_codex_cli_login() -> Result<CodexCliStatus, String> {
+    let status = inspect_codex_cli_status();
+    if !status.installed {
+        return Err(status.message);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", "cmd", "/K", "codex login"])
+            .spawn()
+            .map_err(|error| format!("启动 codex login 失败：{error}"))?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("codex")
+            .arg("login")
+            .spawn()
+            .map_err(|error| format!("启动 codex login 失败：{error}"))?;
+    }
+
+    let mut next = inspect_codex_cli_status();
+    next.message = "已启动 codex login，请在新终端完成登录后点击“刷新状态”。".to_string();
+    Ok(next)
 }
 
 #[tauri::command]
@@ -849,6 +945,8 @@ pub fn run() {
             start_oauth_sign_in_auto,
             complete_oauth_sign_in,
             disconnect_oauth_sign_in,
+            get_codex_cli_status,
+            start_codex_cli_login,
             send_chat_message,
             request_desktop_action,
             confirm_desktop_action,

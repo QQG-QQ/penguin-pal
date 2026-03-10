@@ -7,6 +7,7 @@ import type {
   AssistantSnapshot,
   ChatMessage,
   ChatResponse,
+  CodexCliStatus,
   OAuthFlowResult,
   OAuthState,
   ProviderConfigInput,
@@ -205,6 +206,13 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
 let fallbackSnapshot = buildFallbackSnapshot()
 let fallbackPendingApproval: ActionApprovalRequest | null = null
 let fallbackOAuthStateValue = 'demo-oauth-state'
+const fallbackCodexStatus = (): CodexCliStatus => ({
+  installed: false,
+  version: null,
+  loggedIn: false,
+  authPath: null,
+  message: '浏览器调试模式下无法检测本机 Codex CLI。'
+})
 
 const isTauriRuntime = () =>
   typeof window !== 'undefined' && typeof window.__TAURI_INTERNALS__ !== 'undefined'
@@ -896,6 +904,27 @@ export const clearConversation = async (): Promise<AssistantSnapshot> => {
     fallbackSnapshot = buildFallbackSnapshot()
     fallbackPendingApproval = null
     return clone(fallbackSnapshot)
+  }
+}
+
+export const getCodexCliStatus = async (): Promise<CodexCliStatus> => {
+  try {
+    return await safeInvoke<CodexCliStatus>('get_codex_cli_status')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return fallbackCodexStatus()
+  }
+}
+
+export const startCodexCliLogin = async (): Promise<CodexCliStatus> => {
+  try {
+    return await safeInvoke<CodexCliStatus>('start_codex_cli_login')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return {
+      ...fallbackCodexStatus(),
+      message: '浏览器调试模式无法启动 codex login。'
+    }
   }
 }
 

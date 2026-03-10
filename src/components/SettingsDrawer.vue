@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { ref, watch } from 'vue'
 import ControlPanel from './ControlPanel.vue'
 import type {
   AiConstraintProfile,
+  CodexCliStatus,
   DesktopAction,
-  OAuthState,
   ProviderConfigInput,
   ProviderKind
 } from '../types/assistant'
@@ -14,9 +14,9 @@ const props = defineProps<{
   draft: ProviderConfigInput
   saving: boolean
   voiceInputAvailable: boolean
-  oauthState: OAuthState
   oauthBusy: boolean
   oauthNotice: string
+  codexStatus: CodexCliStatus
   actions: DesktopAction[]
   permissionLevel: number
   aiConstraints: AiConstraintProfile
@@ -27,8 +27,7 @@ const emit = defineEmits<{
   save: [input: ProviderConfigInput]
   sectionChange: [section: 'settings' | 'actions']
   oauthStart: [input: ProviderConfigInput]
-  oauthComplete: [callbackUrl: string]
-  oauthDisconnect: []
+  codexRefresh: []
   triggerAction: [action: DesktopAction]
 }>()
 
@@ -36,8 +35,6 @@ const cloneDraft = (value: ProviderConfigInput): ProviderConfigInput =>
   JSON.parse(JSON.stringify(value)) as ProviderConfigInput
 
 const localDraft = ref<ProviderConfigInput>(cloneDraft(props.draft))
-const callbackUrl = ref('')
-const copyFeedback = ref('')
 
 watch(
   () => props.draft,
@@ -54,24 +51,9 @@ const providerOptions: Array<{ label: string; value: ProviderKind }> = [
   { label: 'OpenAI-Compatible', value: 'openAiCompatible' }
 ]
 
-const oauthStatusLabel = computed(() => {
-  const map = {
-    signedOut: '未登录',
-    pending: '待完成',
-    authorized: '已登录',
-    error: '错误'
-  }
-
-  return map[props.oauthState.status]
-})
-
 const clearApiKey = () => {
   localDraft.value.apiKey = ''
   localDraft.value.clearApiKey = true
-}
-
-const clearOAuthToken = () => {
-  localDraft.value.clearOAuthToken = true
 }
 
 const save = () => {
@@ -80,25 +62,6 @@ const save = () => {
   }
 
   emit('save', cloneDraft(localDraft.value))
-}
-
-const completeOauth = () => {
-  emit('oauthComplete', callbackUrl.value)
-}
-
-const copyPendingUrl = async () => {
-  copyFeedback.value = ''
-  const value = props.oauthState.pendingAuthUrl
-  if (!value || typeof navigator === 'undefined' || !navigator.clipboard) {
-    return
-  }
-
-  try {
-    await navigator.clipboard.writeText(value)
-    copyFeedback.value = '已复制授权链接'
-  } catch {
-    copyFeedback.value = '复制失败，请手动复制'
-  }
 }
 </script>
 
@@ -190,57 +153,10 @@ const copyPendingUrl = async () => {
         <section class="oauth-shell full-row">
           <div class="oauth-header">
             <div>
-              <strong>OAuth 登录</strong>
-              <p>桌面端走 PKCE，只有允许联网时才会发起授权和换取令牌。</p>
+              <strong>Codex CLI 登录</strong>
+              <p>会在系统终端执行 <code>codex login</code>，登录完成后回到这里刷新状态。</p>
             </div>
-            <span class="oauth-status">{{ oauthStatusLabel }}</span>
-          </div>
-
-          <div class="oauth-grid">
-            <label class="field">
-              <span>Client ID</span>
-              <input
-                v-model="localDraft.oauthClientId"
-                type="text"
-                placeholder="OAuth public client id"
-              />
-            </label>
-
-            <label class="field">
-              <span>Scopes</span>
-              <input
-                v-model="localDraft.oauthScopes"
-                type="text"
-                placeholder="openid profile email"
-              />
-            </label>
-
-            <label class="field full-row">
-              <span>Authorize URL</span>
-              <input
-                v-model="localDraft.oauthAuthorizeUrl"
-                type="text"
-                placeholder="https://provider.example.com/oauth/authorize"
-              />
-            </label>
-
-            <label class="field full-row">
-              <span>Token URL</span>
-              <input
-                v-model="localDraft.oauthTokenUrl"
-                type="text"
-                placeholder="https://provider.example.com/oauth/token"
-              />
-            </label>
-
-            <label class="field full-row">
-              <span>Redirect URL</span>
-              <input
-                v-model="localDraft.oauthRedirectUrl"
-                type="text"
-                placeholder="http://127.0.0.1:8976/oauth/callback"
-              />
-            </label>
+            <span class="oauth-status">{{ codexStatus.loggedIn ? '已登录' : '未登录' }}</span>
           </div>
 
           <div class="oauth-actions">
@@ -250,57 +166,24 @@ const copyPendingUrl = async () => {
               :disabled="oauthBusy"
               @click="emit('oauthStart', cloneDraft(localDraft))"
             >
-              {{ oauthBusy ? '处理中...' : '一键 OAuth 登录' }}
+              {{ oauthBusy ? '处理中...' : '启动 codex login' }}
             </button>
             <button
               type="button"
               class="ghost-button"
-              :disabled="oauthBusy || (!oauthState.accessTokenLoaded && !oauthState.pendingAuthUrl)"
-              @click="emit('oauthDisconnect')"
+              :disabled="oauthBusy"
+              @click="emit('codexRefresh')"
             >
-              退出登录
-            </button>
-            <button type="button" class="ghost-button" @click="clearOAuthToken">
-              下次保存时清空内存令牌状态
-            </button>
-          </div>
-
-          <div v-if="oauthState.pendingAuthUrl" class="oauth-card">
-            <label class="field compact full-row">
-              <span>授权链接</span>
-              <textarea :value="oauthState.pendingAuthUrl" rows="3" readonly />
-            </label>
-
-            <div class="inline-actions compact-actions full-row">
-              <button type="button" class="ghost-button" @click="copyPendingUrl">
-                复制授权链接
-              </button>
-              <span class="copy-feedback">{{ copyFeedback }}</span>
-            </div>
-
-            <label class="field compact full-row">
-              <span>浏览器回调地址</span>
-              <textarea
-                v-model="callbackUrl"
-                rows="2"
-                placeholder="完成授权后，把浏览器地址栏最后完整 URL 粘贴到这里"
-              />
-            </label>
-
-            <button
-              type="button"
-              class="save-button compact-save"
-              :disabled="oauthBusy || !callbackUrl.trim()"
-              @click="completeOauth"
-            >
-              {{ oauthBusy ? '处理中...' : '完成 OAuth 登录' }}
+              刷新状态
             </button>
           </div>
 
           <div class="oauth-meta full-row">
-            <p>令牌状态：{{ oauthState.accessTokenLoaded ? '已加载到内存' : '未加载' }}</p>
-            <p v-if="oauthState.accountHint">当前账号：{{ oauthState.accountHint }}</p>
-            <p v-if="oauthState.lastError">最近错误：{{ oauthState.lastError }}</p>
+            <p>Codex CLI：{{ codexStatus.installed ? '已安装' : '未安装' }}</p>
+            <p v-if="codexStatus.version">版本：{{ codexStatus.version }}</p>
+            <p v-if="codexStatus.authPath">凭据路径：{{ codexStatus.authPath }}</p>
+            <p>{{ codexStatus.message }}</p>
+            <p>通用 OAuth 字段对官方 Codex 登录不生效，保持为空即可。</p>
             <p v-if="oauthNotice">{{ oauthNotice }}</p>
           </div>
         </section>

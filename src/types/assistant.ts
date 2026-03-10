@@ -151,3 +151,11 @@ export interface OAuthFlowResult {
   authorizationUrl: string | null
   snapshot: AssistantSnapshot
 }
+
+export interface CodexCliStatus {
+  installed: boolean
+  version: string | null
+  loggedIn: boolean
+  authPath: string | null
+  message: string
+}
