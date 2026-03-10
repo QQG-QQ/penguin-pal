@@ -29,6 +29,45 @@ fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
     runtime.to_snapshot(audio::default_audio_profile(), allowed_actions, ai_constraints)
 }
 
+#[tauri::command]
+fn show_settings_window(app: AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("settings")
+        .ok_or_else(|| "未找到设置窗口".to_string())?;
+
+    let _ = window.unminimize();
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn hide_settings_window(app: AppHandle) -> Result<bool, String> {
+    let Some(window) = app.get_webview_window("settings") else {
+        return Ok(false);
+    };
+
+    window.hide().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn hide_main_window(app: AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "未找到主窗口".to_string())?;
+    window.hide().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn start_main_window_drag(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "未找到主窗口".to_string())?;
+    window.start_dragging().map_err(|error| error.to_string())
+}
+
 fn normalize_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -642,6 +681,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            show_settings_window,
+            hide_settings_window,
+            hide_main_window,
+            start_main_window_drag,
             get_assistant_snapshot,
             save_provider_config,
             start_oauth_sign_in,
