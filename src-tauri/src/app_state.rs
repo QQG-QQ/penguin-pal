@@ -377,7 +377,7 @@ impl Default for RuntimeState {
                 "欢迎回来。我已经切到严格白名单模式，先把桌宠 UI、语音入口和安全边界搭好了，再接真实 AI API。",
             )],
             provider: ProviderConfig::default(),
-            permission_level: 1,
+            permission_level: 2,
             audit_trail: vec![AuditEntry {
                 id: format!("audit-{}", now_millis()),
                 action: "bootstrap".to_string(),
@@ -489,7 +489,7 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         mode: persisted.mode,
         messages: persisted.messages,
         provider: persisted.provider,
-        permission_level: persisted.permission_level.min(2),
+        permission_level: 2,
         audit_trail: persisted.audit_trail,
         api_key: None,
         oauth_access_token: None,

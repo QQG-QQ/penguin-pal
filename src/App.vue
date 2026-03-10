@@ -87,7 +87,7 @@ const emptySnapshot = (): AssistantSnapshot => ({
       expiresAt: null
     }
   },
-  permissionLevel: 1,
+  permissionLevel: 2,
   allowedActions: [],
   auditTrail: [],
   audioProfile: {

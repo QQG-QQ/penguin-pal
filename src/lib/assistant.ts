@@ -69,7 +69,7 @@ const defaultConstraintsProfile = (): AiConstraintProfile => ({
     {
       id: 'model-gateway',
       title: '模型网关访问',
-      summary: '当前演示模式不连接外部 AI 网关。',
+      summary: '当前仅在浏览器调试 fallback 下不连接外部 AI 网关。',
       status: '已阻止'
     },
     {
@@ -83,14 +83,14 @@ const defaultConstraintsProfile = (): AiConstraintProfile => ({
     {
       id: 'permission-level',
       title: '权限等级',
-      summary: '当前演示快照默认处于 L1。',
-      status: 'L1'
+      summary: '当前浏览器调试 fallback 默认处于 L2。',
+      status: 'L2'
     },
     {
       id: 'auth-mode',
       title: '认证门禁',
-      summary: '演示模式不持有 API Key 或 OAuth 令牌。',
-      status: '演示'
+      summary: '浏览器调试 fallback 不持有 API Key 或 OAuth 令牌。',
+      status: 'fallback'
     }
   ]
 })
@@ -110,7 +110,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
   messages: [
     fallbackMessage(
       'assistant',
-      'PenguinPal 已进入 UI 演示模式。你可以先确认桌宠交互、语音入口、OAuth 设置和严格动作确认流，再接入真实 AI Key 或 OAuth 网关。'
+      '当前是浏览器调试 fallback。正式能力需要 Tauri 后端可用。'
     )
   ],
   provider: {
@@ -126,7 +126,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     authMode: 'apiKey',
     oauth: defaultOAuthState()
   },
-  permissionLevel: 1,
+  permissionLevel: 2,
   allowedActions: [
     {
       id: 'show_window',
@@ -153,7 +153,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
       riskLevel: 2,
       minimumLevel: 2,
       requiresConfirmation: true,
-      enabled: false
+      enabled: true
     },
     {
       id: 'open_calculator',
@@ -162,15 +162,15 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
       riskLevel: 2,
       minimumLevel: 2,
       requiresConfirmation: true,
-      enabled: false
+      enabled: true
     }
   ],
   auditTrail: [
     {
       id: `audit-${now()}`,
       action: 'ui_bootstrap',
-      outcome: 'demo',
-      detail: '当前运行在浏览器/无 Tauri 后端的演示模式。',
+      outcome: 'fallback',
+      detail: '当前运行在浏览器/无 Tauri 后端的调试回退模式。',
       createdAt: now(),
       riskLevel: 0
     }
@@ -208,6 +208,12 @@ let fallbackOAuthStateValue = 'demo-oauth-state'
 
 const isTauriRuntime = () =>
   typeof window !== 'undefined' && typeof window.__TAURI_INTERNALS__ !== 'undefined'
+
+const rethrowIfDesktopRuntime = (error: unknown): void => {
+  if (isTauriRuntime()) {
+    throw error instanceof Error ? error : new Error('Tauri backend call failed')
+  }
+}
 
 export type SettingsSection = 'settings' | 'actions'
 
@@ -385,7 +391,8 @@ export const getAssistantSnapshot = async (): Promise<AssistantSnapshot> => {
   try {
     const snapshot = await safeInvoke<AssistantSnapshot>('get_assistant_snapshot')
     return snapshotWithRuntimeFlags(snapshot)
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     return clone(fallbackSnapshot)
   }
 }
@@ -396,7 +403,8 @@ export const saveProviderConfig = async (
   try {
     const snapshot = await safeInvoke<AssistantSnapshot>('save_provider_config', { input })
     return snapshotWithRuntimeFlags(snapshot)
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     const oauth = {
       ...fallbackSnapshot.provider.oauth,
       authorizeUrl: input.oauthAuthorizeUrl,
@@ -446,7 +454,8 @@ export const saveProviderConfig = async (
 export const startOAuthSignIn = async (): Promise<OAuthFlowResult> => {
   try {
     return await safeInvoke<OAuthFlowResult>('start_oauth_sign_in')
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     if (fallbackSnapshot.provider.authMode !== 'oauth') {
       throw new Error('请先在设置中把认证方式切换到 OAuth。')
     }
@@ -505,7 +514,8 @@ export const startOAuthSignIn = async (): Promise<OAuthFlowResult> => {
 export const startOAuthSignInAuto = async (): Promise<OAuthFlowResult> => {
   try {
     return await safeInvoke<OAuthFlowResult>('start_oauth_sign_in_auto')
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     const started = await startOAuthSignIn()
     if (!started.snapshot.provider.oauth.pendingAuthUrl) {
       return started
@@ -550,7 +560,8 @@ export const startOAuthSignInAuto = async (): Promise<OAuthFlowResult> => {
 export const completeOAuthSignIn = async (callbackUrl: string): Promise<OAuthFlowResult> => {
   try {
     return await safeInvoke<OAuthFlowResult>('complete_oauth_sign_in', { callbackUrl })
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     if (!callbackUrl.trim()) {
       throw new Error('请先粘贴浏览器回调地址。')
     }
@@ -606,7 +617,8 @@ export const completeOAuthSignIn = async (callbackUrl: string): Promise<OAuthFlo
 export const disconnectOAuthSignIn = async (): Promise<OAuthFlowResult> => {
   try {
     return await safeInvoke<OAuthFlowResult>('disconnect_oauth_sign_in')
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     fallbackSnapshot = {
       ...fallbackSnapshot,
       provider: {
@@ -646,7 +658,8 @@ export const disconnectOAuthSignIn = async (): Promise<OAuthFlowResult> => {
 export const sendChatMessage = async (content: string): Promise<ChatResponse> => {
   try {
     return await safeInvoke<ChatResponse>('send_chat_message', { content })
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     const userMessage = fallbackMessage('user', content)
     const replyMessage = fallbackMessage('assistant', nextMockReply(content))
     fallbackSnapshot = {
@@ -680,7 +693,8 @@ export const requestDesktopAction = async (
     return await safeInvoke<ActionExecutionResult>('request_desktop_action', {
       actionId
     })
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     const selectedAction = fallbackSnapshot.allowedActions.find((action) => action.id === actionId)
 
     if (!selectedAction) {
@@ -753,7 +767,8 @@ export const confirmDesktopAction = async (
       typedPhrase,
       acknowledgedChecks
     })
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     if (!fallbackPendingApproval || fallbackPendingApproval.id !== approvalId) {
       throw new Error('未找到待确认的动作授权。')
     }
@@ -808,7 +823,8 @@ export const cancelDesktopActionApproval = async (
       approvalId
     })
     return snapshotWithRuntimeFlags(snapshot)
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     if (fallbackPendingApproval?.id === approvalId) {
       fallbackSnapshot = {
         ...fallbackSnapshot,
@@ -835,7 +851,8 @@ export const clearConversation = async (): Promise<AssistantSnapshot> => {
   try {
     const snapshot = await safeInvoke<AssistantSnapshot>('clear_conversation')
     return snapshotWithRuntimeFlags(snapshot)
-  } catch {
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     fallbackSnapshot = buildFallbackSnapshot()
     fallbackPendingApproval = null
     return clone(fallbackSnapshot)

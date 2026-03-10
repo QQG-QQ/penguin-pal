@@ -233,7 +233,11 @@ pub fn wait_for_callback(redirect_url: &str, timeout: Duration) -> Result<String
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| "Redirect URL 缺少端口。".to_string())?;
-    let bind_addr = format!("127.0.0.1:{port}");
+    let bind_addr = if host == "localhost" {
+        format!("localhost:{port}")
+    } else {
+        format!("127.0.0.1:{port}")
+    };
     let path = if parsed.path().is_empty() {
         "/"
     } else {
@@ -264,7 +268,7 @@ pub fn wait_for_callback(redirect_url: &str, timeout: Duration) -> Result<String
                     .ok_or_else(|| "OAuth 回调请求格式错误。".to_string())?;
 
                 let (status, body, callback) = if target.starts_with(path) {
-                    let callback_url = format!("http://{bind_addr}{target}");
+                    let callback_url = format!("{}://{}:{}{}", parsed.scheme(), host, port, target);
                     (
                         "200 OK",
                         "<html><body><h3>OAuth 登录成功</h3><p>可以关闭这个页面并返回企鹅桌宠。</p></body></html>",

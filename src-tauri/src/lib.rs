@@ -329,12 +329,31 @@ async fn start_oauth_sign_in_auto(
         });
     }
 
-    let callback_url = tauri::async_runtime::spawn_blocking({
+    let callback_url = match tauri::async_runtime::spawn_blocking({
         let redirect_url = redirect_url.clone();
         move || oauth::wait_for_callback(&redirect_url, Duration::from_secs(180))
     })
     .await
-    .map_err(|error| error.to_string())??;
+    .map_err(|error| error.to_string())? {
+        Ok(callback_url) => callback_url,
+        Err(error) => {
+            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            runtime.oauth_last_error = Some(error.clone());
+            audit::push_entry(
+                &mut runtime.audit_trail,
+                audit::record("oauth_login_started", "timeout", &error, 1),
+            );
+            save(&app, &runtime)?;
+            return Ok(OAuthFlowResult {
+                message: format!(
+                    "自动 OAuth 回调未完成：{}。你可以继续在当前设置窗口里手动粘贴回调地址完成登录。",
+                    error
+                ),
+                authorization_url: Some(authorization_url),
+                snapshot: snapshot_from_runtime(&runtime),
+            });
+        }
+    };
 
     let (provider_config, pending) = {
         let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
