@@ -1,7 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
+import { emit, emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import type {
   ActionApprovalRequest,
+  AiConstraintProfile,
   ActionExecutionResult,
   AssistantSnapshot,
   ChatMessage,
@@ -32,6 +35,66 @@ const defaultOAuthState = (): OAuthState => ({
   lastError: null,
   startedAt: null,
   expiresAt: null
+})
+
+const defaultConstraintsProfile = (): AiConstraintProfile => ({
+  label: 'Codex Guardrails',
+  version: '2026-03-10',
+  summary: '这套约束由后端强制执行，角色设定只能补充风格，不能覆盖安全边界。',
+  immutableRules: [
+    {
+      id: 'no-freeform-exec',
+      title: '禁止自由执行',
+      summary: 'AI 不能直接执行 shell、脚本、下载、安装、浏览器自动化或任意软件控制。',
+      status: '硬限制'
+    },
+    {
+      id: 'whitelist-only-actions',
+      title: '只允许白名单动作',
+      summary: '任何电脑控制都必须走后端白名单，高风险动作还要经过一次性确认。',
+      status: '硬限制'
+    },
+    {
+      id: 'privacy-first',
+      title: '禁止隐私外泄',
+      summary: 'AI 不能请求、上传、整理或暴露密钥、令牌、密码、私人文件和聊天隐私。',
+      status: '硬限制'
+    }
+  ],
+  capabilityGates: [
+    {
+      id: 'chat',
+      title: '对话陪伴',
+      summary: '允许正常对话、提醒、解释风险和引导用户使用受控入口。',
+      status: '可用'
+    },
+    {
+      id: 'model-gateway',
+      title: '模型网关访问',
+      summary: '当前演示模式不连接外部 AI 网关。',
+      status: '已阻止'
+    },
+    {
+      id: 'desktop-actions',
+      title: '桌面动作申请',
+      summary: '仅允许白名单动作，而且高风险动作仍然需要人工确认。',
+      status: '需审批'
+    }
+  ],
+  runtimeBoundaries: [
+    {
+      id: 'permission-level',
+      title: '权限等级',
+      summary: '当前演示快照默认处于 L1。',
+      status: 'L1'
+    },
+    {
+      id: 'auth-mode',
+      title: '认证门禁',
+      summary: '演示模式不持有 API Key 或 OAuth 令牌。',
+      status: '演示'
+    }
+  ]
 })
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -115,13 +178,13 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     }
   ],
   audioProfile: {
-    inputMode: 'press-to-talk',
+    inputMode: 'auto-listen',
     outputMode: 'speech-synthesis',
     stages: [
       {
         id: 'recorder',
-        title: '按住说话',
-        summary: '前端优先使用 Web Speech 录音入口。',
+        title: '自动语音监听',
+        summary: '检测到麦克风后，前端会优先使用 Web Speech 自动进入监听。',
         status: 'ready'
       },
       {
@@ -137,7 +200,8 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
         status: 'ready'
       }
     ]
-  }
+  },
+  aiConstraints: defaultConstraintsProfile()
 })
 
 let fallbackSnapshot = buildFallbackSnapshot()
@@ -146,6 +210,148 @@ let fallbackOAuthStateValue = 'demo-oauth-state'
 
 const isTauriRuntime = () =>
   typeof window !== 'undefined' && typeof window.__TAURI_INTERNALS__ !== 'undefined'
+
+export type SettingsSection = 'settings' | 'actions'
+
+const SETTINGS_WINDOW_LABEL = 'settings'
+const SNAPSHOT_UPDATED_EVENT = 'penguinpal://assistant-snapshot'
+const SETTINGS_SECTION_EVENT = 'penguinpal://settings-section'
+
+let browserSettingsWindow: Window | null = null
+
+const normalizeSettingsSection = (value: string | null | undefined): SettingsSection =>
+  value === 'actions' ? 'actions' : 'settings'
+
+const settingsWindowUrl = (section: SettingsSection) =>
+  `/?view=settings&section=${section}`
+
+export const isSettingsWindowView = (): boolean => {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  return new URL(window.location.href).searchParams.get('view') === 'settings'
+}
+
+export const readRequestedSettingsSection = (): SettingsSection => {
+  if (typeof window === 'undefined') {
+    return 'settings'
+  }
+
+  return normalizeSettingsSection(new URL(window.location.href).searchParams.get('section'))
+}
+
+export const publishAssistantSnapshot = async (snapshot: AssistantSnapshot): Promise<void> => {
+  if (!isTauriRuntime()) {
+    return
+  }
+
+  await emit(SNAPSHOT_UPDATED_EVENT, snapshot)
+}
+
+export const listenForAssistantSnapshot = async (
+  handler: (snapshot: AssistantSnapshot) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<AssistantSnapshot>(SNAPSHOT_UPDATED_EVENT, (event) => {
+    handler(event.payload)
+  })
+}
+
+export const listenForSettingsSectionChange = async (
+  handler: (section: SettingsSection) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<{ section?: string }>(SETTINGS_SECTION_EVENT, (event) => {
+    handler(normalizeSettingsSection(event.payload?.section))
+  })
+}
+
+export const openSettingsWindow = async (section: SettingsSection = 'settings'): Promise<boolean> => {
+  const url = settingsWindowUrl(section)
+
+  if (!isTauriRuntime()) {
+    if (typeof window === 'undefined') {
+      return false
+    }
+
+    browserSettingsWindow = window.open(url, 'PenguinPalSettings', 'width=860,height=760')
+    browserSettingsWindow?.focus()
+    return browserSettingsWindow !== null
+  }
+
+  const existing = await WebviewWindow.getByLabel(SETTINGS_WINDOW_LABEL)
+  if (existing) {
+    try {
+      await existing.unminimize()
+    } catch {
+      // no-op
+    }
+    await existing.show()
+    await existing.setFocus()
+    await emitTo(SETTINGS_WINDOW_LABEL, SETTINGS_SECTION_EVENT, { section })
+    return true
+  }
+
+  return await new Promise<boolean>((resolve) => {
+    const settingsWindow = new WebviewWindow(SETTINGS_WINDOW_LABEL, {
+      url,
+      title: 'PenguinPal 设置',
+      width: 820,
+      height: 760,
+      minWidth: 680,
+      minHeight: 620,
+      resizable: true,
+      decorations: true,
+      transparent: false,
+      center: true,
+      focus: true,
+      alwaysOnTop: false,
+      skipTaskbar: false
+    })
+
+    void settingsWindow.once('tauri://created', async () => {
+      await emitTo(SETTINGS_WINDOW_LABEL, SETTINGS_SECTION_EVENT, { section })
+      resolve(true)
+    })
+
+    void settingsWindow.once('tauri://error', () => {
+      resolve(false)
+    })
+  })
+}
+
+export const closeSettingsWindow = async (): Promise<boolean> => {
+  if (!isTauriRuntime()) {
+    if (browserSettingsWindow && !browserSettingsWindow.closed) {
+      browserSettingsWindow.close()
+      browserSettingsWindow = null
+      return true
+    }
+
+    return false
+  }
+
+  const currentWindow = getCurrentWindow()
+  if (currentWindow.label === SETTINGS_WINDOW_LABEL) {
+    await currentWindow.hide()
+    return true
+  }
+
+  const existing = await WebviewWindow.getByLabel(SETTINGS_WINDOW_LABEL)
+  if (!existing) {
+    return false
+  }
+
+  await existing.hide()
+  return true
+}
 
 const safeInvoke = async <T>(
   command: string,
@@ -185,7 +391,7 @@ const nextMockReply = (content: string) => {
   }
 
   if (content.includes('语音')) {
-    return '按住输入框左侧的语音按钮即可录音，松开后会自动转写并发送。回复也可以由系统语音播报。'
+    return '检测到麦克风后会自动进入语音监听，文字输入仍然随时可用。回复也会默认进行系统语音播报，并同步显示头顶气泡。'
   }
 
   return 'UI、安全壳、OAuth 准备流和更严格的动作确认协议已经就位。下一步可以继续接入真实模型网关和 Windows 真机验证。'

@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    ai::{memory, provider},
+    ai::{guardrails, memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
         AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult, PetMode,
@@ -20,10 +20,13 @@ use crate::{
 };
 
 fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
-    runtime.to_snapshot(
-        audio::default_audio_profile(),
-        policy::actions_for_level(runtime.permission_level),
-    )
+    let allowed_actions = policy::actions_for_level(runtime.permission_level);
+    let ai_constraints = guardrails::build_profile(
+        &runtime.provider,
+        runtime.permission_level,
+        &allowed_actions,
+    );
+    runtime.to_snapshot(audio::default_audio_profile(), allowed_actions, ai_constraints)
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
@@ -357,23 +360,41 @@ async fn send_chat_message(
     }
 
     let user_message = ChatMessage::user(trimmed.to_string());
-    let (provider_config, api_key, oauth_access_token, history_window) = {
+    let (
+        provider_config,
+        api_key,
+        oauth_access_token,
+        history_window,
+        permission_level,
+        allowed_actions,
+    ) = {
         let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
         expire_transient_state(&mut runtime);
         runtime.mode = PetMode::Thinking;
         runtime.messages.push(user_message);
         memory::trim_history(&mut runtime.messages);
         save(&app, &runtime)?;
+        let allowed_actions = policy::actions_for_level(runtime.permission_level);
         (
             runtime.provider.clone(),
             runtime.api_key.clone(),
             runtime.oauth_access_token.clone(),
             memory::context_window(&runtime.messages),
+            runtime.permission_level,
+            allowed_actions,
         )
     };
 
-    let (reply_text, provider_label, outcome, detail) =
-        match provider::respond(&provider_config, api_key, oauth_access_token, &history_window).await {
+    let (reply_text, provider_label, outcome, detail) = match provider::respond(
+        &provider_config,
+        api_key,
+        oauth_access_token,
+        permission_level,
+        &allowed_actions,
+        &history_window,
+    )
+    .await
+    {
             Ok((reply, label)) => (
                 reply,
                 label,

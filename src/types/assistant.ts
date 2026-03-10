@@ -43,6 +43,22 @@ export interface AudioProfile {
   stages: AudioStage[]
 }
 
+export interface AiConstraintItem {
+  id: string
+  title: string
+  summary: string
+  status: string
+}
+
+export interface AiConstraintProfile {
+  label: string
+  version: string
+  summary: string
+  immutableRules: AiConstraintItem[]
+  capabilityGates: AiConstraintItem[]
+  runtimeBoundaries: AiConstraintItem[]
+}
+
 export interface OAuthState {
   status: OAuthStatus
   authorizeUrl: string | null
@@ -79,6 +95,7 @@ export interface AssistantSnapshot {
   allowedActions: DesktopAction[]
   auditTrail: AuditEntry[]
   audioProfile: AudioProfile
+  aiConstraints: AiConstraintProfile
 }
 
 export interface ProviderConfigInput {

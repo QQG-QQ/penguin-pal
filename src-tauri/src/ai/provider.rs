@@ -1,4 +1,7 @@
-use crate::app_state::{AuthMode, ChatMessage, ProviderConfig, ProviderKind};
+use crate::{
+    ai::guardrails,
+    app_state::{AuthMode, ChatMessage, DesktopAction, ProviderConfig, ProviderKind},
+};
 use reqwest::Client;
 use serde_json::{json, Value};
 
@@ -6,6 +9,8 @@ pub async fn respond(
     provider: &ProviderConfig,
     api_key: Option<String>,
     oauth_access_token: Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
     history: &[ChatMessage],
 ) -> Result<(String, String), String> {
     if matches!(provider.kind, ProviderKind::Mock) {
@@ -26,6 +31,8 @@ pub async fn respond(
             call_openai_like(
                 provider,
                 Some(credential.as_str()),
+                permission_level,
+                allowed_actions,
                 history,
                 "https://api.openai.com/v1",
                 "OpenAI",
@@ -40,7 +47,7 @@ pub async fn respond(
                 );
             }
             let key = required_key(api_key, "Anthropic")?;
-            call_anthropic(provider, &key, history).await
+            call_anthropic(provider, &key, permission_level, allowed_actions, history).await
         }
         ProviderKind::OpenAiCompatible => {
             let base_url = provider
@@ -62,6 +69,8 @@ pub async fn respond(
             call_openai_like(
                 provider,
                 credential.as_deref(),
+                permission_level,
+                allowed_actions,
                 history,
                 &base_url,
                 "OpenAI-Compatible",
@@ -131,7 +140,7 @@ fn mock_reply(history: &[ChatMessage]) -> String {
     }
 
     if latest.contains("语音") {
-        return "现在可以按住语音键讲话，松开后自动转写并发送。回复完成后，如果开启了语音回复，会使用系统 TTS 播报。"
+        return "检测到麦克风后会自动进入语音监听，识别到内容后会直接转写并发送。回复完成后，如果开启了语音回复，会使用系统 TTS 播报。"
             .to_string();
     }
 
@@ -141,16 +150,19 @@ fn mock_reply(history: &[ChatMessage]) -> String {
 async fn call_openai_like(
     provider: &ProviderConfig,
     credential: Option<&str>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
     history: &[ChatMessage],
     base_url: &str,
     label: &str,
 ) -> Result<(String, String), String> {
     let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let client = Client::new();
+    let system_prompt = guardrails::compose_system_prompt(provider, permission_level, allowed_actions);
     let payload = json!({
         "model": provider.model,
         "temperature": 0.4,
-        "messages": build_openai_messages(provider, history),
+        "messages": build_openai_messages(&system_prompt, history),
     });
 
     let mut request = client.post(endpoint).json(&payload);
@@ -176,6 +188,8 @@ async fn call_openai_like(
 async fn call_anthropic(
     provider: &ProviderConfig,
     api_key: &str,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
     history: &[ChatMessage],
 ) -> Result<(String, String), String> {
     let endpoint = provider
@@ -184,9 +198,10 @@ async fn call_anthropic(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
     let client = Client::new();
+    let system_prompt = guardrails::compose_system_prompt(provider, permission_level, allowed_actions);
     let payload = json!({
         "model": provider.model,
-        "system": provider.system_prompt,
+        "system": system_prompt,
         "max_tokens": 1024,
         "messages": build_anthropic_messages(history),
     });
@@ -220,13 +235,13 @@ async fn call_anthropic(
     Ok((reply, "Anthropic".to_string()))
 }
 
-fn build_openai_messages(provider: &ProviderConfig, history: &[ChatMessage]) -> Vec<Value> {
+fn build_openai_messages(system_prompt: &str, history: &[ChatMessage]) -> Vec<Value> {
     let mut messages = Vec::new();
 
-    if !provider.system_prompt.trim().is_empty() {
+    if !system_prompt.trim().is_empty() {
         messages.push(json!({
             "role": "system",
-            "content": provider.system_prompt,
+            "content": system_prompt,
         }));
     }
 

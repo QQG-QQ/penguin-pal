@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "PenguinPal",
         "width": 296,
         "height": 430,
@@ -20,6 +21,24 @@
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true
+      },
+      {
+        "label": "settings",
+        "title": "PenguinPal 设置",
+        "url": "/?view=settings&section=settings",
+        "width": 820,
+        "height": 760,
+        "minWidth": 680,
+        "minHeight": 620,
+        "resizable": true,
+        "decorations": true,
+        "closable": false,
+        "transparent": false,
+        "center": true,
+        "focus": false,
+        "visible": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false
       }
     ],
     "trayIcon": {

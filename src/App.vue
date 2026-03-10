@@ -6,18 +6,27 @@ import SettingsDrawer from './components/SettingsDrawer.vue'
 import {
   cancelDesktopActionApproval,
   clearConversation,
+  closeSettingsWindow,
   completeOAuthSignIn,
   confirmDesktopAction,
   disconnectOAuthSignIn,
   getAssistantSnapshot,
   hideAssistantWindow,
+  isSettingsWindowView,
+  listenForAssistantSnapshot,
+  listenForSettingsSectionChange,
+  openSettingsWindow,
+  publishAssistantSnapshot,
+  readRequestedSettingsSection,
   requestDesktopAction,
   saveProviderConfig,
   sendChatMessage,
-  startOAuthSignIn
+  startOAuthSignIn,
+  type SettingsSection
 } from './lib/assistant'
 import type {
   ActionApprovalRequest,
+  AiConstraintProfile,
   AssistantSnapshot,
   DesktopAction,
   PetMode,
@@ -39,6 +48,15 @@ const actionCommandMap: Record<string, string[]> = {
   focus_window: ['唤起桌宠', '聚焦桌宠', '显示桌宠'],
   show_window: ['显示主面板', '显示窗口']
 }
+
+const emptyConstraints = (): AiConstraintProfile => ({
+  label: 'Codex Guardrails',
+  version: '2026-03-10',
+  summary: '当前还没有从后端加载 AI 约束配置。',
+  immutableRules: [],
+  capabilityGates: [],
+  runtimeBoundaries: []
+})
 
 const emptySnapshot = (): AssistantSnapshot => ({
   mode: 'idle',
@@ -73,10 +91,11 @@ const emptySnapshot = (): AssistantSnapshot => ({
   allowedActions: [],
   auditTrail: [],
   audioProfile: {
-    inputMode: 'press-to-talk',
+    inputMode: 'auto-listen',
     outputMode: 'speech-synthesis',
     stages: []
-  }
+  },
+  aiConstraints: emptyConstraints()
 })
 
 const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
@@ -99,10 +118,10 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   clearOAuthToken: false
 })
 
+const windowView = ref<'pet' | 'settings'>(isSettingsWindowView() ? 'settings' : 'pet')
 const snapshot = ref<AssistantSnapshot>(emptySnapshot())
 const settingsDraft = ref<ProviderConfigInput>(toDraft(snapshot.value))
-const showSettings = ref(false)
-const drawerSection = ref<'settings' | 'actions'>('settings')
+const drawerSection = ref<SettingsSection>(readRequestedSettingsSection())
 const messageDraft = ref('')
 const bubbleText = ref('')
 const busy = ref(false)
@@ -114,6 +133,7 @@ const approvalChecks = ref<Record<string, boolean>>({})
 const listening = ref(false)
 const visualMode = ref<PetMode | null>(null)
 const microphoneAvailable = ref(false)
+const textInputFocused = ref(false)
 
 let recognition: SpeechRecognition | null = null
 let recognitionBuffer = ''
@@ -122,7 +142,12 @@ let bubbleTimer: number | null = null
 let speechSession = 0
 let mediaDevicesCleanup: (() => void) | null = null
 let microphonePermissionRequested = false
+let snapshotListenerCleanup: (() => void) | null = null
+let sectionListenerCleanup: (() => void) | null = null
+let autoListenTimer: number | null = null
+let speechPlaybackActive = false
 
+const isSettingsView = computed(() => windowView.value === 'settings')
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
 
 const canSubmitApproval = computed(() => {
@@ -149,11 +174,27 @@ const voiceReplySupported = computed(
   () => typeof window !== 'undefined' && 'speechSynthesis' in window
 )
 
+const shouldAutoListen = computed(
+  () =>
+    voiceInputAvailable.value &&
+    !isSettingsView.value &&
+    !busy.value &&
+    !textInputFocused.value &&
+    !pendingApproval.value &&
+    !speechPlaybackActive &&
+    !messageDraft.value.trim()
+)
+
 const normalizeCommand = (value: string) => value.replace(/\s+/g, '').toLowerCase()
 
 const applySnapshot = (nextSnapshot: AssistantSnapshot) => {
   snapshot.value = nextSnapshot
   settingsDraft.value = toDraft(nextSnapshot)
+}
+
+const syncSnapshot = async (nextSnapshot: AssistantSnapshot) => {
+  applySnapshot(nextSnapshot)
+  await publishAssistantSnapshot(nextSnapshot)
 }
 
 const clearBubbleTimer = () => {
@@ -166,6 +207,29 @@ const clearBubbleTimer = () => {
 const clearBubble = () => {
   clearBubbleTimer()
   bubbleText.value = ''
+}
+
+const clearAutoListenTimer = () => {
+  if (autoListenTimer !== null) {
+    window.clearTimeout(autoListenTimer)
+    autoListenTimer = null
+  }
+}
+
+const scheduleAutoListening = (delay = 260) => {
+  clearAutoListenTimer()
+
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  autoListenTimer = window.setTimeout(() => {
+    if (!shouldAutoListen.value || listening.value) {
+      return
+    }
+
+    void startListening(true)
+  }, delay)
 }
 
 const resetVisualModeSoon = (delay = 700) => {
@@ -190,6 +254,7 @@ const showBubble = (content: string, mode: PetMode = 'speaking', duration = 4200
     }
     bubbleText.value = ''
     resetVisualModeSoon(0)
+    scheduleAutoListening()
   }, duration)
 }
 
@@ -202,6 +267,13 @@ const speakReply = (content: string) => {
   const session = ++speechSession
   clearBubbleTimer()
   window.speechSynthesis.cancel()
+  clearAutoListenTimer()
+  speechPlaybackActive = true
+
+  if (recognition && listening.value) {
+    submitVoiceAfterStop = false
+    recognition.stop()
+  }
 
   const utterance = new SpeechSynthesisUtterance(content)
   utterance.lang = 'zh-CN'
@@ -218,14 +290,18 @@ const speakReply = (content: string) => {
     if (session !== speechSession) {
       return
     }
+    speechPlaybackActive = false
     bubbleText.value = ''
     resetVisualModeSoon()
+    scheduleAutoListening(320)
   }
   utterance.onerror = () => {
     if (session !== speechSession) {
       return
     }
+    speechPlaybackActive = false
     showBubble(content, 'speaking')
+    scheduleAutoListening(320)
   }
 
   window.speechSynthesis.speak(utterance)
@@ -272,9 +348,7 @@ const persistSettings = async (draft: ProviderConfigInput) => {
     nextDraft.model = providerDefaults[nextDraft.kind]
   }
 
-  const nextSnapshot = await saveProviderConfig(nextDraft)
-  applySnapshot(nextSnapshot)
-  return nextSnapshot
+  return saveProviderConfig(nextDraft)
 }
 
 const refreshMicrophoneAvailability = async (requestPermission = false) => {
@@ -318,7 +392,9 @@ const setupMediaDeviceWatcher = () => {
   }
 
   const onDeviceChange = () => {
-    void refreshMicrophoneAvailability()
+    void refreshMicrophoneAvailability().then(() => {
+      scheduleAutoListening(260)
+    })
   }
 
   navigator.mediaDevices.addEventListener('devicechange', onDeviceChange)
@@ -350,14 +426,18 @@ const findDirectAction = (content: string) => {
   )
 }
 
-const openDrawer = (section: 'settings' | 'actions') => {
-  drawerSection.value = section
-  showSettings.value = true
+const openDrawer = async (section: SettingsSection) => {
+  if (isSettingsView.value) {
+    drawerSection.value = section
+    return true
+  }
+
+  return openSettingsWindow(section)
 }
 
-const hidePet = async () => {
-  showSettings.value = false
+const closeDrawer = async () => closeSettingsWindow()
 
+const hidePet = async () => {
   try {
     const hidden = await hideAssistantWindow()
     if (!hidden) {
@@ -371,7 +451,7 @@ const hidePet = async () => {
 const resetConversation = async (announceAfter = false) => {
   try {
     const nextSnapshot = await clearConversation()
-    applySnapshot(nextSnapshot)
+    await syncSnapshot(nextSnapshot)
     clearPendingApproval()
     if (announceAfter) {
       announce('对话已经清空，重新回到默认陪伴状态。')
@@ -391,8 +471,7 @@ const triggerAction = async (action: DesktopAction) => {
 
   try {
     const result = await requestDesktopAction(action.id)
-    applySnapshot(result.snapshot)
-    showSettings.value = false
+    await syncSnapshot(result.snapshot)
     setPendingApproval(result.approvalRequest)
     announce(result.message, result.approvalRequest ? 'guarded' : 'speaking')
   } catch (error) {
@@ -418,14 +497,19 @@ const maybeHandleLocalCommand = async (content: string) => {
       normalized.includes(normalizeCommand(token))
     )
   ) {
-    openDrawer('settings')
-    announce('设置已经打开，你可以调整模型、OAuth、安全边界和受控动作。')
+    const opened = await openDrawer('settings')
+    announce(
+      opened
+        ? '设置窗口已经打开，你可以在新窗口里调整模型、OAuth、安全边界和受控动作。'
+        : '设置窗口打开失败，请检查当前运行环境。',
+      opened ? 'speaking' : 'guarded'
+    )
     return true
   }
 
   if (['关闭设置', '收起设置'].some((token) => normalized.includes(normalizeCommand(token)))) {
-    showSettings.value = false
-    announce('设置已经收起。')
+    const closed = await closeDrawer()
+    announce(closed ? '设置窗口已经关闭。' : '当前没有打开的设置窗口。', closed ? 'speaking' : 'guarded')
     return true
   }
 
@@ -434,18 +518,19 @@ const maybeHandleLocalCommand = async (content: string) => {
       normalized.includes(normalizeCommand(token))
     )
   ) {
-    openDrawer('actions')
-    announce('动作页已经打开。高风险动作仍然需要逐项确认。')
+    const opened = await openDrawer('actions')
+    announce(
+      opened ? '动作页已经在独立设置窗口中打开。' : '动作页打开失败，请检查当前运行环境。',
+      opened ? 'speaking' : 'guarded'
+    )
     return true
   }
 
   if (
     ['关闭动作面板', '收起动作面板'].some((token) => normalized.includes(normalizeCommand(token)))
   ) {
-    if (drawerSection.value === 'actions') {
-      showSettings.value = false
-    }
-    announce('动作列表已经收起。')
+    const closed = await closeDrawer()
+    announce(closed ? '动作窗口已经关闭。' : '当前没有打开的动作窗口。', closed ? 'speaking' : 'guarded')
     return true
   }
 
@@ -474,7 +559,7 @@ const maybeHandleLocalCommand = async (content: string) => {
 
 const sendMessage = async (value = messageDraft.value) => {
   const content = value.trim()
-  if (!content || busy.value) {
+  if (!content || busy.value || isSettingsView.value) {
     return
   }
 
@@ -482,9 +567,15 @@ const sendMessage = async (value = messageDraft.value) => {
   if (voiceReplySupported.value) {
     window.speechSynthesis.cancel()
   }
+  if (recognition && listening.value) {
+    submitVoiceAfterStop = false
+    recognition.stop()
+  }
+  clearAutoListenTimer()
   clearBubble()
 
   if (await maybeHandleLocalCommand(content)) {
+    scheduleAutoListening(260)
     return
   }
 
@@ -500,6 +591,7 @@ const sendMessage = async (value = messageDraft.value) => {
   } finally {
     busy.value = false
     resetVisualModeSoon(900)
+    scheduleAutoListening(320)
   }
 }
 
@@ -552,13 +644,18 @@ const ensureRecognition = () => {
     }
 
     resetVisualModeSoon(200)
+    scheduleAutoListening(260)
   }
 
   return recognition
 }
 
-const startListening = async () => {
-  if (busy.value || listening.value) {
+const startListening = async (autoMode = false) => {
+  if (busy.value || listening.value || isSettingsView.value) {
+    return
+  }
+
+  if (autoMode && !shouldAutoListen.value) {
     return
   }
 
@@ -569,34 +666,30 @@ const startListening = async () => {
   }
 
   if (!instance) {
-    announce('当前没有检测到可用麦克风或语音识别环境，请改用文字输入。', 'guarded')
+    if (!autoMode) {
+      announce('当前没有检测到可用麦克风或语音识别环境，请改用文字输入。', 'guarded')
+    }
     return
   }
 
   try {
     recognitionBuffer = ''
-    submitVoiceAfterStop = false
+    submitVoiceAfterStop = autoMode
     listening.value = true
     visualMode.value = 'listening'
     if (voiceReplySupported.value) {
       window.speechSynthesis.cancel()
     }
     clearBubble()
+    clearAutoListenTimer()
     instance.start()
   } catch {
     listening.value = false
-    announce('语音输入正在占用中，请稍后再试。', 'guarded')
+    if (!autoMode) {
+      announce('语音输入正在占用中，请稍后再试。', 'guarded')
+    }
+    scheduleAutoListening(420)
   }
-}
-
-const stopListening = () => {
-  if (!recognition || !listening.value) {
-    return
-  }
-
-  submitVoiceAfterStop = true
-  visualMode.value = 'thinking'
-  recognition.stop()
 }
 
 const confirmPendingAction = async () => {
@@ -616,7 +709,7 @@ const confirmPendingAction = async () => {
       approvalPhrase.value,
       acknowledgedChecks
     )
-    applySnapshot(result.snapshot)
+    await syncSnapshot(result.snapshot)
     clearPendingApproval()
     announce(result.message)
   } catch (error) {
@@ -634,7 +727,7 @@ const cancelPendingAction = async () => {
 
   try {
     const nextSnapshot = await cancelDesktopActionApproval(pendingApproval.value.id)
-    applySnapshot(nextSnapshot)
+    await syncSnapshot(nextSnapshot)
     announce('本次动作授权已取消。', 'guarded')
   } catch (error) {
     announce(error instanceof Error ? error.message : '取消动作授权失败', 'guarded')
@@ -647,7 +740,8 @@ const saveSettings = async (draft: ProviderConfigInput) => {
   savingSettings.value = true
 
   try {
-    await persistSettings(draft)
+    const nextSnapshot = await persistSettings(draft)
+    await syncSnapshot(nextSnapshot)
     announce('设置已经保存。')
   } catch (error) {
     announce(error instanceof Error ? error.message : '保存配置失败', 'guarded')
@@ -660,15 +754,16 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
   authBusy.value = true
 
   try {
-    await persistSettings(draft)
+    const nextSnapshot = await persistSettings(draft)
+    await syncSnapshot(nextSnapshot)
     const result = await startOAuthSignIn()
-    applySnapshot(result.snapshot)
+    await syncSnapshot(result.snapshot)
     announce(result.message)
     if (result.authorizationUrl && typeof window !== 'undefined') {
       try {
         window.open(result.authorizationUrl, '_blank', 'noopener,noreferrer')
       } catch {
-        announce('浏览器没有自动打开，你可以在设置浮层里复制授权链接。', 'guarded')
+        announce('浏览器没有自动打开，你可以在设置窗口里复制授权链接。', 'guarded')
       }
     }
   } catch (error) {
@@ -683,7 +778,7 @@ const finishOAuthLogin = async (callbackUrl: string) => {
 
   try {
     const result = await completeOAuthSignIn(callbackUrl)
-    applySnapshot(result.snapshot)
+    await syncSnapshot(result.snapshot)
     announce(result.message)
   } catch (error) {
     announce(error instanceof Error ? error.message : '完成 OAuth 登录失败', 'guarded')
@@ -697,7 +792,7 @@ const disconnectOAuthLogin = async () => {
 
   try {
     const result = await disconnectOAuthSignIn()
-    applySnapshot(result.snapshot)
+    await syncSnapshot(result.snapshot)
     announce(result.message)
   } catch (error) {
     announce(error instanceof Error ? error.message : '退出 OAuth 登录失败', 'guarded')
@@ -706,16 +801,49 @@ const disconnectOAuthLogin = async () => {
   }
 }
 
+const handleInputFocus = () => {
+  textInputFocused.value = true
+  clearAutoListenTimer()
+
+  if (recognition && listening.value) {
+    submitVoiceAfterStop = false
+    recognition.stop()
+  }
+}
+
+const handleInputBlur = () => {
+  textInputFocused.value = false
+  scheduleAutoListening(320)
+}
+
+const setupCrossWindowListeners = async () => {
+  snapshotListenerCleanup = await listenForAssistantSnapshot((nextSnapshot) => {
+    applySnapshot(nextSnapshot)
+  })
+
+  if (isSettingsView.value) {
+    sectionListenerCleanup = await listenForSettingsSectionChange((section) => {
+      drawerSection.value = section
+    })
+  }
+}
+
 onMounted(() => {
   void loadSnapshot()
-  void refreshMicrophoneAvailability(true)
+  void refreshMicrophoneAvailability(!isSettingsView.value).then(() => {
+    scheduleAutoListening(420)
+  })
   setupMediaDeviceWatcher()
+  void setupCrossWindowListeners()
 })
 
 onBeforeUnmount(() => {
   recognition?.stop()
   clearBubbleTimer()
+  clearAutoListenTimer()
   mediaDevicesCleanup?.()
+  snapshotListenerCleanup?.()
+  sectionListenerCleanup?.()
   if (voiceReplySupported.value) {
     window.speechSynthesis.cancel()
   }
@@ -723,23 +851,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell">
-    <div class="pet-stack">
-      <Penguin :mode="activeMode" :bubble-text="bubbleText" />
-
-      <InputBox
-        v-model="messageDraft"
-        :busy="busy"
-        :listening="listening"
-        :voice-supported="voiceInputAvailable"
-        @send="sendMessage()"
-        @voice-start="startListening"
-        @voice-stop="stopListening"
-      />
-    </div>
-
+  <div v-if="isSettingsView" class="settings-window-shell">
     <SettingsDrawer
-      :open="showSettings"
       :section="drawerSection"
       :draft="settingsDraft"
       :saving="savingSettings"
@@ -748,7 +861,8 @@ onBeforeUnmount(() => {
       :oauth-busy="authBusy"
       :actions="snapshot.allowedActions"
       :permission-level="snapshot.permissionLevel"
-      @close="showSettings = false"
+      :ai-constraints="snapshot.aiConstraints"
+      @close="closeDrawer"
       @save="saveSettings"
       @section-change="drawerSection = $event"
       @oauth-start="beginOAuthLogin"
@@ -756,6 +870,72 @@ onBeforeUnmount(() => {
       @oauth-disconnect="disconnectOAuthLogin"
       @trigger-action="handleActionTrigger"
     />
+
+    <transition name="confirm">
+      <div v-if="pendingApproval" class="confirm-shell settings-confirm-shell">
+        <section class="confirm-panel">
+          <p class="eyebrow dark">One-Time Approval</p>
+          <h2>{{ pendingApproval.action.title }}</h2>
+          <p>{{ pendingApproval.prompt }}</p>
+
+          <div class="approval-list">
+            <label
+              v-for="check in pendingApproval.checks"
+              :key="check.id"
+              class="approval-check"
+            >
+              <input
+                type="checkbox"
+                :checked="Boolean(approvalChecks[check.id])"
+                @change="toggleApprovalCheck(check.id, ($event.target as HTMLInputElement).checked)"
+              />
+              <span>{{ check.label }}</span>
+            </label>
+          </div>
+
+          <label class="approval-field">
+            <span>输入确认短语</span>
+            <input
+              :value="approvalPhrase"
+              :placeholder="pendingApproval.requiredPhrase"
+              @input="approvalPhrase = ($event.target as HTMLInputElement).value"
+            />
+          </label>
+
+          <p class="approval-expiry">
+            该授权短语两分钟内有效：<strong>{{ pendingApproval.requiredPhrase }}</strong>
+          </p>
+
+          <div class="confirm-actions">
+            <button type="button" class="panel-chip muted" @click="cancelPendingAction">
+              取消
+            </button>
+            <button
+              type="button"
+              class="confirm-button"
+              :disabled="!canSubmitApproval"
+              @click="confirmPendingAction"
+            >
+              我确认执行
+            </button>
+          </div>
+        </section>
+      </div>
+    </transition>
+  </div>
+
+  <div v-else class="app-shell">
+    <div class="pet-stack">
+      <Penguin :mode="activeMode" :bubble-text="bubbleText" />
+
+      <InputBox
+        v-model="messageDraft"
+        :busy="busy"
+        @send="sendMessage()"
+        @focus="handleInputFocus"
+        @blur="handleInputBlur"
+      />
+    </div>
 
     <transition name="confirm">
       <div v-if="pendingApproval" class="confirm-shell">
@@ -845,6 +1025,12 @@ body {
   overflow: hidden;
 }
 
+.settings-window-shell {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(180deg, #f5fbfc, #e7f1f5);
+}
+
 .app-shell {
   position: relative;
   width: 100%;
@@ -880,6 +1066,10 @@ body {
   backdrop-filter: blur(10px);
 }
 
+.settings-confirm-shell {
+  background: rgba(6, 18, 28, 0.2);
+}
+
 .confirm-actions {
   display: flex;
   justify-content: space-between;
@@ -888,7 +1078,7 @@ body {
 }
 
 .confirm-panel {
-  width: min(88vw, 332px);
+  width: min(88vw, 360px);
   padding: 22px;
   border-radius: 28px;
   background: linear-gradient(180deg, rgba(251, 253, 254, 0.98), rgba(232, 243, 247, 0.98));
@@ -909,6 +1099,10 @@ body {
   font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+}
+
+.eyebrow.dark {
+  color: #5b7a88;
 }
 
 .panel-chip,

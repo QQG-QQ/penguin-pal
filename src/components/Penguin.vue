@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { computed } from 'vue'
 import guardedArt from '../../penguin/penguin-guarded-cutout.png'
 import idleArt from '../../penguin/penguin-idle-cutout.png'
 import listeningArt from '../../penguin/penguin-listening-cutout.png'
@@ -25,17 +25,26 @@ const artwork = computed(() => {
   return map[props.mode]
 })
 
-const startDrag = async () => {
+const startDrag = async (event: MouseEvent) => {
+  if (event.buttons !== 1 || typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+    return
+  }
+
   try {
     await getCurrentWindow().startDragging()
   } catch {
-    console.info('Dragging not available in browser preview')
+    // Keep the declarative drag region as the primary path and only use this as a fallback.
   }
 }
 </script>
 
 <template>
-  <section class="pet-shell" :class="`mode-${mode}`" @pointerdown.left.prevent="startDrag">
+  <section
+    class="pet-shell"
+    :class="`mode-${mode}`"
+    data-tauri-drag-region
+    @mousedown.left="startDrag"
+  >
     <transition name="bubble">
       <div v-if="bubbleText" class="speech-bubble">
         <p>{{ bubbleText }}</p>
@@ -46,7 +55,7 @@ const startDrag = async () => {
     <div class="pet-aura aura-b" />
     <div class="pet-shadow" />
 
-    <div class="pet-body">
+    <div class="pet-body" data-tauri-drag-region>
       <img
         class="penguin-art"
         :class="`motion-${mode}`"
@@ -68,6 +77,11 @@ const startDrag = async () => {
   justify-content: center;
   user-select: none;
   -webkit-user-select: none;
+  cursor: grab;
+}
+
+.pet-shell:active {
+  cursor: grabbing;
 }
 
 .pet-aura,
@@ -123,6 +137,7 @@ const startDrag = async () => {
   filter: drop-shadow(0 12px 18px rgba(8, 20, 31, 0.14));
   user-select: none;
   -webkit-user-drag: none;
+  pointer-events: none;
 }
 
 .speech-bubble {

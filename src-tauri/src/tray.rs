@@ -27,7 +27,7 @@ pub fn create_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::e
                 }
             }
             "settings" => {
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_webview_window("settings") {
                     let _ = window.show();
                     let _ = window.set_focus();
                 }

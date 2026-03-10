@@ -238,6 +238,26 @@ pub struct AudioProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AiConstraintItem {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiConstraintProfile {
+    pub label: String,
+    pub version: String,
+    pub summary: String,
+    pub immutable_rules: Vec<AiConstraintItem>,
+    pub capability_gates: Vec<AiConstraintItem>,
+    pub runtime_boundaries: Vec<AiConstraintItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionApprovalCheck {
     pub id: String,
     pub label: String,
@@ -265,6 +285,7 @@ pub struct AssistantSnapshot {
     pub allowed_actions: Vec<DesktopAction>,
     pub audit_trail: Vec<AuditEntry>,
     pub audio_profile: AudioProfile,
+    pub ai_constraints: AiConstraintProfile,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -382,6 +403,7 @@ impl RuntimeState {
         &self,
         audio_profile: AudioProfile,
         allowed_actions: Vec<DesktopAction>,
+        ai_constraints: AiConstraintProfile,
     ) -> AssistantSnapshot {
         let mut provider = self.provider.clone();
         provider.api_key_loaded = self
@@ -422,6 +444,7 @@ impl RuntimeState {
             allowed_actions,
             audit_trail: self.audit_trail.clone(),
             audio_profile,
+            ai_constraints,
         }
     }
 }
