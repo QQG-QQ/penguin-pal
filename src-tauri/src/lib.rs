@@ -6,7 +6,7 @@ mod security;
 mod tray;
 mod window;
 
-use std::sync::Mutex;
+use std::{sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
@@ -270,6 +270,145 @@ fn start_oauth_sign_in(
         authorization_url: Some(authorization_url),
         snapshot: snapshot_from_runtime(&runtime),
     })
+}
+
+#[tauri::command]
+async fn start_oauth_sign_in_auto(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+) -> Result<OAuthFlowResult, String> {
+    let (authorization_url, redirect_url) = {
+        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        expire_transient_state(&mut runtime);
+
+        if !matches!(runtime.provider.auth_mode, AuthMode::OAuth) {
+            return Err("请先在设置中把认证方式切换到 OAuth。".to_string());
+        }
+        ensure_network_allowed(runtime.provider.allow_network)?;
+
+        let pending = oauth::prepare_authorization(&runtime.provider)?;
+        let authorization_url = pending.authorization_url.clone();
+        let redirect_url = runtime
+            .provider
+            .oauth
+            .redirect_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_OAUTH_REDIRECT_URL.to_string());
+
+        runtime.pending_oauth = Some(pending);
+        runtime.oauth_last_error = None;
+        runtime.mode = PetMode::Idle;
+        audit::push_entry(
+            &mut runtime.audit_trail,
+            audit::record(
+                "oauth_login_started",
+                "pending",
+                "自动登录已启动，等待浏览器回调。",
+                1,
+            ),
+        );
+        save(&app, &runtime)?;
+        (authorization_url, redirect_url)
+    };
+
+    if let Err(error) = oauth::open_authorization_in_browser(&authorization_url) {
+        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        runtime.oauth_last_error = Some(error.clone());
+        audit::push_entry(
+            &mut runtime.audit_trail,
+            audit::record("oauth_login_started", "error", &error, 1),
+        );
+        save(&app, &runtime)?;
+        return Ok(OAuthFlowResult {
+            message: format!(
+                "自动打开浏览器失败：{}。你可以改用“生成授权链接”手动登录。",
+                error
+            ),
+            authorization_url: Some(authorization_url),
+            snapshot: snapshot_from_runtime(&runtime),
+        });
+    }
+
+    let callback_url = tauri::async_runtime::spawn_blocking({
+        let redirect_url = redirect_url.clone();
+        move || oauth::wait_for_callback(&redirect_url, Duration::from_secs(180))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    let (provider_config, pending) = {
+        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        expire_transient_state(&mut runtime);
+        let pending = runtime
+            .pending_oauth
+            .take()
+            .ok_or_else(|| "当前没有进行中的 OAuth 登录。".to_string())?;
+        save(&app, &runtime)?;
+        (runtime.provider.clone(), pending)
+    };
+
+    let (code, returned_state) = match oauth::parse_callback(&callback_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            runtime.oauth_last_error = Some(error.clone());
+            audit::push_entry(
+                &mut runtime.audit_trail,
+                audit::record("oauth_login_completed", "error", "OAuth 回调解析失败。", 1),
+            );
+            save(&app, &runtime)?;
+            return Err(error);
+        }
+    };
+
+    if returned_state != pending.state {
+        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        runtime.oauth_last_error = Some("OAuth 状态校验失败，请重新发起登录。".to_string());
+        audit::push_entry(
+            &mut runtime.audit_trail,
+            audit::record(
+                "oauth_login_completed",
+                "rejected",
+                "OAuth 状态校验失败。",
+                1,
+            ),
+        );
+        save(&app, &runtime)?;
+        return Err("OAuth 状态校验失败，请重新发起登录。".to_string());
+    }
+
+    match oauth::exchange_code(&provider_config, &pending, &code).await {
+        Ok(exchange) => {
+            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            runtime.oauth_access_token = Some(exchange.access_token);
+            runtime.oauth_refresh_token = exchange.refresh_token;
+            runtime.oauth_access_expires_at = exchange.expires_at;
+            runtime.oauth_account_hint = exchange.account_hint;
+            runtime.oauth_last_error = None;
+            runtime.mode = PetMode::Idle;
+            audit::push_entry(
+                &mut runtime.audit_trail,
+                audit::record("oauth_login_completed", "ok", "自动登录成功。", 1),
+            );
+            save(&app, &runtime)?;
+            Ok(OAuthFlowResult {
+                message: "OAuth 登录成功。当前只会在运行内存中保留访问令牌，并优先把它用于支持 bearer token 的模型网关。"
+                    .to_string(),
+                authorization_url: None,
+                snapshot: snapshot_from_runtime(&runtime),
+            })
+        }
+        Err(error) => {
+            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            runtime.oauth_last_error = Some(error.clone());
+            audit::push_entry(
+                &mut runtime.audit_trail,
+                audit::record("oauth_login_completed", "error", &error, 1),
+            );
+            save(&app, &runtime)?;
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -688,6 +827,7 @@ pub fn run() {
             get_assistant_snapshot,
             save_provider_config,
             start_oauth_sign_in,
+            start_oauth_sign_in_auto,
             complete_oauth_sign_in,
             disconnect_oauth_sign_in,
             send_chat_message,

@@ -21,7 +21,7 @@ import {
   requestDesktopAction,
   saveProviderConfig,
   sendChatMessage,
-  startOAuthSignIn,
+  startOAuthSignInAuto,
   type SettingsSection
 } from './lib/assistant'
 import type {
@@ -756,7 +756,7 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
   try {
     const nextSnapshot = await persistSettings(draft)
     await syncSnapshot(nextSnapshot)
-    const result = await startOAuthSignIn()
+    const result = await startOAuthSignInAuto()
     await syncSnapshot(result.snapshot)
     announce(result.message)
     if (result.authorizationUrl && typeof window !== 'undefined') {
@@ -767,7 +767,7 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
       }
     }
   } catch (error) {
-    announce(error instanceof Error ? error.message : '生成 OAuth 授权链接失败', 'guarded')
+    announce(error instanceof Error ? error.message : '一键 OAuth 登录失败', 'guarded')
   } finally {
     authBusy.value = false
   }

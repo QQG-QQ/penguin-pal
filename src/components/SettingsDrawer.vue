@@ -249,7 +249,7 @@ const copyPendingUrl = async () => {
               :disabled="oauthBusy"
               @click="emit('oauthStart', cloneDraft(localDraft))"
             >
-              {{ oauthBusy ? '处理中...' : '生成授权链接' }}
+              {{ oauthBusy ? '处理中...' : '一键 OAuth 登录' }}
             </button>
             <button
               type="button"

@@ -502,6 +502,51 @@ export const startOAuthSignIn = async (): Promise<OAuthFlowResult> => {
   }
 }
 
+export const startOAuthSignInAuto = async (): Promise<OAuthFlowResult> => {
+  try {
+    return await safeInvoke<OAuthFlowResult>('start_oauth_sign_in_auto')
+  } catch {
+    const started = await startOAuthSignIn()
+    if (!started.snapshot.provider.oauth.pendingAuthUrl) {
+      return started
+    }
+
+    fallbackSnapshot = {
+      ...started.snapshot,
+      provider: {
+        ...started.snapshot.provider,
+        oauth: {
+          ...started.snapshot.provider.oauth,
+          status: 'authorized',
+          pendingAuthUrl: null,
+          accessTokenLoaded: true,
+          accountHint: 'demo-oauth-user',
+          lastError: null,
+          startedAt: null,
+          expiresAt: now() + 60 * 60 * 1000
+        }
+      },
+      auditTrail: [
+        {
+          id: `audit-${now()}`,
+          action: 'oauth_login_completed',
+          outcome: 'demo',
+          detail: '浏览器演示模式已自动完成 OAuth 登录。',
+          createdAt: now(),
+          riskLevel: 1
+        },
+        ...started.snapshot.auditTrail
+      ].slice(0, 8)
+    }
+
+    return {
+      message: 'OAuth 演示自动登录成功。当前仅把访问令牌状态保留在运行内存中。',
+      authorizationUrl: started.authorizationUrl,
+      snapshot: clone(fallbackSnapshot)
+    }
+  }
+}
+
 export const completeOAuthSignIn = async (callbackUrl: string): Promise<OAuthFlowResult> => {
   try {
     return await safeInvoke<OAuthFlowResult>('complete_oauth_sign_in', { callbackUrl })
