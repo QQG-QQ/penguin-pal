@@ -1,10 +1,11 @@
-use crate::app_state::{ChatMessage, ProviderConfig, ProviderKind};
+use crate::app_state::{AuthMode, ChatMessage, ProviderConfig, ProviderKind};
 use reqwest::Client;
 use serde_json::{json, Value};
 
 pub async fn respond(
     provider: &ProviderConfig,
     api_key: Option<String>,
+    oauth_access_token: Option<String>,
     history: &[ChatMessage],
 ) -> Result<(String, String), String> {
     if matches!(provider.kind, ProviderKind::Mock) {
@@ -21,10 +22,10 @@ pub async fn respond(
 
     match provider.kind {
         ProviderKind::OpenAi => {
-            let key = required_key(api_key, "OpenAI")?;
+            let credential = credential_for_openai(provider, api_key, oauth_access_token, "OpenAI")?;
             call_openai_like(
                 provider,
-                Some(key.as_str()),
+                Some(credential.as_str()),
                 history,
                 "https://api.openai.com/v1",
                 "OpenAI",
@@ -32,6 +33,12 @@ pub async fn respond(
             .await
         }
         ProviderKind::Anthropic => {
+            if matches!(provider.auth_mode, AuthMode::OAuth) {
+                return Err(
+                    "Anthropic 当前未接入 OAuth bearer token，这个版本仅支持 API Key。"
+                        .to_string(),
+                );
+            }
             let key = required_key(api_key, "Anthropic")?;
             call_anthropic(provider, &key, history).await
         }
@@ -41,9 +48,20 @@ pub async fn respond(
                 .clone()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "http://127.0.0.1:11434/v1".to_string());
+            let credential = match provider.auth_mode {
+                AuthMode::ApiKey => api_key
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string),
+                AuthMode::OAuth => Some(required_oauth_token(
+                    oauth_access_token,
+                    "OpenAI-Compatible",
+                )?),
+            };
+
             call_openai_like(
                 provider,
-                api_key.as_deref().filter(|value| !value.trim().is_empty()),
+                credential.as_deref(),
                 history,
                 &base_url,
                 "OpenAI-Compatible",
@@ -56,15 +74,33 @@ pub async fn respond(
 
 pub fn fallback_reply(error: &str) -> String {
     format!(
-        "外部 AI 调用失败：{}。\n我没有执行任何桌面动作，也不会绕过白名单。你可以检查 API Key、模型地址或切回 Mock 模式。",
+        "外部 AI 调用失败：{}。\n我没有执行任何桌面动作，也不会绕过白名单。你可以检查 API Key、OAuth 配置、模型地址或切回 Mock 模式。",
         error
     )
+}
+
+fn credential_for_openai(
+    provider: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    provider_name: &str,
+) -> Result<String, String> {
+    match provider.auth_mode {
+        AuthMode::ApiKey => required_key(api_key, provider_name),
+        AuthMode::OAuth => required_oauth_token(oauth_access_token, provider_name),
+    }
 }
 
 fn required_key(api_key: Option<String>, provider: &str) -> Result<String, String> {
     api_key
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("{provider} 尚未配置 API Key"))
+}
+
+fn required_oauth_token(token: Option<String>, provider: &str) -> Result<String, String> {
+    token
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{provider} 尚未完成 OAuth 登录或访问令牌已失效"))
 }
 
 fn mock_reply(history: &[ChatMessage]) -> String {
@@ -76,7 +112,12 @@ fn mock_reply(history: &[ChatMessage]) -> String {
         .unwrap_or_default();
 
     if latest.contains("安全") || latest.contains("权限") {
-        return "当前桌宠运行在严格白名单模式。AI 只能提出建议，真正的系统动作只能通过动作面板，并且高风险操作必须人工确认。"
+        return "当前桌宠运行在严格白名单模式。AI 只能提出建议，真正的系统动作只能通过动作面板，并且高风险操作必须逐项确认。"
+            .to_string();
+    }
+
+    if latest.contains("OAuth") || latest.contains("登录") {
+        return "现在已经支持 OAuth 准备流和 API Key 双模式。是否真能用 OAuth 调模型，取决于你的上游模型网关是否支持 OAuth bearer token。"
             .to_string();
     }
 
@@ -85,7 +126,7 @@ fn mock_reply(history: &[ChatMessage]) -> String {
         || latest.contains("控制电脑")
         || latest.contains("打开")
     {
-        return "桌面控制已经被收口到白名单动作层，目前开放的是示例级动作。未来即使接入真实模型，也不会允许自由命令执行。"
+        return "桌面控制已经被收口到白名单动作层，目前高风险动作必须先申请一次性授权票据，再勾选确认项并输入确认短语。"
             .to_string();
     }
 
@@ -94,12 +135,12 @@ fn mock_reply(history: &[ChatMessage]) -> String {
             .to_string();
     }
 
-    "桌宠 UI、对话壳和安全网关已经连通。你现在可以继续微调人设、模型和动作白名单。".to_string()
+    "桌宠 UI、对话壳、OAuth 准备流和更严格的确认网关已经连通。你现在可以继续微调人设、模型和动作白名单。".to_string()
 }
 
 async fn call_openai_like(
     provider: &ProviderConfig,
-    api_key: Option<&str>,
+    credential: Option<&str>,
     history: &[ChatMessage],
     base_url: &str,
     label: &str,
@@ -113,8 +154,8 @@ async fn call_openai_like(
     });
 
     let mut request = client.post(endpoint).json(&payload);
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
+    if let Some(token) = credential {
+        request = request.bearer_auth(token);
     }
 
     let response = request.send().await.map_err(|error| error.to_string())?;

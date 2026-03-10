@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import lottie, { type AnimationItem } from 'lottie-web'
+import { computed } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import guardedArt from '../../penguin/penguin-guarded-cutout.png'
+import idleArt from '../../penguin/penguin-idle-cutout.png'
+import listeningArt from '../../penguin/penguin-listening-cutout.png'
+import speakingArt from '../../penguin/penguin-speaking-cutout.png'
+import thinkingArt from '../../penguin/penguin-thinking-cutout.png'
 import type { PetMode } from '../types/assistant'
 
 const props = defineProps<{
@@ -18,9 +22,6 @@ const emit = defineEmits<{
   hide: []
 }>()
 
-const container = ref<HTMLDivElement>()
-let animation: AnimationItem | null = null
-
 const modeMeta = computed(() => {
   const map: Record<PetMode, { label: string; accent: string }> = {
     idle: { label: '巡航待命', accent: '低打扰陪伴中' },
@@ -33,6 +34,18 @@ const modeMeta = computed(() => {
   return map[props.mode]
 })
 
+const artwork = computed(() => {
+  const map: Record<PetMode, { src: string; alt: string }> = {
+    idle: { src: idleArt, alt: '管理员企鹅待机立绘' },
+    listening: { src: listeningArt, alt: '管理员企鹅聆听立绘' },
+    thinking: { src: thinkingArt, alt: '管理员企鹅思考立绘' },
+    speaking: { src: speakingArt, alt: '管理员企鹅回复立绘' },
+    guarded: { src: guardedArt, alt: '管理员企鹅警戒立绘' }
+  }
+
+  return map[props.mode]
+})
+
 const startDrag = async () => {
   try {
     await getCurrentWindow().startDragging()
@@ -40,25 +53,6 @@ const startDrag = async () => {
     console.info('Dragging not available in browser preview')
   }
 }
-
-onMounted(() => {
-  if (!container.value) {
-    return
-  }
-
-  animation = lottie.loadAnimation({
-    container: container.value,
-    renderer: 'svg',
-    loop: true,
-    autoplay: true,
-    path: '/animations/penguin-idle.json'
-  })
-})
-
-onBeforeUnmount(() => {
-  animation?.destroy()
-  animation = null
-})
 </script>
 
 <template>
@@ -90,7 +84,18 @@ onBeforeUnmount(() => {
         <span class="level-badge">权限 L{{ permissionLevel }}</span>
       </div>
 
-      <div ref="container" class="penguin-container" />
+      <div class="penguin-stage" :class="`stage-${mode}`">
+        <div class="stage-ring ring-a" />
+        <div class="stage-ring ring-b" />
+        <div class="stage-platform" />
+        <img
+          class="penguin-art"
+          :class="`motion-${mode}`"
+          :src="artwork.src"
+          :alt="artwork.alt"
+          draggable="false"
+        />
+      </div>
 
       <div class="speech-bubble">
         {{ subtitle }}
@@ -107,7 +112,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .pet-shell {
   position: relative;
-  width: min(100%, 256px);
+  width: min(100%, 248px);
   padding: 12px 12px 14px;
   border-radius: 34px;
   overflow: hidden;
@@ -231,17 +236,71 @@ onBeforeUnmount(() => {
   color: rgba(255, 255, 255, 0.82);
 }
 
-.penguin-container {
-  width: 172px;
-  height: 172px;
-  margin: 4px auto 0;
+.penguin-stage {
+  position: relative;
+  width: 176px;
+  height: 184px;
+  margin: 8px auto 2px;
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 255, 255, 0.56), rgba(255, 255, 255, 0) 54%),
+    linear-gradient(180deg, rgba(242, 250, 252, 0.18), rgba(242, 250, 252, 0.02));
+  overflow: hidden;
+}
+
+.stage-ring,
+.stage-platform {
+  position: absolute;
+  inset: auto;
+  pointer-events: none;
+}
+
+.stage-ring {
+  border-radius: 999px;
+  filter: blur(10px);
+}
+
+.ring-a {
+  width: 112px;
+  height: 112px;
+  top: 4px;
+  left: 2px;
+  background: rgba(128, 218, 242, 0.28);
+}
+
+.ring-b {
+  width: 116px;
+  height: 116px;
+  right: 2px;
+  top: 22px;
+  background: rgba(255, 200, 134, 0.18);
+}
+
+.stage-platform {
+  width: 122px;
+  height: 18px;
+  left: 27px;
+  bottom: 8px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(105, 160, 183, 0.28), rgba(105, 160, 183, 0));
+}
+
+.penguin-art {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 176px;
+  height: 176px;
+  margin: 0 auto;
   user-select: none;
   -webkit-user-drag: none;
+  transform-origin: 50% 72%;
+  filter: drop-shadow(0 10px 14px rgba(7, 18, 28, 0.14));
 }
 
 .speech-bubble {
   min-height: 64px;
-  margin-top: -4px;
+  margin-top: 4px;
   padding: 12px 14px;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.09);
@@ -259,6 +318,50 @@ onBeforeUnmount(() => {
 
 .pet-footline span:last-child {
   color: rgba(255, 208, 170, 0.84);
+}
+
+.stage-listening {
+  background:
+    radial-gradient(circle at 50% 22%, rgba(227, 255, 243, 0.52), rgba(255, 255, 255, 0) 54%),
+    linear-gradient(180deg, rgba(242, 250, 252, 0.22), rgba(242, 250, 252, 0.03));
+}
+
+.stage-thinking {
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 244, 210, 0.48), rgba(255, 255, 255, 0) 54%),
+    linear-gradient(180deg, rgba(242, 250, 252, 0.2), rgba(242, 250, 252, 0.03));
+}
+
+.stage-speaking {
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 224, 230, 0.46), rgba(255, 255, 255, 0) 54%),
+    linear-gradient(180deg, rgba(242, 250, 252, 0.2), rgba(242, 250, 252, 0.03));
+}
+
+.stage-guarded {
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 220, 209, 0.44), rgba(255, 255, 255, 0) 54%),
+    linear-gradient(180deg, rgba(242, 250, 252, 0.2), rgba(242, 250, 252, 0.03));
+}
+
+.motion-idle {
+  animation: idleFloat 4.6s ease-in-out infinite;
+}
+
+.motion-listening {
+  animation: listeningBob 2.9s ease-in-out infinite;
+}
+
+.motion-thinking {
+  animation: thinkingSway 3.2s ease-in-out infinite;
+}
+
+.motion-speaking {
+  animation: speakingBounce 1.15s ease-in-out infinite;
+}
+
+.motion-guarded {
+  animation: guardedAlert 1.8s ease-in-out infinite;
 }
 
 .mode-listening {
@@ -287,5 +390,84 @@ onBeforeUnmount(() => {
     0 24px 42px rgba(3, 15, 28, 0.34),
     inset 0 1px 0 rgba(255, 255, 255, 0.28),
     0 0 34px rgba(255, 112, 112, 0.2);
+}
+
+@keyframes idleFloat {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+
+  50% {
+    transform: translateY(-6px) scale(1.01);
+  }
+}
+
+@keyframes listeningBob {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+
+  30% {
+    transform: translateY(-5px) rotate(-1.2deg);
+  }
+
+  65% {
+    transform: translateY(-2px) rotate(1deg);
+  }
+}
+
+@keyframes thinkingSway {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+
+  25% {
+    transform: translateY(-2px) rotate(-1.4deg);
+  }
+
+  75% {
+    transform: translateY(-4px) rotate(1.3deg);
+  }
+}
+
+@keyframes speakingBounce {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+
+  35% {
+    transform: translateY(-6px) scale(1.015);
+  }
+
+  70% {
+    transform: translateY(-1px) scale(0.996);
+  }
+}
+
+@keyframes guardedAlert {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+
+  20% {
+    transform: translateY(-3px) rotate(-1deg);
+  }
+
+  40% {
+    transform: translateY(-1px) rotate(1deg);
+  }
+
+  60% {
+    transform: translateY(-4px) rotate(-0.6deg);
+  }
+
+  80% {
+    transform: translateY(-1px) rotate(0.6deg);
+  }
 }
 </style>

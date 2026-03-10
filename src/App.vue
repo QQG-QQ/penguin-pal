@@ -6,14 +6,20 @@ import InputBox from './components/InputBox.vue'
 import Penguin from './components/Penguin.vue'
 import SettingsDrawer from './components/SettingsDrawer.vue'
 import {
+  cancelDesktopActionApproval,
   clearConversation,
+  completeOAuthSignIn,
+  confirmDesktopAction,
+  disconnectOAuthSignIn,
   getAssistantSnapshot,
   hideAssistantWindow,
   requestDesktopAction,
   saveProviderConfig,
-  sendChatMessage
+  sendChatMessage,
+  startOAuthSignIn
 } from './lib/assistant'
 import type {
+  ActionApprovalRequest,
   DesktopAction,
   PetMode,
   ProviderConfigInput,
@@ -28,9 +34,6 @@ const providerDefaults: Record<ProviderKind, string> = {
   openAiCompatible: 'llama3.1'
 }
 
-const cloneDraft = (value: ProviderConfigInput): ProviderConfigInput =>
-  JSON.parse(JSON.stringify(value)) as ProviderConfigInput
-
 const emptySnapshot = (): AssistantSnapshot => ({
   mode: 'idle',
   messages: [],
@@ -43,7 +46,22 @@ const emptySnapshot = (): AssistantSnapshot => ({
     allowNetwork: false,
     voiceReply: true,
     retainHistory: true,
-    apiKeyLoaded: false
+    apiKeyLoaded: false,
+    authMode: 'apiKey',
+    oauth: {
+      status: 'signedOut',
+      authorizeUrl: null,
+      tokenUrl: null,
+      clientId: null,
+      redirectUrl: 'http://127.0.0.1:8976/oauth/callback',
+      scopes: [],
+      accountHint: null,
+      pendingAuthUrl: null,
+      accessTokenLoaded: false,
+      lastError: null,
+      startedAt: null,
+      expiresAt: null
+    }
   },
   permissionLevel: 1,
   allowedActions: [],
@@ -64,8 +82,15 @@ const toDraft = (snapshot: AssistantSnapshot): ProviderConfigInput => ({
   voiceReply: snapshot.provider.voiceReply,
   retainHistory: snapshot.provider.retainHistory,
   permissionLevel: snapshot.permissionLevel,
+  authMode: snapshot.provider.authMode,
+  oauthAuthorizeUrl: snapshot.provider.oauth.authorizeUrl,
+  oauthTokenUrl: snapshot.provider.oauth.tokenUrl,
+  oauthClientId: snapshot.provider.oauth.clientId,
+  oauthRedirectUrl: snapshot.provider.oauth.redirectUrl,
+  oauthScopes: snapshot.provider.oauth.scopes.join(' '),
   apiKey: '',
-  clearApiKey: false
+  clearApiKey: false,
+  clearOAuthToken: false
 })
 
 const snapshot = ref<AssistantSnapshot>(emptySnapshot())
@@ -76,8 +101,11 @@ const showSettings = ref(false)
 const messageDraft = ref('')
 const busy = ref(false)
 const savingSettings = ref(false)
+const authBusy = ref(false)
 const feedback = ref('管理员企鹅待命中。点击她展开对话，或直接隐藏到托盘。')
-const pendingAction = ref<DesktopAction | null>(null)
+const pendingApproval = ref<ActionApprovalRequest | null>(null)
+const approvalPhrase = ref('')
+const approvalChecks = ref<Record<string, boolean>>({})
 const listening = ref(false)
 const visualMode = ref<PetMode | null>(null)
 
@@ -103,6 +131,16 @@ const providerLabel = computed(() => {
 })
 
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
+
+const canSubmitApproval = computed(() => {
+  if (!pendingApproval.value || busy.value) {
+    return false
+  }
+
+  const phraseMatches = approvalPhrase.value.trim() === pendingApproval.value.requiredPhrase
+  const checksReady = pendingApproval.value.checks.every((check) => approvalChecks.value[check.id])
+  return phraseMatches && checksReady
+})
 
 const voiceSupported = computed(
   () =>
@@ -144,6 +182,32 @@ const togglePanel = () => {
   }
 
   openChatPanel()
+}
+
+const clearPendingApproval = () => {
+  pendingApproval.value = null
+  approvalPhrase.value = ''
+  approvalChecks.value = {}
+}
+
+const setPendingApproval = (approvalRequest: ActionApprovalRequest | null | undefined) => {
+  if (!approvalRequest) {
+    clearPendingApproval()
+    return
+  }
+
+  pendingApproval.value = approvalRequest
+  approvalPhrase.value = ''
+  approvalChecks.value = Object.fromEntries(
+    approvalRequest.checks.map((check) => [check.id, false])
+  )
+}
+
+const toggleApprovalCheck = (checkId: string, checked: boolean) => {
+  approvalChecks.value = {
+    ...approvalChecks.value,
+    [checkId]: checked
+  }
 }
 
 const speakReply = (content: string) => {
@@ -313,13 +377,9 @@ const stopListening = () => {
   recognition.stop()
 }
 
-const triggerAction = async (action: DesktopAction, confirmed = false) => {
+const triggerAction = async (action: DesktopAction) => {
   if (busy.value) {
     return
-  }
-
-  if (confirmed) {
-    pendingAction.value = null
   }
 
   busy.value = true
@@ -328,10 +388,10 @@ const triggerAction = async (action: DesktopAction, confirmed = false) => {
   openActionPanel()
 
   try {
-    const result = await requestDesktopAction(action.id, confirmed)
+    const result = await requestDesktopAction(action.id)
     applySnapshot(result.snapshot)
     feedback.value = result.message
-    pendingAction.value = null
+    setPendingApproval(result.approvalRequest)
   } catch (error) {
     feedback.value = error instanceof Error ? error.message : '动作执行失败'
   } finally {
@@ -341,33 +401,125 @@ const triggerAction = async (action: DesktopAction, confirmed = false) => {
 }
 
 const handleActionTrigger = (action: DesktopAction) => {
-  openActionPanel()
+  void triggerAction(action)
+}
 
-  if (action.requiresConfirmation) {
-    pendingAction.value = action
+const confirmPendingAction = async () => {
+  if (!pendingApproval.value || busy.value) {
     return
   }
 
-  void triggerAction(action, false)
+  busy.value = true
+  feedback.value = `正在执行确认后的动作：${pendingApproval.value.action.title}`
+  visualMode.value = 'guarded'
+
+  try {
+    const acknowledgedChecks = pendingApproval.value.checks
+      .filter((check) => approvalChecks.value[check.id])
+      .map((check) => check.id)
+    const result = await confirmDesktopAction(
+      pendingApproval.value.id,
+      approvalPhrase.value,
+      acknowledgedChecks
+    )
+    applySnapshot(result.snapshot)
+    feedback.value = result.message
+    clearPendingApproval()
+  } catch (error) {
+    feedback.value = error instanceof Error ? error.message : '动作确认失败'
+  } finally {
+    busy.value = false
+    resetVisualModeSoon(1200)
+  }
+}
+
+const cancelPendingAction = async () => {
+  if (!pendingApproval.value) {
+    return
+  }
+
+  try {
+    const nextSnapshot = await cancelDesktopActionApproval(pendingApproval.value.id)
+    applySnapshot(nextSnapshot)
+    feedback.value = '本次动作授权已取消。'
+  } catch (error) {
+    feedback.value = error instanceof Error ? error.message : '取消动作授权失败'
+  } finally {
+    clearPendingApproval()
+  }
+}
+
+const persistSettings = async (draft: ProviderConfigInput) => {
+  const nextDraft = JSON.parse(JSON.stringify(draft)) as ProviderConfigInput
+  if (!nextDraft.model.trim()) {
+    nextDraft.model = providerDefaults[nextDraft.kind]
+  }
+
+  const nextSnapshot = await saveProviderConfig(nextDraft)
+  applySnapshot(nextSnapshot)
+  return nextSnapshot
 }
 
 const saveSettings = async (draft: ProviderConfigInput) => {
   savingSettings.value = true
 
   try {
-    const nextDraft = cloneDraft(draft)
-    if (!nextDraft.model.trim()) {
-      nextDraft.model = providerDefaults[nextDraft.kind]
-    }
-
-    const nextSnapshot = await saveProviderConfig(nextDraft)
-    applySnapshot(nextSnapshot)
-    showSettings.value = false
+    await persistSettings(draft)
     feedback.value = '模型和安全配置已保存。'
   } catch (error) {
     feedback.value = error instanceof Error ? error.message : '保存配置失败'
   } finally {
     savingSettings.value = false
+  }
+}
+
+const beginOAuthLogin = async (draft: ProviderConfigInput) => {
+  authBusy.value = true
+
+  try {
+    await persistSettings(draft)
+    const result = await startOAuthSignIn()
+    applySnapshot(result.snapshot)
+    feedback.value = result.message
+    if (result.authorizationUrl && typeof window !== 'undefined') {
+      try {
+        window.open(result.authorizationUrl, '_blank', 'noopener,noreferrer')
+      } catch {
+        // Ignore browser open failure and keep the URL visible inside settings drawer.
+      }
+    }
+  } catch (error) {
+    feedback.value = error instanceof Error ? error.message : '生成 OAuth 授权链接失败'
+  } finally {
+    authBusy.value = false
+  }
+}
+
+const finishOAuthLogin = async (callbackUrl: string) => {
+  authBusy.value = true
+
+  try {
+    const result = await completeOAuthSignIn(callbackUrl)
+    applySnapshot(result.snapshot)
+    feedback.value = result.message
+  } catch (error) {
+    feedback.value = error instanceof Error ? error.message : '完成 OAuth 登录失败'
+  } finally {
+    authBusy.value = false
+  }
+}
+
+const disconnectOAuthLogin = async () => {
+  authBusy.value = true
+
+  try {
+    const result = await disconnectOAuthSignIn()
+    applySnapshot(result.snapshot)
+    feedback.value = result.message
+  } catch (error) {
+    feedback.value = error instanceof Error ? error.message : '退出 OAuth 登录失败'
+  } finally {
+    authBusy.value = false
   }
 }
 
@@ -383,14 +535,6 @@ const toggleVoiceReply = (value: boolean) => {
       voiceReply: value
     }
   }
-}
-
-const confirmPendingAction = () => {
-  if (!pendingAction.value) {
-    return
-  }
-
-  void triggerAction(pendingAction.value, true)
 }
 
 const fillPrompt = (prompt: string) => {
@@ -425,6 +569,7 @@ const resetConversation = async () => {
   try {
     const nextSnapshot = await clearConversation()
     applySnapshot(nextSnapshot)
+    clearPendingApproval()
     feedback.value = '对话历史已清空，并重新回到安全欢迎态。'
     openChatPanel()
   } catch (error) {
@@ -551,24 +696,60 @@ onBeforeUnmount(() => {
       :draft="settingsDraft"
       :saving="savingSettings"
       :voice-supported="voiceSupported"
+      :oauth-state="snapshot.provider.oauth"
+      :oauth-busy="authBusy"
       @close="showSettings = false"
       @save="saveSettings"
+      @oauth-start="beginOAuthLogin"
+      @oauth-complete="finishOAuthLogin"
+      @oauth-disconnect="disconnectOAuthLogin"
     />
 
     <transition name="confirm">
-      <div v-if="pendingAction" class="confirm-shell">
+      <div v-if="pendingApproval" class="confirm-shell">
         <section class="confirm-panel">
-          <p class="eyebrow">Manual Confirmation</p>
-          <h2>{{ pendingAction.title }}</h2>
-          <p>{{ pendingAction.summary }}</p>
-          <p>
-            该动作风险等级为 {{ pendingAction.riskLevel }}，只有在你确认后才会真正交给系统白名单网关执行。
+          <p class="eyebrow">One-Time Approval</p>
+          <h2>{{ pendingApproval.action.title }}</h2>
+          <p>{{ pendingApproval.prompt }}</p>
+
+          <div class="approval-list">
+            <label
+              v-for="check in pendingApproval.checks"
+              :key="check.id"
+              class="approval-check"
+            >
+              <input
+                type="checkbox"
+                :checked="Boolean(approvalChecks[check.id])"
+                @change="toggleApprovalCheck(check.id, ($event.target as HTMLInputElement).checked)"
+              />
+              <span>{{ check.label }}</span>
+            </label>
+          </div>
+
+          <label class="approval-field">
+            <span>输入确认短语</span>
+            <input
+              :value="approvalPhrase"
+              :placeholder="pendingApproval.requiredPhrase"
+              @input="approvalPhrase = ($event.target as HTMLInputElement).value"
+            />
+          </label>
+
+          <p class="approval-expiry">
+            该授权短语两分钟内有效：<strong>{{ pendingApproval.requiredPhrase }}</strong>
           </p>
+
           <div class="confirm-actions">
-            <button type="button" class="panel-chip muted" @click="pendingAction = null">
+            <button type="button" class="panel-chip muted" @click="cancelPendingAction">
               取消
             </button>
-            <button type="button" class="confirm-button" @click="confirmPendingAction">
+            <button
+              type="button"
+              class="confirm-button"
+              :disabled="!canSubmitApproval"
+              @click="confirmPendingAction"
+            >
               我确认执行
             </button>
           </div>
@@ -793,7 +974,7 @@ body {
 }
 
 .confirm-panel {
-  width: min(88vw, 320px);
+  width: min(88vw, 332px);
   padding: 22px;
   border-radius: 28px;
   background: linear-gradient(180deg, rgba(251, 253, 254, 0.98), rgba(232, 243, 247, 0.98));
@@ -814,6 +995,49 @@ body {
   font-size: 22px;
 }
 
+.approval-list {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.approval-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: rgba(17, 68, 92, 0.08);
+}
+
+.approval-check input {
+  margin-top: 2px;
+}
+
+.approval-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.approval-field span {
+  color: #335465;
+  font-size: 13px;
+}
+
+.approval-field input {
+  width: 100%;
+  border: 1px solid rgba(23, 56, 75, 0.14);
+  border-radius: 14px;
+  padding: 11px 12px;
+}
+
+.approval-expiry {
+  margin-top: 10px;
+  color: #4e6878;
+  font-size: 12px;
+}
+
 .confirm-actions {
   margin-top: 16px;
 }
@@ -821,6 +1045,11 @@ body {
 .confirm-button {
   background: linear-gradient(135deg, #0d7195, #17a58b);
   color: #effbff;
+}
+
+.confirm-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .panel-enter-active,

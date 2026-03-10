@@ -9,6 +9,7 @@ use tauri::{AppHandle, Manager};
 
 pub const HISTORY_LIMIT: usize = 24;
 pub const AUDIT_LIMIT: usize = 12;
+pub const DEFAULT_OAUTH_REDIRECT_URL: &str = "http://127.0.0.1:8976/oauth/callback";
 const STATE_FILE: &str = "assistant-state.json";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,11 +63,75 @@ impl Default for ProviderKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthMode {
+    ApiKey,
+    OAuth,
+}
+
+impl Default for AuthMode {
+    fn default() -> Self {
+        Self::ApiKey
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum OAuthStatus {
+    SignedOut,
+    Pending,
+    Authorized,
+    Error,
+}
+
+impl Default for OAuthStatus {
+    fn default() -> Self {
+        Self::SignedOut
+    }
+}
+
 pub fn default_system_prompt() -> String {
     "你是一只管理员企鹅桌宠，主要职责是陪伴、对话、提醒和执行经过白名单批准的桌面动作。\
     任何电脑控制都必须经过人工确认，绝不执行自由命令、自由脚本、自由下载或越权操作。\
     回复时优先解释风险与边界，再给出可执行建议。"
         .to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthState {
+    pub status: OAuthStatus,
+    pub authorize_url: Option<String>,
+    pub token_url: Option<String>,
+    pub client_id: Option<String>,
+    pub redirect_url: Option<String>,
+    pub scopes: Vec<String>,
+    pub account_hint: Option<String>,
+    pub pending_auth_url: Option<String>,
+    pub access_token_loaded: bool,
+    pub last_error: Option<String>,
+    pub started_at: Option<u64>,
+    pub expires_at: Option<u64>,
+}
+
+impl Default for OAuthState {
+    fn default() -> Self {
+        Self {
+            status: OAuthStatus::SignedOut,
+            authorize_url: None,
+            token_url: None,
+            client_id: None,
+            redirect_url: Some(DEFAULT_OAUTH_REDIRECT_URL.to_string()),
+            scopes: vec![],
+            account_hint: None,
+            pending_auth_url: None,
+            access_token_loaded: false,
+            last_error: None,
+            started_at: None,
+            expires_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +145,10 @@ pub struct ProviderConfig {
     pub voice_reply: bool,
     pub retain_history: bool,
     pub api_key_loaded: bool,
+    #[serde(default)]
+    pub auth_mode: AuthMode,
+    #[serde(default)]
+    pub oauth: OAuthState,
 }
 
 impl Default for ProviderConfig {
@@ -93,6 +162,8 @@ impl Default for ProviderConfig {
             voice_reply: true,
             retain_history: true,
             api_key_loaded: false,
+            auth_mode: AuthMode::ApiKey,
+            oauth: OAuthState::default(),
         }
     }
 }
@@ -165,6 +236,25 @@ pub struct AudioProfile {
     pub stages: Vec<AudioStage>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionApprovalCheck {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionApprovalRequest {
+    pub id: String,
+    pub action: DesktopAction,
+    pub prompt: String,
+    pub required_phrase: String,
+    pub checks: Vec<ActionApprovalCheck>,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantSnapshot {
@@ -188,8 +278,22 @@ pub struct ProviderConfigInput {
     pub voice_reply: bool,
     pub retain_history: bool,
     pub permission_level: u8,
+    #[serde(default)]
+    pub auth_mode: AuthMode,
+    #[serde(default)]
+    pub oauth_authorize_url: Option<String>,
+    #[serde(default)]
+    pub oauth_token_url: Option<String>,
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
+    #[serde(default)]
+    pub oauth_redirect_url: Option<String>,
+    #[serde(default)]
+    pub oauth_scopes: String,
     pub api_key: Option<String>,
     pub clear_api_key: Option<bool>,
+    #[serde(default)]
+    pub clear_oauth_token: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -206,6 +310,25 @@ pub struct ActionExecutionResult {
     pub status: String,
     pub message: String,
     pub snapshot: AssistantSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_request: Option<ActionApprovalRequest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthFlowResult {
+    pub message: String,
+    pub authorization_url: Option<String>,
+    pub snapshot: AssistantSnapshot,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingOAuthState {
+    pub state: String,
+    pub verifier: String,
+    pub authorization_url: String,
+    pub created_at: u64,
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +339,13 @@ pub struct RuntimeState {
     pub permission_level: u8,
     pub audit_trail: Vec<AuditEntry>,
     pub api_key: Option<String>,
+    pub oauth_access_token: Option<String>,
+    pub oauth_refresh_token: Option<String>,
+    pub oauth_access_expires_at: Option<u64>,
+    pub oauth_account_hint: Option<String>,
+    pub oauth_last_error: Option<String>,
+    pub pending_oauth: Option<PendingOAuthState>,
+    pub pending_action_approvals: Vec<ActionApprovalRequest>,
 }
 
 impl Default for RuntimeState {
@@ -236,6 +366,13 @@ impl Default for RuntimeState {
                 risk_level: 0,
             }],
             api_key: None,
+            oauth_access_token: None,
+            oauth_refresh_token: None,
+            oauth_access_expires_at: None,
+            oauth_account_hint: None,
+            oauth_last_error: None,
+            pending_oauth: None,
+            pending_action_approvals: vec![],
         }
     }
 }
@@ -251,9 +388,34 @@ impl RuntimeState {
             .api_key
             .as_ref()
             .is_some_and(|key| !key.trim().is_empty());
+        provider.oauth.access_token_loaded = self
+            .oauth_access_token
+            .as_ref()
+            .is_some_and(|token| !token.trim().is_empty());
+        provider.oauth.account_hint = self.oauth_account_hint.clone();
+        provider.oauth.last_error = self.oauth_last_error.clone();
+        provider.oauth.pending_auth_url = self
+            .pending_oauth
+            .as_ref()
+            .map(|pending| pending.authorization_url.clone());
+        provider.oauth.started_at = self.pending_oauth.as_ref().map(|pending| pending.created_at);
+        provider.oauth.expires_at = self
+            .pending_oauth
+            .as_ref()
+            .map(|pending| pending.expires_at)
+            .or(self.oauth_access_expires_at);
+        provider.oauth.status = if self.pending_oauth.is_some() {
+            OAuthStatus::Pending
+        } else if provider.oauth.access_token_loaded {
+            OAuthStatus::Authorized
+        } else if self.oauth_last_error.is_some() {
+            OAuthStatus::Error
+        } else {
+            OAuthStatus::SignedOut
+        };
 
         AssistantSnapshot {
-            mode: self.mode.clone(),
+            mode: self.mode,
             messages: self.messages.clone(),
             provider,
             permission_level: self.permission_level,
@@ -307,6 +469,13 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         permission_level: persisted.permission_level.min(2),
         audit_trail: persisted.audit_trail,
         api_key: None,
+        oauth_access_token: None,
+        oauth_refresh_token: None,
+        oauth_access_expires_at: None,
+        oauth_account_hint: None,
+        oauth_last_error: None,
+        pending_oauth: None,
+        pending_action_approvals: vec![],
     };
 
     if runtime.messages.is_empty() {
@@ -319,6 +488,13 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
 
     runtime.mode = PetMode::Idle;
     runtime.provider.api_key_loaded = false;
+    runtime.provider.oauth.access_token_loaded = false;
+    runtime.provider.oauth.pending_auth_url = None;
+    runtime.provider.oauth.account_hint = None;
+    runtime.provider.oauth.last_error = None;
+    runtime.provider.oauth.started_at = None;
+    runtime.provider.oauth.expires_at = None;
+    runtime.provider.oauth.status = OAuthStatus::SignedOut;
 
     Ok(runtime)
 }
@@ -326,10 +502,14 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
 pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
     let path = state_path(app)?;
     let mut provider = runtime.provider.clone();
-    provider.api_key_loaded = runtime
-        .api_key
-        .as_ref()
-        .is_some_and(|key| !key.trim().is_empty());
+    provider.api_key_loaded = false;
+    provider.oauth.access_token_loaded = false;
+    provider.oauth.account_hint = None;
+    provider.oauth.pending_auth_url = None;
+    provider.oauth.last_error = None;
+    provider.oauth.started_at = None;
+    provider.oauth.expires_at = None;
+    provider.oauth.status = OAuthStatus::SignedOut;
 
     let messages = if runtime.provider.retain_history {
         runtime.messages.clone()
@@ -347,7 +527,6 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
         audit_trail: runtime.audit_trail.clone(),
     };
 
-    let content =
-        serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?;
+    let content = serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?;
     fs::write(path, content).map_err(|error| error.to_string())
 }

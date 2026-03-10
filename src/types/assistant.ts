@@ -1,6 +1,8 @@
 export type PetMode = 'idle' | 'listening' | 'thinking' | 'speaking' | 'guarded'
 
 export type ProviderKind = 'mock' | 'openAi' | 'anthropic' | 'openAiCompatible'
+export type ProviderAuthMode = 'apiKey' | 'oauth'
+export type OAuthStatus = 'signedOut' | 'pending' | 'authorized' | 'error'
 
 export interface ChatMessage {
   id: string
@@ -41,6 +43,21 @@ export interface AudioProfile {
   stages: AudioStage[]
 }
 
+export interface OAuthState {
+  status: OAuthStatus
+  authorizeUrl: string | null
+  tokenUrl: string | null
+  clientId: string | null
+  redirectUrl: string | null
+  scopes: string[]
+  accountHint: string | null
+  pendingAuthUrl: string | null
+  accessTokenLoaded: boolean
+  lastError: string | null
+  startedAt: number | null
+  expiresAt: number | null
+}
+
 export interface ProviderConfig {
   kind: ProviderKind
   model: string
@@ -50,6 +67,8 @@ export interface ProviderConfig {
   voiceReply: boolean
   retainHistory: boolean
   apiKeyLoaded: boolean
+  authMode: ProviderAuthMode
+  oauth: OAuthState
 }
 
 export interface AssistantSnapshot {
@@ -71,8 +90,15 @@ export interface ProviderConfigInput {
   voiceReply: boolean
   retainHistory: boolean
   permissionLevel: number
+  authMode: ProviderAuthMode
+  oauthAuthorizeUrl: string | null
+  oauthTokenUrl: string | null
+  oauthClientId: string | null
+  oauthRedirectUrl: string | null
+  oauthScopes: string
   apiKey?: string | null
   clearApiKey?: boolean
+  clearOAuthToken?: boolean
 }
 
 export interface ChatResponse {
@@ -81,8 +107,30 @@ export interface ChatResponse {
   snapshot: AssistantSnapshot
 }
 
+export interface ActionApprovalCheck {
+  id: string
+  label: string
+}
+
+export interface ActionApprovalRequest {
+  id: string
+  action: DesktopAction
+  prompt: string
+  requiredPhrase: string
+  checks: ActionApprovalCheck[]
+  createdAt: number
+  expiresAt: number
+}
+
 export interface ActionExecutionResult {
   status: string
   message: string
+  snapshot: AssistantSnapshot
+  approvalRequest?: ActionApprovalRequest | null
+}
+
+export interface OAuthFlowResult {
+  message: string
+  authorizationUrl: string | null
   snapshot: AssistantSnapshot
 }

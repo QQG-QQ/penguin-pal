@@ -1,10 +1,13 @@
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import type {
+  ActionApprovalRequest,
   ActionExecutionResult,
   AssistantSnapshot,
   ChatMessage,
   ChatResponse,
+  OAuthFlowResult,
+  OAuthState,
   ProviderConfigInput,
   ProviderKind
 } from '../types/assistant'
@@ -16,8 +19,22 @@ const providerModels: Record<ProviderKind, string> = {
   openAiCompatible: 'llama3.1'
 }
 
-const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+const defaultOAuthState = (): OAuthState => ({
+  status: 'signedOut',
+  authorizeUrl: null,
+  tokenUrl: null,
+  clientId: null,
+  redirectUrl: 'http://127.0.0.1:8976/oauth/callback',
+  scopes: [],
+  accountHint: null,
+  pendingAuthUrl: null,
+  accessTokenLoaded: false,
+  lastError: null,
+  startedAt: null,
+  expiresAt: null
+})
 
+const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const now = () => Date.now()
 
 const fallbackMessage = (role: ChatMessage['role'], content: string): ChatMessage => ({
@@ -32,7 +49,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
   messages: [
     fallbackMessage(
       'assistant',
-      'PenguinPal 已进入 UI 演示模式。你可以先确认桌宠交互、语音入口和安全动作面板，再接入真实 AI Key。'
+      'PenguinPal 已进入 UI 演示模式。你可以先确认桌宠交互、语音入口、OAuth 设置和严格动作确认流，再接入真实 AI Key 或 OAuth 网关。'
     )
   ],
   provider: {
@@ -44,7 +61,9 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     allowNetwork: false,
     voiceReply: true,
     retainHistory: true,
-    apiKeyLoaded: false
+    apiKeyLoaded: false,
+    authMode: 'apiKey',
+    oauth: defaultOAuthState()
   },
   permissionLevel: 1,
   allowedActions: [
@@ -69,7 +88,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     {
       id: 'open_notepad',
       title: '打开记事本',
-      summary: '示例级白名单动作，需要人工确认。',
+      summary: '示例级白名单动作，需要更严格的一次性确认。',
       riskLevel: 2,
       minimumLevel: 2,
       requiresConfirmation: true,
@@ -78,7 +97,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     {
       id: 'open_calculator',
       title: '打开计算器',
-      summary: '示例级白名单动作，需要人工确认。',
+      summary: '示例级白名单动作，需要更严格的一次性确认。',
       riskLevel: 2,
       minimumLevel: 2,
       requiresConfirmation: true,
@@ -122,6 +141,8 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
 })
 
 let fallbackSnapshot = buildFallbackSnapshot()
+let fallbackPendingApproval: ActionApprovalRequest | null = null
+let fallbackOAuthStateValue = 'demo-oauth-state'
 
 const isTauriRuntime = () =>
   typeof window !== 'undefined' && typeof window.__TAURI_INTERNALS__ !== 'undefined'
@@ -141,24 +162,63 @@ const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapsho
   ...snapshot,
   provider: {
     ...snapshot.provider,
-    apiKeyLoaded: Boolean(snapshot.provider.apiKeyLoaded)
+    apiKeyLoaded: Boolean(snapshot.provider.apiKeyLoaded),
+    oauth: {
+      ...snapshot.provider.oauth,
+      scopes: [...snapshot.provider.oauth.scopes],
+      accessTokenLoaded: Boolean(snapshot.provider.oauth.accessTokenLoaded)
+    }
   }
 })
 
 const nextMockReply = (content: string) => {
   if (content.includes('安全') || content.includes('权限')) {
-    return '当前是严格白名单模式。AI 只能建议动作，真正的电脑控制必须走动作面板并经过人工确认。'
+    return '当前是严格白名单模式。AI 只能建议动作，真正的电脑控制必须走一次性授权票据并经过人工逐项确认。'
+  }
+
+  if (content.includes('OAuth') || content.includes('登录')) {
+    return '现在的设置里已经有 OAuth 准备流。它默认采用 PKCE 授权码思路，但前提是你的上游模型网关真的支持 OAuth bearer token。'
   }
 
   if (content.includes('记事本') || content.includes('计算器') || content.includes('控制电脑')) {
-    return '桌面控制入口已经准备好了，但仍然只允许白名单动作。你可以在下方面板里手动确认执行。'
+    return '桌面控制入口已经准备好了，但仍然只允许白名单动作。高风险动作会弹出逐项确认清单和确认短语输入。'
   }
 
   if (content.includes('语音')) {
     return '按住输入框左侧的语音按钮即可录音，松开后会自动转写并发送。回复也可以由系统语音播报。'
   }
 
-  return 'UI 和安全壳已经搭起来了。下一步只要填入可用的模型配置和 API Key，就能切到真实 AI 对话。'
+  return 'UI、安全壳、OAuth 准备流和更严格的动作确认协议已经就位。下一步可以继续接入真实模型网关和 Windows 真机验证。'
+}
+
+const createFallbackApproval = (actionId: string): ActionApprovalRequest => {
+  const action = fallbackSnapshot.allowedActions.find((item) => item.id === actionId)
+  if (!action) {
+    throw new Error('未找到动作定义')
+  }
+
+  return {
+    id: `approval-${now()}`,
+    action,
+    prompt: `你即将执行“${action.title}”。这次授权只对本次动作生效，不会开放后续自由控制。`,
+    requiredPhrase: `确认执行 ${action.title}`,
+    checks: [
+      {
+        id: 'one_time',
+        label: '我确认这是一次性授权，不会放开自由控制电脑的权限'
+      },
+      {
+        id: 'visible_effect',
+        label: '我知道这个动作会直接影响当前 Windows 软件或窗口状态'
+      },
+      {
+        id: 'privacy_boundary',
+        label: '我确认本次动作不应读取、上传或暴露我的隐私数据'
+      }
+    ],
+    createdAt: now(),
+    expiresAt: now() + 2 * 60 * 1000
+  }
 }
 
 export const getAssistantSnapshot = async (): Promise<AssistantSnapshot> => {
@@ -177,6 +237,18 @@ export const saveProviderConfig = async (
     const snapshot = await safeInvoke<AssistantSnapshot>('save_provider_config', { input })
     return snapshotWithRuntimeFlags(snapshot)
   } catch {
+    const oauth = {
+      ...fallbackSnapshot.provider.oauth,
+      authorizeUrl: input.oauthAuthorizeUrl,
+      tokenUrl: input.oauthTokenUrl,
+      clientId: input.oauthClientId,
+      redirectUrl: input.oauthRedirectUrl || fallbackSnapshot.provider.oauth.redirectUrl,
+      scopes: input.oauthScopes
+        .split(/[\s,]+/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+    }
+
     fallbackSnapshot = {
       ...fallbackSnapshot,
       provider: {
@@ -188,7 +260,18 @@ export const saveProviderConfig = async (
         allowNetwork: input.allowNetwork,
         voiceReply: input.voiceReply,
         retainHistory: input.retainHistory,
-        apiKeyLoaded: Boolean(input.apiKey && input.apiKey.trim())
+        apiKeyLoaded: Boolean(input.apiKey && input.apiKey.trim()),
+        authMode: input.authMode,
+        oauth: {
+          ...oauth,
+          accessTokenLoaded: input.clearOAuthToken ? false : oauth.accessTokenLoaded,
+          status: input.clearOAuthToken ? 'signedOut' : oauth.status,
+          pendingAuthUrl: input.clearOAuthToken ? null : oauth.pendingAuthUrl,
+          accountHint: input.clearOAuthToken ? null : oauth.accountHint,
+          lastError: input.clearOAuthToken ? null : oauth.lastError,
+          startedAt: input.clearOAuthToken ? null : oauth.startedAt,
+          expiresAt: input.clearOAuthToken ? null : oauth.expiresAt
+        }
       },
       permissionLevel: input.permissionLevel,
       allowedActions: fallbackSnapshot.allowedActions.map((action) => ({
@@ -197,6 +280,161 @@ export const saveProviderConfig = async (
       }))
     }
     return clone(fallbackSnapshot)
+  }
+}
+
+export const startOAuthSignIn = async (): Promise<OAuthFlowResult> => {
+  try {
+    return await safeInvoke<OAuthFlowResult>('start_oauth_sign_in')
+  } catch {
+    if (fallbackSnapshot.provider.authMode !== 'oauth') {
+      throw new Error('请先在设置中把认证方式切换到 OAuth。')
+    }
+
+    const oauth = fallbackSnapshot.provider.oauth
+    if (!oauth.authorizeUrl || !oauth.clientId || !oauth.redirectUrl) {
+      throw new Error('OAuth 配置不完整：至少需要 Client ID、Authorize URL 和 Redirect URL。')
+    }
+
+    fallbackOAuthStateValue = `demo-state-${now()}`
+    const url = new URL(oauth.authorizeUrl)
+    url.searchParams.set('response_type', 'code')
+    url.searchParams.set('client_id', oauth.clientId)
+    url.searchParams.set('redirect_uri', oauth.redirectUrl)
+    url.searchParams.set('state', fallbackOAuthStateValue)
+    url.searchParams.set('code_challenge_method', 'S256')
+    url.searchParams.set('code_challenge', 'demo-code-challenge')
+    if (oauth.scopes.length > 0) {
+      url.searchParams.set('scope', oauth.scopes.join(' '))
+    }
+
+    fallbackSnapshot = {
+      ...fallbackSnapshot,
+      provider: {
+        ...fallbackSnapshot.provider,
+        oauth: {
+          ...oauth,
+          status: 'pending',
+          pendingAuthUrl: url.toString(),
+          startedAt: now(),
+          expiresAt: now() + 5 * 60 * 1000,
+          lastError: null
+        }
+      },
+      auditTrail: [
+        {
+          id: `audit-${now()}`,
+          action: 'oauth_login_started',
+          outcome: 'demo',
+          detail: '浏览器演示模式仅生成 OAuth 授权链接，不会真正访问远端登录。',
+          createdAt: now(),
+          riskLevel: 1
+        },
+        ...fallbackSnapshot.auditTrail
+      ].slice(0, 8)
+    }
+
+    return {
+      message: '已生成 OAuth 授权链接。登录完成后，把浏览器回调地址粘贴回来。',
+      authorizationUrl: fallbackSnapshot.provider.oauth.pendingAuthUrl,
+      snapshot: clone(fallbackSnapshot)
+    }
+  }
+}
+
+export const completeOAuthSignIn = async (callbackUrl: string): Promise<OAuthFlowResult> => {
+  try {
+    return await safeInvoke<OAuthFlowResult>('complete_oauth_sign_in', { callbackUrl })
+  } catch {
+    if (!callbackUrl.trim()) {
+      throw new Error('请先粘贴浏览器回调地址。')
+    }
+
+    const url = new URL(callbackUrl.trim())
+    const returnedState = url.searchParams.get('state')
+    const code = url.searchParams.get('code')
+
+    if (returnedState !== fallbackOAuthStateValue) {
+      throw new Error('OAuth 状态校验失败，请重新生成授权链接。')
+    }
+
+    if (!code) {
+      throw new Error('回调地址中没有 code，无法完成登录。')
+    }
+
+    fallbackSnapshot = {
+      ...fallbackSnapshot,
+      provider: {
+        ...fallbackSnapshot.provider,
+        oauth: {
+          ...fallbackSnapshot.provider.oauth,
+          status: 'authorized',
+          pendingAuthUrl: null,
+          accessTokenLoaded: true,
+          accountHint: 'demo-oauth-user',
+          lastError: null,
+          startedAt: null,
+          expiresAt: now() + 60 * 60 * 1000
+        }
+      },
+      auditTrail: [
+        {
+          id: `audit-${now()}`,
+          action: 'oauth_login_completed',
+          outcome: 'demo',
+          detail: '浏览器演示模式已在内存中标记 OAuth 登录成功。',
+          createdAt: now(),
+          riskLevel: 1
+        },
+        ...fallbackSnapshot.auditTrail
+      ].slice(0, 8)
+    }
+
+    return {
+      message: 'OAuth 演示登录成功。当前仅把访问令牌状态保留在运行内存中。',
+      authorizationUrl: null,
+      snapshot: clone(fallbackSnapshot)
+    }
+  }
+}
+
+export const disconnectOAuthSignIn = async (): Promise<OAuthFlowResult> => {
+  try {
+    return await safeInvoke<OAuthFlowResult>('disconnect_oauth_sign_in')
+  } catch {
+    fallbackSnapshot = {
+      ...fallbackSnapshot,
+      provider: {
+        ...fallbackSnapshot.provider,
+        oauth: {
+          ...fallbackSnapshot.provider.oauth,
+          status: 'signedOut',
+          pendingAuthUrl: null,
+          accessTokenLoaded: false,
+          accountHint: null,
+          lastError: null,
+          startedAt: null,
+          expiresAt: null
+        }
+      },
+      auditTrail: [
+        {
+          id: `audit-${now()}`,
+          action: 'oauth_logout',
+          outcome: 'demo',
+          detail: '浏览器演示模式已清空 OAuth 登录状态。',
+          createdAt: now(),
+          riskLevel: 0
+        },
+        ...fallbackSnapshot.auditTrail
+      ].slice(0, 8)
+    }
+
+    return {
+      message: '已退出 OAuth 登录，并清空内存中的令牌状态。',
+      authorizationUrl: null,
+      snapshot: clone(fallbackSnapshot)
+    }
   }
 }
 
@@ -231,13 +469,11 @@ export const sendChatMessage = async (content: string): Promise<ChatResponse> =>
 }
 
 export const requestDesktopAction = async (
-  actionId: string,
-  confirmed = false
+  actionId: string
 ): Promise<ActionExecutionResult> => {
   try {
     return await safeInvoke<ActionExecutionResult>('request_desktop_action', {
-      actionId,
-      confirmed
+      actionId
     })
   } catch {
     const selectedAction = fallbackSnapshot.allowedActions.find((action) => action.id === actionId)
@@ -250,8 +486,30 @@ export const requestDesktopAction = async (
       throw new Error('当前权限级别不允许执行该动作')
     }
 
-    if (selectedAction.requiresConfirmation && !confirmed) {
-      throw new Error('该动作需要人工确认')
+    if (selectedAction.requiresConfirmation) {
+      const approvalRequest = createFallbackApproval(actionId)
+      fallbackPendingApproval = approvalRequest
+      fallbackSnapshot = {
+        ...fallbackSnapshot,
+        auditTrail: [
+          {
+            id: `audit-${now()}`,
+            action: 'action_approval_requested',
+            outcome: 'demo',
+            detail: `${selectedAction.title} 已进入一次性授权确认阶段。`,
+            createdAt: now(),
+            riskLevel: selectedAction.riskLevel
+          },
+          ...fallbackSnapshot.auditTrail
+        ].slice(0, 8)
+      }
+
+      return {
+        status: 'needs_confirmation',
+        message: `${selectedAction.title} 需要逐项确认后才能执行。`,
+        snapshot: clone(fallbackSnapshot),
+        approvalRequest
+      }
     }
 
     fallbackSnapshot = {
@@ -273,8 +531,98 @@ export const requestDesktopAction = async (
     return {
       status: 'demo',
       message: `${selectedAction.title} 已通过演示模式记录审计，但未真正执行系统操作。`,
-      snapshot: clone(fallbackSnapshot)
+      snapshot: clone(fallbackSnapshot),
+      approvalRequest: null
     }
+  }
+}
+
+export const confirmDesktopAction = async (
+  approvalId: string,
+  typedPhrase: string,
+  acknowledgedChecks: string[]
+): Promise<ActionExecutionResult> => {
+  try {
+    return await safeInvoke<ActionExecutionResult>('confirm_desktop_action', {
+      approvalId,
+      typedPhrase,
+      acknowledgedChecks
+    })
+  } catch {
+    if (!fallbackPendingApproval || fallbackPendingApproval.id !== approvalId) {
+      throw new Error('未找到待确认的动作授权。')
+    }
+
+    if (fallbackPendingApproval.expiresAt < now()) {
+      fallbackPendingApproval = null
+      throw new Error('这次动作授权已经过期，请重新发起。')
+    }
+
+    if (typedPhrase.trim() !== fallbackPendingApproval.requiredPhrase) {
+      throw new Error(`请完整输入确认短语：${fallbackPendingApproval.requiredPhrase}`)
+    }
+
+    const acknowledged = new Set(acknowledgedChecks)
+    const missing = fallbackPendingApproval.checks.find((check) => !acknowledged.has(check.id))
+    if (missing) {
+      throw new Error('请先完成所有确认项。')
+    }
+
+    const action = fallbackPendingApproval.action
+    fallbackPendingApproval = null
+    fallbackSnapshot = {
+      ...fallbackSnapshot,
+      mode: 'idle',
+      auditTrail: [
+        {
+          id: `audit-${now()}`,
+          action: action.id,
+          outcome: 'demo',
+          detail: '演示模式已通过更严格的确认流记录本次动作，但未真正执行系统操作。',
+          createdAt: now(),
+          riskLevel: action.riskLevel
+        },
+        ...fallbackSnapshot.auditTrail
+      ].slice(0, 8)
+    }
+
+    return {
+      status: 'demo',
+      message: `${action.title} 已通过演示模式完成更严格的确认流。`,
+      snapshot: clone(fallbackSnapshot),
+      approvalRequest: null
+    }
+  }
+}
+
+export const cancelDesktopActionApproval = async (
+  approvalId: string
+): Promise<AssistantSnapshot> => {
+  try {
+    const snapshot = await safeInvoke<AssistantSnapshot>('cancel_desktop_action_approval', {
+      approvalId
+    })
+    return snapshotWithRuntimeFlags(snapshot)
+  } catch {
+    if (fallbackPendingApproval?.id === approvalId) {
+      fallbackSnapshot = {
+        ...fallbackSnapshot,
+        auditTrail: [
+          {
+            id: `audit-${now()}`,
+            action: 'action_approval_cancelled',
+            outcome: 'demo',
+            detail: `${fallbackPendingApproval.action.title} 的一次性授权已被取消。`,
+            createdAt: now(),
+            riskLevel: fallbackPendingApproval.action.riskLevel
+          },
+          ...fallbackSnapshot.auditTrail
+        ].slice(0, 8)
+      }
+      fallbackPendingApproval = null
+    }
+
+    return clone(fallbackSnapshot)
   }
 }
 
@@ -284,6 +632,7 @@ export const clearConversation = async (): Promise<AssistantSnapshot> => {
     return snapshotWithRuntimeFlags(snapshot)
   } catch {
     fallbackSnapshot = buildFallbackSnapshot()
+    fallbackPendingApproval = null
     return clone(fallbackSnapshot)
   }
 }
