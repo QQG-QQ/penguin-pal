@@ -41,6 +41,8 @@ const providerDefaults: Record<ProviderKind, string> = {
   openAiCompatible: 'llama3.1'
 }
 
+const DEFAULT_OAUTH_REDIRECT_URL = 'http://127.0.0.1:8976/oauth/callback'
+
 const actionCommandMap: Record<string, string[]> = {
   open_notepad: ['打开记事本', '记事本'],
   open_calculator: ['打开计算器', '计算器'],
@@ -67,7 +69,7 @@ const emptySnapshot = (): AssistantSnapshot => ({
     baseUrl: null,
     systemPrompt:
       '你是一只严格遵守白名单规则的管理员企鹅助手，任何桌面动作都必须经过人工确认。',
-    allowNetwork: false,
+    allowNetwork: true,
     voiceReply: true,
     retainHistory: true,
     apiKeyLoaded: false,
@@ -77,7 +79,7 @@ const emptySnapshot = (): AssistantSnapshot => ({
       authorizeUrl: null,
       tokenUrl: null,
       clientId: null,
-      redirectUrl: 'http://127.0.0.1:8976/oauth/callback',
+      redirectUrl: DEFAULT_OAUTH_REDIRECT_URL,
       scopes: [],
       accountHint: null,
       pendingAuthUrl: null,
@@ -187,6 +189,104 @@ const shouldAutoListen = computed(
 )
 
 const normalizeCommand = (value: string) => value.replace(/\s+/g, '').toLowerCase()
+
+const trimOrNull = (value: string | null | undefined): string | null => {
+  const normalized = (value ?? '').trim()
+  return normalized ? normalized : null
+}
+
+const resolveErrorMessage = (error: unknown, fallback: string): string => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error
+  }
+
+  try {
+    const serialized = JSON.stringify(error)
+    if (serialized && serialized !== '{}' && serialized !== 'null') {
+      return serialized
+    }
+  } catch {
+    // ignore JSON serialization errors and use fallback message
+  }
+
+  if (error !== undefined && error !== null) {
+    const text = String(error)
+    if (text && text !== '[object Object]') {
+      return text
+    }
+  }
+
+  return fallback
+}
+
+const prepareOneClickOAuthDraft = (
+  draft: ProviderConfigInput
+): { nextDraft: ProviderConfigInput; notices: string[] } => {
+  const nextDraft = JSON.parse(JSON.stringify(draft)) as ProviderConfigInput
+  const notices: string[] = []
+
+  if (nextDraft.authMode !== 'oauth') {
+    nextDraft.authMode = 'oauth'
+    notices.push('已自动切换为 OAuth 认证模式。')
+  }
+
+  if (!nextDraft.allowNetwork) {
+    nextDraft.allowNetwork = true
+    notices.push('已自动开启外网访问（OAuth 登录必须联网）。')
+  }
+
+  if (nextDraft.kind === 'mock' || nextDraft.kind === 'anthropic') {
+    nextDraft.kind = 'openAiCompatible'
+    nextDraft.model = providerDefaults.openAiCompatible
+    notices.push('当前 Provider 不支持 OAuth，已自动切换到 OpenAI-Compatible。')
+  }
+
+  nextDraft.model = nextDraft.model.trim() || providerDefaults[nextDraft.kind]
+  nextDraft.oauthAuthorizeUrl = trimOrNull(nextDraft.oauthAuthorizeUrl)
+  nextDraft.oauthTokenUrl = trimOrNull(nextDraft.oauthTokenUrl)
+  nextDraft.oauthClientId = trimOrNull(nextDraft.oauthClientId)
+  nextDraft.oauthRedirectUrl = trimOrNull(nextDraft.oauthRedirectUrl) ?? DEFAULT_OAUTH_REDIRECT_URL
+  nextDraft.oauthScopes = nextDraft.oauthScopes.trim()
+
+  const missing: string[] = []
+  if (!nextDraft.oauthClientId) {
+    missing.push('Client ID')
+  }
+  if (!nextDraft.oauthAuthorizeUrl) {
+    missing.push('Authorize URL')
+  }
+  if (!nextDraft.oauthTokenUrl) {
+    missing.push('Token URL')
+  }
+
+  if (missing.length > 0) {
+    throw new Error(`OAuth 配置不完整：缺少 ${missing.join('、')}。`)
+  }
+
+  let redirect: URL
+  try {
+    redirect = new URL(nextDraft.oauthRedirectUrl)
+  } catch {
+    throw new Error('Redirect URL 格式不正确，请使用 http://127.0.0.1:端口/回调路径。')
+  }
+
+  const host = redirect.hostname.toLowerCase()
+  if (
+    redirect.protocol !== 'http:' ||
+    (host !== '127.0.0.1' && host !== 'localhost') ||
+    !redirect.port
+  ) {
+    throw new Error(
+      '一键 OAuth 登录要求 Redirect URL 使用本机回环地址并带端口，例如 http://127.0.0.1:8976/oauth/callback。'
+    )
+  }
+
+  return { nextDraft, notices }
+}
 
 const applySnapshot = (nextSnapshot: AssistantSnapshot) => {
   snapshot.value = nextSnapshot
@@ -753,11 +853,17 @@ const saveSettings = async (draft: ProviderConfigInput) => {
 
 const beginOAuthLogin = async (draft: ProviderConfigInput) => {
   authBusy.value = true
-  oauthNotice.value = '正在打开浏览器并等待 OAuth 授权回调...'
+  oauthNotice.value = '正在检查 OAuth 配置并准备登录...'
 
   try {
-    const nextSnapshot = await persistSettings(draft)
+    const { nextDraft, notices } = prepareOneClickOAuthDraft(draft)
+    const nextSnapshot = await persistSettings(nextDraft)
     await syncSnapshot(nextSnapshot)
+    if (notices.length > 0) {
+      oauthNotice.value = notices.join(' ')
+      announce(oauthNotice.value)
+    }
+    oauthNotice.value = '正在打开浏览器并等待 OAuth 授权回调...'
     const result = await startOAuthSignInAuto()
     await syncSnapshot(result.snapshot)
     oauthNotice.value = result.message
@@ -770,7 +876,7 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
       }
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : '一键 OAuth 登录失败'
+    const message = resolveErrorMessage(error, '一键 OAuth 登录失败')
     oauthNotice.value = message
     announce(message, 'guarded')
   } finally {
@@ -787,7 +893,7 @@ const finishOAuthLogin = async (callbackUrl: string) => {
     oauthNotice.value = result.message
     announce(result.message)
   } catch (error) {
-    const message = error instanceof Error ? error.message : '完成 OAuth 登录失败'
+    const message = resolveErrorMessage(error, '完成 OAuth 登录失败')
     oauthNotice.value = message
     announce(message, 'guarded')
   } finally {
@@ -804,7 +910,7 @@ const disconnectOAuthLogin = async () => {
     oauthNotice.value = result.message
     announce(result.message)
   } catch (error) {
-    const message = error instanceof Error ? error.message : '退出 OAuth 登录失败'
+    const message = resolveErrorMessage(error, '退出 OAuth 登录失败')
     oauthNotice.value = message
     announce(message, 'guarded')
   } finally {

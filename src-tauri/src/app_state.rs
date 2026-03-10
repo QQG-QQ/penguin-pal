@@ -159,7 +159,7 @@ impl Default for ProviderConfig {
             model: ProviderKind::Mock.default_model().to_string(),
             base_url: None,
             system_prompt: default_system_prompt(),
-            allow_network: false,
+            allow_network: true,
             voice_reply: true,
             retain_history: true,
             api_key_loaded: false,
@@ -519,6 +519,7 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
     runtime.provider.oauth.started_at = None;
     runtime.provider.oauth.expires_at = None;
     runtime.provider.oauth.status = OAuthStatus::SignedOut;
+    runtime.provider.allow_network = true;
 
     Ok(runtime)
 }
