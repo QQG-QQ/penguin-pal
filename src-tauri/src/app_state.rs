@@ -64,9 +64,10 @@ impl Default for ProviderKind {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub enum AuthMode {
+    #[serde(rename = "apiKey")]
     ApiKey,
+    #[serde(rename = "oauth", alias = "oAuth", alias = "OAuth")]
     OAuth,
 }
 
