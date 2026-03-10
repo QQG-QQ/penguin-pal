@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 const ENV_SYSTEM_CODEX_BIN: &str = "CODEX_BIN";
 
@@ -119,10 +119,12 @@ fn file_if_exists(path: PathBuf) -> Option<PathBuf> {
 
 pub fn resolve_for_app(app: &AppHandle) -> Result<CodexRuntimeInfo, String> {
     let home_root = private_home_root(app)?;
+    let local_candidate = local_runtime_candidate(app)?;
+    let bundled_candidate = bundled_runtime_candidate(app)?;
 
-    let command = file_if_exists(local_runtime_candidate(app)?)
+    let command = file_if_exists(local_candidate)
         .map(|path| (path, "应用私有运行时"))
-        .or_else(|| file_if_exists(bundled_runtime_candidate(app)?).map(|path| (path, "应用内置运行时")))
+        .or_else(|| file_if_exists(bundled_candidate).map(|path| (path, "应用内置运行时")))
         .or_else(|| file_if_exists(dev_runtime_candidate()).map(|path| (path, "开发目录私有运行时")))
         .or_else(|| file_if_exists(dev_resources_candidate()).map(|path| (path, "开发目录资源运行时")))
         .or_else(|| {

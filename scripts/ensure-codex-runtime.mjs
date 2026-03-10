@@ -37,9 +37,15 @@ if (!existsSync(runtimePkg)) {
 }
 
 console.log('[info] Installing private Codex runtime into src-tauri/.codex-runtime/windows-x64')
+const npmExecPath = process.env.npm_execpath
+if (!npmExecPath) {
+  console.error('[error] npm_execpath is missing. Please run this via npm/npx on Windows.')
+  process.exit(1)
+}
+
 const install = spawnSync(
-  'npm.cmd',
-  ['install', '--no-fund', '--no-audit', '@openai/codex@latest'],
+  process.execPath,
+  [npmExecPath, 'install', '--no-fund', '--no-audit', '@openai/codex@latest'],
   {
     cwd: runtimeRoot,
     stdio: 'inherit',
@@ -47,7 +53,13 @@ const install = spawnSync(
   }
 )
 
+if (install.error) {
+  console.error(`[error] Failed to spawn npm installer: ${install.error.message}`)
+  process.exit(1)
+}
+
 if (install.status !== 0) {
+  console.error(`[error] Private Codex runtime install failed with exit code ${install.status ?? 'unknown'}`)
   process.exit(install.status ?? 1)
 }
 
