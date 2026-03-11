@@ -74,6 +74,9 @@ $strategy = $null
 
 function Try-GetPattern($element, $pattern, [string]$name, $supportedPatterns) {{
   try {{
+    if ($null -eq $pattern) {{
+      return $null
+    }}
     $instance = $element.GetCurrentPattern($pattern)
     if ($null -ne $instance) {{
       $supportedPatterns.Add($name) | Out-Null
@@ -81,6 +84,24 @@ function Try-GetPattern($element, $pattern, [string]$name, $supportedPatterns) {
     }}
   }} catch {{}}
   return $null
+}}
+
+function Resolve-PatternIdentifier([string]$typeName) {{
+  $qualifiedName = 'System.Windows.Automation.' + $typeName + ', UIAutomationClient'
+  $type = [System.Type]::GetType($qualifiedName, $false)
+  if ($null -eq $type) {{
+    return $null
+  }}
+  $property = $type.GetProperty('Pattern', [System.Reflection.BindingFlags] 'Public, Static')
+  if ($null -eq $property) {{
+    return $null
+  }}
+  return $property.GetValue($null, $null)
+}}
+
+function Try-GetPatternByTypeName($element, [string]$typeName, [string]$label, $supportedPatterns) {{
+  $pattern = Resolve-PatternIdentifier $typeName
+  return Try-GetPattern $element $pattern $label $supportedPatterns
 }}
 
 function Try-ClickStrategy([string]$name, [scriptblock]$Action, $attemptErrors) {{
@@ -93,11 +114,11 @@ function Try-ClickStrategy([string]$name, [scriptblock]$Action, $attemptErrors) 
   }}
 }}
 
-$invokePattern = Try-GetPattern $element ([System.Windows.Automation.InvokePattern]::Pattern) 'InvokePattern' $supportedPatterns
-$selectionItemPattern = Try-GetPattern $element ([System.Windows.Automation.SelectionItemPattern]::Pattern) 'SelectionItemPattern' $supportedPatterns
-$legacyPattern = Try-GetPattern $element ([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern) 'LegacyIAccessiblePattern' $supportedPatterns
-$expandCollapsePattern = Try-GetPattern $element ([System.Windows.Automation.ExpandCollapsePattern]::Pattern) 'ExpandCollapsePattern' $supportedPatterns
-$togglePattern = Try-GetPattern $element ([System.Windows.Automation.TogglePattern]::Pattern) 'TogglePattern' $supportedPatterns
+$invokePattern = Try-GetPatternByTypeName $element 'InvokePattern' 'InvokePattern' $supportedPatterns
+$selectionItemPattern = Try-GetPatternByTypeName $element 'SelectionItemPattern' 'SelectionItemPattern' $supportedPatterns
+$legacyPattern = Try-GetPatternByTypeName $element 'LegacyIAccessiblePattern' 'LegacyIAccessiblePattern' $supportedPatterns
+$expandCollapsePattern = Try-GetPatternByTypeName $element 'ExpandCollapsePattern' 'ExpandCollapsePattern' $supportedPatterns
+$togglePattern = Try-GetPatternByTypeName $element 'TogglePattern' 'TogglePattern' $supportedPatterns
 
 if ($summary.controlType -in @('MenuBarItem', 'MenuItem')) {{
   if ($null -ne $expandCollapsePattern -and (Try-ClickStrategy 'ExpandCollapsePattern.Expand' {{ $expandCollapsePattern.Expand() }} $attemptErrors)) {{
