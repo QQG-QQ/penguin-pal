@@ -11,9 +11,33 @@ const emit = defineEmits<{
   send: []
   focus: []
   blur: []
+  historyUp: []
+  historyDown: []
 }>()
 
 const handleKeydown = (event: KeyboardEvent) => {
+  const target = event.target as HTMLTextAreaElement | null
+  const selectionStart = target?.selectionStart ?? 0
+  const selectionEnd = target?.selectionEnd ?? 0
+  const valueLength = target?.value.length ?? 0
+
+  if (event.key === 'ArrowUp' && !event.shiftKey && selectionStart === selectionEnd && selectionStart === 0) {
+    event.preventDefault()
+    emit('historyUp')
+    return
+  }
+
+  if (
+    event.key === 'ArrowDown' &&
+    !event.shiftKey &&
+    selectionStart === selectionEnd &&
+    selectionEnd === valueLength
+  ) {
+    event.preventDefault()
+    emit('historyDown')
+    return
+  }
+
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault()
     emit('send')

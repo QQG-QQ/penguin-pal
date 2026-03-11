@@ -3,6 +3,7 @@ mod app_state;
 mod codex_runtime;
 mod audio;
 mod desktop;
+mod history;
 mod security;
 mod tray;
 mod window;
@@ -19,6 +20,7 @@ use crate::{
         ProviderConfigInput, RuntimeState, DEFAULT_OAUTH_REDIRECT_URL,
     },
     codex_runtime::{apply_private_env, private_auth_path, resolve_for_app},
+    history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
 };
 
@@ -784,6 +786,31 @@ async fn send_chat_message(
         runtime.messages.push(reply_message.clone());
         runtime.mode = PetMode::Idle;
         memory::trim_history(&mut runtime.messages);
+
+        if let Err(error) = history::record_input_history(&app, trimmed) {
+            audit::push_entry(
+                &mut runtime.audit_trail,
+                audit::record(
+                    "input_history",
+                    "warn",
+                    format!("输入历史写入失败：{error}"),
+                    0,
+                ),
+            );
+        }
+
+        if let Err(error) = history::record_reply_history(&app, trimmed, &reply_message.content) {
+            audit::push_entry(
+                &mut runtime.audit_trail,
+                audit::record(
+                    "reply_history",
+                    "warn",
+                    format!("今日回复历史写入失败：{error}"),
+                    0,
+                ),
+            );
+        }
+
         audit::push_entry(
             &mut runtime.audit_trail,
             audit::record("chat_completion", &outcome, detail, 1),
@@ -984,6 +1011,21 @@ fn clear_conversation(
     Ok(snapshot_from_runtime(&runtime))
 }
 
+#[tauri::command]
+fn get_input_history(app: AppHandle) -> Result<Vec<String>, String> {
+    history::get_input_history(&app)
+}
+
+#[tauri::command]
+fn get_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, String> {
+    history::get_today_reply_history(&app)
+}
+
+#[tauri::command]
+fn clear_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, String> {
+    history::clear_today_reply_history(&app)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -992,6 +1034,7 @@ pub fn run() {
             let runtime = load(&app.handle())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(Mutex::new(runtime));
+            let _ = history::prepare_storage(&app.handle());
 
             tray::create_tray(app)?;
 
@@ -1018,7 +1061,10 @@ pub fn run() {
             request_desktop_action,
             confirm_desktop_action,
             cancel_desktop_action_approval,
-            clear_conversation
+            clear_conversation,
+            get_input_history,
+            get_today_reply_history,
+            clear_today_reply_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

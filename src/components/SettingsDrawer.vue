@@ -6,7 +6,8 @@ import type {
   CodexCliStatus,
   DesktopAction,
   ProviderConfigInput,
-  ProviderKind
+  ProviderKind,
+  ReplyHistoryEntry
 } from '../types/assistant'
 
 const props = defineProps<{
@@ -21,6 +22,7 @@ const props = defineProps<{
   actions: DesktopAction[]
   permissionLevel: number
   aiConstraints: AiConstraintProfile
+  todayReplyHistory: ReplyHistoryEntry[]
 }>()
 
 const emit = defineEmits<{
@@ -30,6 +32,7 @@ const emit = defineEmits<{
   oauthStart: [input: ProviderConfigInput]
   codexRefresh: []
   triggerAction: [action: DesktopAction]
+  clearTodayHistory: []
 }>()
 
 const cloneDraft = (value: ProviderConfigInput): ProviderConfigInput =>
@@ -181,6 +184,13 @@ const save = () => {
 
   emit('save', cloneDraft(localDraft.value))
 }
+
+const formatHistoryTime = (timestamp: number) =>
+  new Date(timestamp).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  })
 </script>
 
 <template>
@@ -437,6 +447,36 @@ const save = () => {
         </div>
       </section>
 
+      <section class="history-shell full-row">
+        <div class="history-header">
+          <div>
+            <strong>今日回复历史</strong>
+            <p>仅展示本地时间今天的问答记录。更早的记录会自动归档到本地文档。</p>
+          </div>
+          <button type="button" class="ghost-button" @click="emit('clearTodayHistory')">
+            清空今日历史
+          </button>
+        </div>
+
+        <div v-if="!todayReplyHistory.length" class="history-empty">
+          今天还没有可展示的回复历史。
+        </div>
+
+        <div v-else class="history-list">
+          <article
+            v-for="entry in todayReplyHistory"
+            :key="entry.id"
+            class="history-entry"
+          >
+            <div class="history-entry-top">
+              <strong>{{ formatHistoryTime(entry.timestamp) }}</strong>
+            </div>
+            <p><span>你：</span>{{ entry.userInput }}</p>
+            <p><span>企鹅：</span>{{ entry.assistantReply }}</p>
+          </article>
+        </div>
+      </section>
+
       <footer class="surface-footer full-row">
         <button
           type="button"
@@ -609,6 +649,70 @@ textarea {
   padding: 18px;
   border-radius: 22px;
   background: rgba(12, 42, 57, 0.07);
+}
+
+.history-shell {
+  padding: 18px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.72);
+  display: grid;
+  gap: 14px;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.history-header p {
+  margin: 6px 0 0;
+  line-height: 1.5;
+  font-size: 12px;
+}
+
+.history-empty {
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(17, 68, 92, 0.06);
+  color: #476775;
+  font-size: 13px;
+}
+
+.history-list {
+  display: grid;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.history-entry {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(17, 68, 92, 0.06);
+  display: grid;
+  gap: 8px;
+}
+
+.history-entry-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.history-entry p {
+  margin: 0;
+  line-height: 1.6;
+  font-size: 13px;
+  color: #234554;
+}
+
+.history-entry span {
+  color: #4a6a78;
+  font-weight: 600;
 }
 
 .constraint-header {

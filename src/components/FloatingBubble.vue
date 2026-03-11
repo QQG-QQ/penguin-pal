@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from 'vue'
 import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition } from '@tauri-apps/api/window'
+import {
+  buildWorkAreaRect,
+  chooseBubbleCandidate,
+  finalizeBubbleLayout
+} from '../lib/petLayout'
 import type { BubbleWindowState } from '../types/assistant'
 
 const props = defineProps<{
   state: BubbleWindowState
 }>()
 
-const MAX_WIDTH = 320
-const SCREEN_MARGIN = 12
-const GAP = 10
-
 const bubbleRef = ref<HTMLElement | null>(null)
-const placement = ref<'above' | 'below'>('above')
-const tailOffset = ref(56)
+const bubbleMaxWidth = ref(320)
+const bubbleMaxHeight = ref(220)
+const placement = ref<'above' | 'upper-left' | 'upper-right'>('above')
+const tailSide = ref<'bottom' | 'left' | 'right'>('bottom')
+const tailOffsetX = ref(56)
+const tailOffsetY = ref(48)
 
 const hideBubbleWindow = async () => {
   try {
@@ -37,40 +42,33 @@ const syncBubbleWindow = async () => {
   }
 
   const monitor = await currentMonitor()
-  const workAreaPosition = monitor?.workArea.position ?? { x: 0, y: 0 }
-  const workAreaSize = monitor?.workArea.size ?? monitor?.size ?? {
-    width: window.screen.availWidth,
-    height: window.screen.availHeight
-  }
+  const workArea = buildWorkAreaRect(
+    monitor?.workArea.position ?? { x: 0, y: 0 },
+    monitor?.workArea.size ?? monitor?.size ?? {
+      width: window.screen.availWidth,
+      height: window.screen.availHeight
+    }
+  )
+  const candidate = chooseBubbleCandidate(props.state, workArea)
+  bubbleMaxWidth.value = candidate.maxWidth
+  bubbleMaxHeight.value = candidate.maxHeight
 
-  const rect = bubble.getBoundingClientRect()
-  const width = Math.ceil(rect.width)
-  const height = Math.ceil(rect.height)
-  const minLeft = workAreaPosition.x + SCREEN_MARGIN
-  const maxLeft = workAreaPosition.x + workAreaSize.width - width - SCREEN_MARGIN
+  await nextTick()
 
-  let left = Math.round(props.state.anchorX - width / 2)
-  left = Math.max(minLeft, Math.min(left, maxLeft))
+  const measured = bubble.getBoundingClientRect()
+  const layout = finalizeBubbleLayout(props.state, workArea, candidate, {
+    width: Math.ceil(measured.width),
+    height: Math.ceil(measured.height)
+  })
 
-  const topAbove = Math.round(props.state.anchorY - height - GAP)
-  const minTop = workAreaPosition.y + SCREEN_MARGIN
-  const maxTop = workAreaPosition.y + workAreaSize.height - height - SCREEN_MARGIN
-
-  let top = topAbove
-  let nextPlacement: 'above' | 'below' = 'above'
-
-  if (topAbove < minTop) {
-    nextPlacement = 'below'
-    top = Math.round(props.state.petBottomY + GAP)
-  }
-
-  top = Math.max(minTop, Math.min(top, maxTop))
-  placement.value = nextPlacement
-  tailOffset.value = Math.max(24, Math.min(width - 24, props.state.anchorX - left))
+  placement.value = layout.placement
+  tailSide.value = layout.tailSide
+  tailOffsetX.value = layout.tailOffsetX
+  tailOffsetY.value = layout.tailOffsetY
 
   const appWindow = getCurrentWindow()
-  await appWindow.setSize(new LogicalSize(width, height))
-  await appWindow.setPosition(new PhysicalPosition(left, top))
+  await appWindow.setSize(new LogicalSize(Math.ceil(measured.width), Math.ceil(measured.height)))
+  await appWindow.setPosition(new PhysicalPosition(layout.left, layout.top))
   await appWindow.show()
 }
 
@@ -101,8 +99,13 @@ onMounted(async () => {
       v-if="state.visible"
       ref="bubbleRef"
       class="floating-bubble"
-      :class="placement"
-      :style="{ '--tail-x': `${tailOffset}px`, '--bubble-max-width': `${MAX_WIDTH}px` }"
+      :class="[placement, `tail-${tailSide}`]"
+      :style="{
+        '--tail-x': `${tailOffsetX}px`,
+        '--tail-y': `${tailOffsetY}px`,
+        '--bubble-max-width': `${bubbleMaxWidth}px`,
+        '--bubble-max-height': `${bubbleMaxHeight}px`
+      }"
     >
       <p>{{ state.text }}</p>
     </div>
@@ -122,30 +125,44 @@ onMounted(async () => {
   display: block;
   width: max-content;
   max-width: var(--bubble-max-width, 320px);
+  max-height: var(--bubble-max-height, 220px);
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 12px 16px;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.98);
   color: #17384b;
   box-shadow: 0 10px 24px rgba(7, 18, 30, 0.1);
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .floating-bubble::after {
   content: '';
   position: absolute;
-  left: var(--tail-x, 56px);
   width: 14px;
   height: 14px;
   background: rgba(255, 255, 255, 0.98);
-  transform: translateX(-50%) rotate(45deg);
+  transform: rotate(45deg);
   border-radius: 3px;
 }
 
-.floating-bubble.above::after {
+.floating-bubble.tail-bottom::after {
+  left: var(--tail-x, 56px);
   bottom: -7px;
+  transform: translateX(-50%) rotate(45deg);
 }
 
-.floating-bubble.below::after {
-  top: -7px;
+.floating-bubble.tail-left::after {
+  left: -7px;
+  top: var(--tail-y, 48px);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.floating-bubble.tail-right::after {
+  right: -7px;
+  top: var(--tail-y, 48px);
+  transform: translateY(-50%) rotate(45deg);
 }
 
 .floating-bubble p {

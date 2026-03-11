@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import guardedArt from '../../penguin/penguin-guarded-cutout.png'
 import idleArt from '../../penguin/penguin-idle-cutout.png'
 import listeningArt from '../../penguin/penguin-listening-cutout.png'
 import speakingArt from '../../penguin/penguin-speaking-cutout.png'
 import thinkingArt from '../../penguin/penguin-thinking-cutout.png'
 import { startMainWindowDrag } from '../lib/assistant'
-import type { PetMode } from '../types/assistant'
+import type { PetLayoutMetrics, PetMode } from '../types/assistant'
 
 const props = defineProps<{
   mode: PetMode
@@ -21,6 +21,7 @@ let pointerStartY = 0
 let pointerPressed = false
 let dragStarted = false
 let longPressTimer: number | null = null
+const shellRef = ref<HTMLElement | null>(null)
 
 const CLICK_MOVE_TOLERANCE = 6
 const LONG_PRESS_DRAG_DELAY_MS = 250
@@ -42,6 +43,37 @@ const artwork = computed(() => {
   }
 
   return map[props.mode]
+})
+
+const getLayoutMetrics = (): PetLayoutMetrics | null => {
+  const shell = shellRef.value
+  if (!shell) {
+    return null
+  }
+
+  const rect = shell.getBoundingClientRect()
+  const anchorX = rect.left + rect.width / 2
+  const anchorY = rect.top + rect.height * 0.17
+  const faceHalfWidth = rect.width * 0.2
+  const faceTop = rect.top + rect.height * 0.12
+  const faceBottom = rect.top + rect.height * 0.46
+
+  return {
+    anchorX,
+    anchorY,
+    petLeft: rect.left,
+    petTop: rect.top,
+    petRight: rect.right,
+    petBottom: rect.bottom,
+    faceLeft: anchorX - faceHalfWidth,
+    faceTop,
+    faceRight: anchorX + faceHalfWidth,
+    faceBottom
+  }
+}
+
+defineExpose({
+  getLayoutMetrics
 })
 
 const rememberPointerOrigin = (event: PointerEvent) => {
@@ -91,6 +123,7 @@ const cancelPointerInteraction = () => {
 
 <template>
   <section
+    ref="shellRef"
     class="pet-shell"
     :class="`mode-${mode}`"
     @pointerdown.left="rememberPointerOrigin"

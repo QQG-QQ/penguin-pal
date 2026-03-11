@@ -163,10 +163,37 @@ export interface CodexCliStatus {
   message: string
 }
 
+export interface ReplyHistoryEntry {
+  id: string
+  timestamp: number
+  userInput: string
+  assistantReply: string
+}
+
+export interface PetLayoutMetrics {
+  anchorX: number
+  anchorY: number
+  petLeft: number
+  petTop: number
+  petRight: number
+  petBottom: number
+  faceLeft: number
+  faceTop: number
+  faceRight: number
+  faceBottom: number
+}
+
 export interface BubbleWindowState {
   visible: boolean
   text: string
   anchorX: number
   anchorY: number
-  petBottomY: number
+  petLeft: number
+  petTop: number
+  petRight: number
+  petBottom: number
+  faceLeft: number
+  faceTop: number
+  faceRight: number
+  faceBottom: number
 }

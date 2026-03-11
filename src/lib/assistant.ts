@@ -13,7 +13,8 @@ import type {
   OAuthFlowResult,
   OAuthState,
   ProviderConfigInput,
-  ProviderKind
+  ProviderKind,
+  ReplyHistoryEntry
 } from '../types/assistant'
 
 const providerModels: Record<ProviderKind, string> = {
@@ -209,6 +210,8 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
 let fallbackSnapshot = buildFallbackSnapshot()
 let fallbackPendingApproval: ActionApprovalRequest | null = null
 let fallbackOAuthStateValue = 'demo-oauth-state'
+const FALLBACK_INPUT_HISTORY_KEY = 'penguinpal-input-history'
+const FALLBACK_TODAY_REPLY_HISTORY_KEY = 'penguinpal-today-reply-history'
 const fallbackCodexStatus = (): CodexCliStatus => ({
   installed: false,
   version: null,
@@ -218,6 +221,68 @@ const fallbackCodexStatus = (): CodexCliStatus => ({
   source: '未找到',
   message: '浏览器调试模式下无法检测本机 Codex CLI。'
 })
+
+const localDateKey = (value = new Date()) =>
+  `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(
+    value.getDate()
+  ).padStart(2, '0')}`
+
+const readFallbackStorage = <T>(key: string, fallback: T): T => {
+  if (typeof window === 'undefined') {
+    return fallback
+  }
+
+  try {
+    const raw = window.localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+const writeFallbackStorage = <T>(key: string, value: T) => {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // ignore fallback persistence failures
+  }
+}
+
+const readFallbackInputHistory = () =>
+  readFallbackStorage<string[]>(FALLBACK_INPUT_HISTORY_KEY, [])
+
+type FallbackReplyHistoryFile = {
+  date: string
+  entries: ReplyHistoryEntry[]
+}
+
+const readFallbackTodayReplyHistoryFile = (): FallbackReplyHistoryFile => {
+  const fallback = {
+    date: localDateKey(),
+    entries: [] as ReplyHistoryEntry[]
+  }
+  const stored = readFallbackStorage<FallbackReplyHistoryFile>(
+    FALLBACK_TODAY_REPLY_HISTORY_KEY,
+    fallback
+  )
+
+  if (stored.date !== localDateKey()) {
+    return fallback
+  }
+
+  return stored
+}
+
+const writeFallbackTodayReplyHistory = (entries: ReplyHistoryEntry[]) => {
+  writeFallbackStorage(FALLBACK_TODAY_REPLY_HISTORY_KEY, {
+    date: localDateKey(),
+    entries
+  })
+}
 
 const isTauriRuntime = () =>
   typeof window !== 'undefined' && typeof window.__TAURI_INTERNALS__ !== 'undefined'
@@ -773,6 +838,24 @@ export const sendChatMessage = async (content: string): Promise<ChatResponse> =>
         ...fallbackSnapshot.auditTrail
       ].slice(0, 8)
     }
+    const trimmed = content.trim()
+    if (trimmed) {
+      const nextInputHistory = readFallbackInputHistory()
+      if (nextInputHistory[nextInputHistory.length - 1] !== trimmed) {
+        writeFallbackStorage(FALLBACK_INPUT_HISTORY_KEY, [...nextInputHistory, trimmed].slice(-50))
+      }
+
+      const nextReplyHistory = readFallbackTodayReplyHistoryFile().entries
+      writeFallbackTodayReplyHistory([
+        ...nextReplyHistory,
+        {
+          id: `reply-${now()}`,
+          timestamp: now(),
+          userInput: trimmed,
+          assistantReply: replyMessage.content
+        }
+      ])
+    }
     return {
       reply: replyMessage,
       providerLabel: 'Mock Assistant',
@@ -951,6 +1034,34 @@ export const clearConversation = async (): Promise<AssistantSnapshot> => {
     fallbackSnapshot = buildFallbackSnapshot()
     fallbackPendingApproval = null
     return clone(fallbackSnapshot)
+  }
+}
+
+export const getInputHistory = async (): Promise<string[]> => {
+  try {
+    return await safeInvoke<string[]>('get_input_history')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return readFallbackInputHistory()
+  }
+}
+
+export const getTodayReplyHistory = async (): Promise<ReplyHistoryEntry[]> => {
+  try {
+    return await safeInvoke<ReplyHistoryEntry[]>('get_today_reply_history')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return readFallbackTodayReplyHistoryFile().entries
+  }
+}
+
+export const clearTodayReplyHistory = async (): Promise<ReplyHistoryEntry[]> => {
+  try {
+    return await safeInvoke<ReplyHistoryEntry[]>('clear_today_reply_history')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    writeFallbackTodayReplyHistory([])
+    return []
   }
 }
 

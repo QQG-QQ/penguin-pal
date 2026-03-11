@@ -1,16 +1,20 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { getCurrentWindow, LogicalSize, PhysicalPosition } from '@tauri-apps/api/window'
+import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition } from '@tauri-apps/api/window'
 import FloatingBubble from './components/FloatingBubble.vue'
 import InputBox from './components/InputBox.vue'
 import Penguin from './components/Penguin.vue'
 import SettingsDrawer from './components/SettingsDrawer.vue'
+import { buildWorkAreaRect, clampWindowPositionToWorkArea } from './lib/petLayout'
 import {
   cancelDesktopActionApproval,
   clearConversation,
+  clearTodayReplyHistory,
   closeSettingsWindow,
   confirmDesktopAction,
   getAssistantSnapshot,
+  getInputHistory,
+  getTodayReplyHistory,
   getCodexCliStatus,
   hideAssistantWindow,
   isBubbleWindowView,
@@ -36,9 +40,11 @@ import type {
   BubbleWindowState,
   CodexCliStatus,
   DesktopAction,
+  PetLayoutMetrics,
   PetMode,
   ProviderConfigInput,
-  ProviderKind
+  ProviderKind,
+  ReplyHistoryEntry
 } from './types/assistant'
 
 const providerDefaults: Record<ProviderKind, string> = {
@@ -69,8 +75,20 @@ const actionCommandMap: Record<string, string[]> = {
 
 const PET_WINDOW_COLLAPSED = { width: 248, height: 252 }
 const PET_WINDOW_EXPANDED = { width: 312, height: 340 }
-const PET_HEAD_ANCHOR_Y = 34
-const PET_BODY_BOTTOM_Y = 244
+const hiddenBubbleState = (): BubbleWindowState => ({
+  visible: false,
+  text: '',
+  anchorX: 0,
+  anchorY: 0,
+  petLeft: 0,
+  petTop: 0,
+  petRight: 0,
+  petBottom: 0,
+  faceLeft: 0,
+  faceTop: 0,
+  faceRight: 0,
+  faceBottom: 0
+})
 
 const emptyConstraints = (): AiConstraintProfile => ({
   label: 'Codex Guardrails',
@@ -156,14 +174,10 @@ const snapshot = ref<AssistantSnapshot>(emptySnapshot())
 const settingsDraft = ref<ProviderConfigInput>(toDraft(snapshot.value))
 const drawerSection = ref<SettingsSection>(readRequestedSettingsSection())
 const messageDraft = ref('')
+const inputHistory = ref<string[]>([])
+const todayReplyHistory = ref<ReplyHistoryEntry[]>([])
 const bubbleText = ref('')
-const bubbleWindowState = ref<BubbleWindowState>({
-  visible: false,
-  text: '',
-  anchorX: 0,
-  anchorY: 0,
-  petBottomY: 0
-})
+const bubbleWindowState = ref<BubbleWindowState>(hiddenBubbleState())
 const busy = ref(false)
 const savingSettings = ref(false)
 const authBusy = ref(false)
@@ -178,6 +192,7 @@ const microphoneAvailable = ref(false)
 const textInputFocused = ref(false)
 const composerVisible = ref(false)
 const inputBoxRef = ref<{ focusComposer: () => void } | null>(null)
+const penguinRef = ref<{ getLayoutMetrics: () => PetLayoutMetrics | null } | null>(null)
 
 let recognition: SpeechRecognition | null = null
 let recognitionBuffer = ''
@@ -193,6 +208,10 @@ let windowMovedCleanup: (() => void) | null = null
 let windowResizedCleanup: (() => void) | null = null
 let autoListenTimer: number | null = null
 let speechPlaybackActive = false
+let petClampTimer: number | null = null
+let petClampInFlight = false
+let inputHistoryCursor = -1
+let draftBeforeHistoryNavigation = ''
 
 const isSettingsView = computed(() => windowView.value === 'settings')
 const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWindowView())
@@ -292,6 +311,134 @@ const clearBubble = () => {
   bubbleText.value = ''
 }
 
+const resetInputHistoryNavigation = () => {
+  inputHistoryCursor = -1
+  draftBeforeHistoryNavigation = ''
+}
+
+const loadInputHistory = async () => {
+  inputHistory.value = await getInputHistory()
+}
+
+const refreshTodayReplyHistory = async () => {
+  todayReplyHistory.value = await getTodayReplyHistory()
+}
+
+const pushInputHistoryLocally = (content: string) => {
+  const trimmed = content.trim()
+  if (!trimmed) {
+    return
+  }
+
+  if (inputHistory.value[inputHistory.value.length - 1] === trimmed) {
+    resetInputHistoryNavigation()
+    return
+  }
+
+  inputHistory.value = [...inputHistory.value, trimmed].slice(-50)
+  resetInputHistoryNavigation()
+}
+
+const recallOlderInput = async () => {
+  if (!inputHistory.value.length || isSettingsView.value || isBubbleView.value) {
+    return
+  }
+
+  if (inputHistoryCursor === -1) {
+    draftBeforeHistoryNavigation = messageDraft.value
+    inputHistoryCursor = inputHistory.value.length - 1
+  } else if (inputHistoryCursor > 0) {
+    inputHistoryCursor -= 1
+  }
+
+  messageDraft.value = inputHistory.value[inputHistoryCursor] ?? messageDraft.value
+  composerVisible.value = true
+  await nextTick()
+  inputBoxRef.value?.focusComposer()
+}
+
+const recallNewerInput = async () => {
+  if (inputHistoryCursor === -1 || isSettingsView.value || isBubbleView.value) {
+    return
+  }
+
+  if (inputHistoryCursor < inputHistory.value.length - 1) {
+    inputHistoryCursor += 1
+    messageDraft.value = inputHistory.value[inputHistoryCursor] ?? ''
+  } else {
+    inputHistoryCursor = -1
+    messageDraft.value = draftBeforeHistoryNavigation
+    draftBeforeHistoryNavigation = ''
+  }
+
+  composerVisible.value = true
+  await nextTick()
+  inputBoxRef.value?.focusComposer()
+}
+
+const clearPetClampTimer = () => {
+  if (petClampTimer !== null) {
+    window.clearTimeout(petClampTimer)
+    petClampTimer = null
+  }
+}
+
+const resolveCurrentWorkArea = async () => {
+  const monitor = await currentMonitor()
+  const position = monitor?.workArea.position ?? { x: 0, y: 0 }
+  const size = monitor?.workArea.size ?? monitor?.size ?? {
+    width: window.screen.availWidth,
+    height: window.screen.availHeight
+  }
+
+  return buildWorkAreaRect(position, size)
+}
+
+const collectPetLayoutMetrics = async (): Promise<PetLayoutMetrics | null> => {
+  await nextTick()
+  return penguinRef.value?.getLayoutMetrics() ?? null
+}
+
+const clampPetWindowToMonitor = async () => {
+  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value || petClampInFlight) {
+    return
+  }
+
+  petClampInFlight = true
+
+  try {
+    const appWindow = getCurrentWindow()
+    const workArea = await resolveCurrentWorkArea()
+    const position = await appWindow.outerPosition()
+    const size = await appWindow.outerSize()
+    const nextPosition = clampWindowPositionToWorkArea(
+      {
+        left: position.x,
+        top: position.y,
+        width: size.width,
+        height: size.height
+      },
+      workArea
+    )
+
+    if (nextPosition.left !== position.x || nextPosition.top !== position.y) {
+      await appWindow.setPosition(new PhysicalPosition(nextPosition.left, nextPosition.top))
+    }
+  } finally {
+    petClampInFlight = false
+  }
+
+  await syncBubbleWindow()
+}
+
+const schedulePetWindowClamp = (delay = 80) => {
+  clearPetClampTimer()
+
+  petClampTimer = window.setTimeout(() => {
+    void clampPetWindowToMonitor()
+  }, delay)
+}
+
 const syncPetWindowFrame = async () => {
   if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
     return
@@ -316,30 +463,37 @@ const syncPetWindowFrame = async () => {
       Math.round(bottomY - nextSize.height)
     )
   )
+
+  await clampPetWindowToMonitor()
 }
 
 const buildBubbleWindowState = async (): Promise<BubbleWindowState> => {
   const text = bubbleText.value.trim()
   if (!text || !isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
-    return {
-      visible: false,
-      text: '',
-      anchorX: 0,
-      anchorY: 0,
-      petBottomY: 0
-    }
+    return hiddenBubbleState()
+  }
+
+  const petLayout = await collectPetLayoutMetrics()
+  if (!petLayout) {
+    return hiddenBubbleState()
   }
 
   const appWindow = getCurrentWindow()
   const position = await appWindow.outerPosition()
-  const size = await appWindow.outerSize()
 
   return {
     visible: true,
     text,
-    anchorX: Math.round(position.x + size.width / 2),
-    anchorY: position.y + PET_HEAD_ANCHOR_Y,
-    petBottomY: position.y + PET_BODY_BOTTOM_Y
+    anchorX: Math.round(position.x + petLayout.anchorX),
+    anchorY: Math.round(position.y + petLayout.anchorY),
+    petLeft: Math.round(position.x + petLayout.petLeft),
+    petTop: Math.round(position.y + petLayout.petTop),
+    petRight: Math.round(position.x + petLayout.petRight),
+    petBottom: Math.round(position.y + petLayout.petBottom),
+    faceLeft: Math.round(position.x + petLayout.faceLeft),
+    faceTop: Math.round(position.y + petLayout.faceTop),
+    faceRight: Math.round(position.x + petLayout.faceRight),
+    faceBottom: Math.round(position.y + petLayout.faceBottom)
   }
 }
 
@@ -634,6 +788,15 @@ const resetConversation = async (announceAfter = false) => {
   }
 }
 
+const clearTodayHistoryRecords = async () => {
+  try {
+    todayReplyHistory.value = await clearTodayReplyHistory()
+    announce('今日回复历史已经清空。', 'speaking')
+  } catch (error) {
+    announce(error instanceof Error ? error.message : '清空今日回复历史失败', 'guarded')
+  }
+}
+
 const triggerAction = async (action: DesktopAction) => {
   if (busy.value) {
     return
@@ -767,7 +930,9 @@ const sendMessage = async (value = messageDraft.value) => {
 
   try {
     const response = await sendChatMessage(content)
+    pushInputHistoryLocally(content)
     applySnapshot(response.snapshot)
+    await refreshTodayReplyHistory()
     announce(response.reply.content)
   } catch (error) {
     announce(error instanceof Error ? error.message : '消息发送失败', 'guarded')
@@ -1003,9 +1168,10 @@ const setupPetWindowListeners = async () => {
   const appWindow = getCurrentWindow()
   windowMovedCleanup = await appWindow.onMoved(() => {
     void syncBubbleWindow()
+    schedulePetWindowClamp()
   })
   windowResizedCleanup = await appWindow.onResized(() => {
-    void syncBubbleWindow()
+    void clampPetWindowToMonitor()
   })
 }
 
@@ -1049,12 +1215,23 @@ watch(
   }
 )
 
+watch(
+  () => snapshot.value.messages.length,
+  (nextLength, previousLength) => {
+    if (nextLength !== previousLength) {
+      void refreshTodayReplyHistory()
+    }
+  }
+)
+
 onMounted(() => {
   if (isBubbleView.value) {
     void setupCrossWindowListeners()
     return
   }
 
+  void loadInputHistory()
+  void refreshTodayReplyHistory()
   void loadSnapshot()
   void refreshCodexLoginStatus(true)
   void refreshMicrophoneAvailability(!isSettingsView.value).then(() => {
@@ -1072,6 +1249,7 @@ onBeforeUnmount(() => {
   recognition?.stop()
   clearBubbleTimer()
   clearAutoListenTimer()
+  clearPetClampTimer()
   mediaDevicesCleanup?.()
   snapshotListenerCleanup?.()
   sectionListenerCleanup?.()
@@ -1098,12 +1276,14 @@ onBeforeUnmount(() => {
       :actions="snapshot.allowedActions"
       :permission-level="snapshot.permissionLevel"
       :ai-constraints="snapshot.aiConstraints"
+      :today-reply-history="todayReplyHistory"
       @close="closeDrawer"
       @save="saveSettings"
       @section-change="drawerSection = $event"
       @oauth-start="beginOAuthLogin"
       @codex-refresh="refreshCodexLoginStatus()"
       @trigger-action="handleActionTrigger"
+      @clear-today-history="clearTodayHistoryRecords"
     />
 
     <transition name="confirm">
@@ -1165,7 +1345,7 @@ onBeforeUnmount(() => {
 
   <div v-else class="app-shell">
     <div class="pet-stack">
-      <Penguin :mode="activeMode" @activate="revealComposer" />
+      <Penguin ref="penguinRef" :mode="activeMode" @activate="revealComposer" />
 
       <transition name="composer">
         <InputBox
@@ -1176,6 +1356,8 @@ onBeforeUnmount(() => {
           @send="sendMessage()"
           @focus="handleInputFocus"
           @blur="handleInputBlur"
+          @history-up="recallOlderInput"
+          @history-down="recallNewerInput"
         />
       </transition>
     </div>
