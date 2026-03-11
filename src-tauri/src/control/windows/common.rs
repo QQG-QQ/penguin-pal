@@ -14,6 +14,10 @@ use crate::control::{
 
 pub const WINDOW_ENUM_PREAMBLE: &str = r#"
 $ErrorActionPreference = 'Stop'
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -32,12 +36,76 @@ public static class PenguinPalWinApi {
   public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 }
 "@
+function Normalize-WindowText([object]$Value) {
+  if ($null -eq $Value) { return '' }
+  return ([string]$Value).Trim()
+}
 function Get-WindowTitle([IntPtr]$Handle) {
   $len = [PenguinPalWinApi]::GetWindowTextLength($Handle)
   if ($len -le 0) { return $null }
   $builder = New-Object System.Text.StringBuilder ($len + 1)
   [void][PenguinPalWinApi]::GetWindowText($Handle, $builder, $builder.Capacity)
-  return $builder.ToString().Trim()
+  return (Normalize-WindowText $builder.ToString())
+}
+function New-WindowSummary([IntPtr]$Handle, [IntPtr]$ActiveHandle) {
+  $title = Get-WindowTitle $Handle
+  if ([string]::IsNullOrWhiteSpace($title)) { return $null }
+  $rect = New-Object PenguinPalWinApi+RECT
+  [void][PenguinPalWinApi]::GetWindowRect($Handle, [ref]$rect)
+  return [pscustomobject]@{
+    handle = $Handle.ToInt64()
+    title = [string]$title
+    isActive = ($Handle.ToInt64() -eq $ActiveHandle.ToInt64())
+    bounds = [pscustomobject]@{
+      left = $rect.Left
+      top = $rect.Top
+      width = [Math]::Max(0, $rect.Right - $rect.Left)
+      height = [Math]::Max(0, $rect.Bottom - $rect.Top)
+    }
+  }
+}
+function Get-VisibleWindowSummaries() {
+  $active = [PenguinPalWinApi]::GetForegroundWindow()
+  $items = New-Object System.Collections.Generic.List[object]
+  [PenguinPalWinApi]::EnumWindows({
+    param($hWnd, $lParam)
+    if (-not [PenguinPalWinApi]::IsWindowVisible($hWnd)) { return $true }
+    $summary = New-WindowSummary $hWnd $active
+    if ($null -ne $summary) {
+      $items.Add($summary) | Out-Null
+    }
+    return $true
+  }, [IntPtr]::Zero) | Out-Null
+  return @($items.ToArray())
+}
+function Normalize-MatchMode([object]$Value) {
+  $mode = (Normalize-WindowText $Value).ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($mode)) { return 'contains' }
+  switch ($mode) {
+    'exact' { return 'exact' }
+    'prefix' { return 'prefix' }
+    default { return 'contains' }
+  }
+}
+function Find-MatchingWindowSummary($Windows, [string]$Needle, [string]$MatchMode) {
+  $normalizedNeedle = (Normalize-WindowText $Needle).ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($normalizedNeedle)) { return $null }
+  $mode = Normalize-MatchMode $MatchMode
+  foreach ($window in @($Windows)) {
+    if ($null -eq $window) { continue }
+    $windowTitle = (Normalize-WindowText $window.title).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($windowTitle)) { continue }
+    $isMatch = $false
+    switch ($mode) {
+      'exact' { $isMatch = ($windowTitle -eq $normalizedNeedle) }
+      'prefix' { $isMatch = $windowTitle.StartsWith($normalizedNeedle) }
+      default { $isMatch = $windowTitle.Contains($normalizedNeedle) }
+    }
+    if ($isMatch) {
+      return $window
+    }
+  }
+  return $null
 }
 "#;
 
