@@ -305,20 +305,6 @@ pub fn run_powershell_json(
     }
 }
 
-pub fn json_field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    value.as_object().and_then(|map| map.get(key))
-}
-
-pub fn string_arg(value: &Value, key: &str) -> Option<String> {
-    json_field(value, key)
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-}
-
-pub fn i64_arg(value: &Value, key: &str) -> Option<i64> {
-    json_field(value, key).and_then(Value::as_i64)
-}
-
 fn encode_powershell(script: &str) -> String {
     let bytes: Vec<u8> = script
         .encode_utf16()

@@ -50,10 +50,6 @@ impl ControlError {
         Self::new(code, message, detail, true)
     }
 
-    pub fn unsupported(message: impl Into<String>) -> Self {
-        Self::new("unsupported_platform", message, None, false)
-    }
-
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new("internal_error", message, None, false)
     }

@@ -78,26 +78,6 @@ pub struct UiSelector {
     pub match_mode: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ElementBounds {
-    pub left: i32,
-    pub top: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ElementSummary {
-    pub name: String,
-    pub automation_id: String,
-    pub control_type: String,
-    pub class_name: String,
-    pub window_title: String,
-    pub bounds: ElementBounds,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolInvokeResponse {
@@ -119,24 +99,6 @@ pub struct ControlServiceStatus {
     pub base_url: Option<String>,
     pub tool_count: usize,
     pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WindowBounds {
-    pub left: i32,
-    pub top: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WindowSummary {
-    pub handle: i64,
-    pub title: String,
-    pub is_active: bool,
-    pub bounds: WindowBounds,
 }
 
 pub fn empty_json_object() -> Value {

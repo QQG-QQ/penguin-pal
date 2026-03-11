@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde_json::{json, Value};
 
@@ -29,27 +31,61 @@ pub fn build_pending_request(
 }
 
 pub fn cleanup_expired_pending(
-    pending_requests: &mut Vec<ControlPendingRequest>,
+    pending_requests: &mut BTreeMap<String, ControlPendingRequest>,
 ) -> Vec<ControlPendingRequest> {
     let now = now_millis();
+    let expired_ids = pending_requests
+        .iter()
+        .filter(|(_, item)| item.expires_at <= now)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+
     let mut expired = vec![];
-    pending_requests.retain(|item| {
-        let keep = item.expires_at > now;
-        if !keep {
-            expired.push(item.clone());
+    for id in expired_ids {
+        if let Some(item) = pending_requests.remove(&id) {
+            expired.push(item);
         }
-        keep
-    });
+    }
+
     expired
 }
 
-pub fn cancel_pending(
-    pending_requests: &mut Vec<ControlPendingRequest>,
+pub fn insert_pending(
+    pending_requests: &mut BTreeMap<String, ControlPendingRequest>,
+    request: ControlPendingRequest,
+) -> usize {
+    let duplicated_tool_ids = pending_requests
+        .iter()
+        .filter(|(_, item)| item.tool == request.tool)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+
+    for id in duplicated_tool_ids {
+        pending_requests.remove(&id);
+    }
+
+    pending_requests.insert(request.id.clone(), request);
+    pending_requests.len()
+}
+
+pub fn list_pending(pending_requests: &BTreeMap<String, ControlPendingRequest>) -> Vec<ControlPendingRequest> {
+    let mut items = pending_requests.values().cloned().collect::<Vec<_>>();
+    items.sort_by_key(|item| item.created_at);
+    items
+}
+
+pub fn take_pending(
+    pending_requests: &mut BTreeMap<String, ControlPendingRequest>,
     id: &str,
 ) -> Option<ControlPendingRequest> {
-    let cancelled = pending_requests.iter().find(|item| item.id == id).cloned();
-    pending_requests.retain(|item| item.id != id);
-    cancelled
+    pending_requests.remove(id)
+}
+
+pub fn cancel_pending(
+    pending_requests: &mut BTreeMap<String, ControlPendingRequest>,
+    id: &str,
+) -> Option<ControlPendingRequest> {
+    take_pending(pending_requests, id)
 }
 
 pub fn default_preview(message: &str) -> Value {

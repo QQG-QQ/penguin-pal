@@ -48,6 +48,15 @@ fn cleanup_expired_control_pending(app: &AppHandle) -> ControlResult<()> {
         .map_err(|_| ControlError::internal("助手状态锁定失败"))?;
     expire_runtime_state(&mut runtime);
     for item in expired {
+        let _ = logging::append_log(
+            app,
+            "control_pending",
+            "expired",
+            format!(
+                "id={} tool={} expiresAt={}",
+                item.id, item.tool, item.expires_at
+            ),
+        );
         audit::push_entry(
             &mut runtime.audit_trail,
             audit::record(
@@ -425,7 +434,14 @@ pub fn list_pending(app: &AppHandle) -> ControlResult<Vec<ControlPendingRequest>
     cleanup_expired_control_pending(app)?;
     let control_state: tauri::State<'_, ControlServiceState> = app.state();
     let pending = control_state.pending_requests().map_err(ControlError::internal)?;
-    Ok(pending.clone())
+    let items = pending::list_pending(&pending);
+    let _ = logging::append_log(
+        app,
+        "control_pending",
+        "list",
+        format!("count={}", items.len()),
+    );
+    Ok(items)
 }
 
 pub fn invoke(app: &AppHandle, request: ToolInvokeRequest) -> ControlResult<ToolInvokeResponse> {
@@ -448,13 +464,33 @@ pub fn invoke(app: &AppHandle, request: ToolInvokeRequest) -> ControlResult<Tool
         let preview = pending_preview(&definition.name, &normalized_args);
         let pending_request =
             pending::build_pending_request(&definition, normalized_args, prompt, preview);
+        let _ = logging::append_log(
+            app,
+            "control_pending",
+            "created",
+            format!(
+                "id={} tool={} createdAt={} expiresAt={}",
+                pending_request.id,
+                pending_request.tool,
+                pending_request.created_at,
+                pending_request.expires_at
+            ),
+        );
 
         {
             let control_state: tauri::State<'_, ControlServiceState> = app.state();
             let mut pending_requests = control_state.pending_requests().map_err(ControlError::internal)?;
             pending::cleanup_expired_pending(&mut pending_requests);
-            pending_requests.retain(|item| item.tool != definition.name);
-            pending_requests.push(pending_request.clone());
+            let count = pending::insert_pending(&mut pending_requests, pending_request.clone());
+            let _ = logging::append_log(
+                app,
+                "control_pending",
+                "inserted",
+                format!(
+                    "id={} tool={} count={}",
+                    pending_request.id, pending_request.tool, count
+                ),
+            );
         }
 
         let detail = format!("tool={} pending_id={}", definition.name, pending_request.id);
@@ -498,16 +534,38 @@ pub fn invoke(app: &AppHandle, request: ToolInvokeRequest) -> ControlResult<Tool
 
 pub fn confirm(app: &AppHandle, pending_id: &str) -> ControlResult<ToolInvokeResponse> {
     cleanup_expired_control_pending(app)?;
+    let _ = logging::append_log(
+        app,
+        "control_pending",
+        "confirm_lookup",
+        format!("id={pending_id}"),
+    );
 
     let pending_request = {
         let control_state: tauri::State<'_, ControlServiceState> = app.state();
         let mut pending_requests = control_state.pending_requests().map_err(ControlError::internal)?;
-        let found = pending_requests
-            .iter()
-            .find(|item| item.id == pending_id)
-            .cloned()
-            .ok_or_else(|| ControlError::not_found("pending_not_found", "未找到待确认的控制请求。"))?;
-        pending_requests.retain(|item| item.id != pending_id);
+        let count_before = pending_requests.len();
+        let found = pending::take_pending(&mut pending_requests, pending_id).ok_or_else(|| {
+            let _ = logging::append_log(
+                app,
+                "control_pending",
+                "confirm_miss",
+                format!("id={} countBefore={}", pending_id, count_before),
+            );
+            ControlError::not_found("pending_not_found", "未找到待确认的控制请求。")
+        })?;
+        let _ = logging::append_log(
+            app,
+            "control_pending",
+            "confirm_matched",
+            format!(
+                "id={} tool={} countBefore={} countAfter={}",
+                found.id,
+                found.tool,
+                count_before,
+                pending_requests.len()
+            ),
+        );
         found
     };
 
@@ -553,8 +611,29 @@ pub fn cancel(app: &AppHandle, pending_id: &str) -> ControlResult<ToolInvokeResp
     let cancelled = {
         let control_state: tauri::State<'_, ControlServiceState> = app.state();
         let mut pending_requests = control_state.pending_requests().map_err(ControlError::internal)?;
+        let count_before = pending_requests.len();
         pending::cancel_pending(&mut pending_requests, pending_id).ok_or_else(|| {
+            let _ = logging::append_log(
+                app,
+                "control_pending",
+                "cancel_miss",
+                format!("id={} countBefore={}", pending_id, count_before),
+            );
             ControlError::not_found("pending_not_found", "未找到待取消的控制请求。")
+        }).map(|item| {
+            let _ = logging::append_log(
+                app,
+                "control_pending",
+                "cancelled",
+                format!(
+                    "id={} tool={} countBefore={} countAfter={}",
+                    item.id,
+                    item.tool,
+                    count_before,
+                    pending_requests.len()
+                ),
+            );
+            item
         })?
     };
 

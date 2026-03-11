@@ -8,7 +8,7 @@ pub mod router;
 pub mod types;
 pub mod windows;
 
-use std::sync::Mutex;
+use std::{collections::BTreeMap, sync::Mutex};
 
 use self::types::PendingControlRequest;
 
@@ -16,14 +16,14 @@ pub const CONTROL_PORT_RANGE: std::ops::RangeInclusive<u16> = 48_765..=48_775;
 
 pub struct ControlServiceState {
     bind_address: Mutex<Option<String>>,
-    pending_requests: Mutex<Vec<PendingControlRequest>>,
+    pending_requests: Mutex<BTreeMap<String, PendingControlRequest>>,
 }
 
 impl ControlServiceState {
     pub fn new() -> Self {
         Self {
             bind_address: Mutex::new(None),
-            pending_requests: Mutex::new(vec![]),
+            pending_requests: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -45,7 +45,7 @@ impl ControlServiceState {
 
     pub fn pending_requests(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, Vec<PendingControlRequest>>, String> {
+    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, PendingControlRequest>>, String> {
         self.pending_requests
             .lock()
             .map_err(|_| "控制服务待确认状态锁定失败".to_string())
