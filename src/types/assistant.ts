@@ -1,4 +1,5 @@
 export type PetMode = 'idle' | 'listening' | 'thinking' | 'speaking' | 'guarded'
+export type AssistantWindowView = 'pet' | 'settings' | 'bubble'
 
 export type ProviderKind = 'mock' | 'codexCli' | 'openAi' | 'anthropic' | 'openAiCompatible'
 export type ProviderAuthMode = 'apiKey' | 'oauth'
@@ -160,4 +161,12 @@ export interface CodexCliStatus {
   runtimePath: string | null
   source: string
   message: string
+}
+
+export interface BubbleWindowState {
+  visible: boolean
+  text: string
+  anchorX: number
+  anchorY: number
+  petBottomY: number
 }

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+
 defineProps<{
   modelValue: string
   busy: boolean
@@ -17,12 +19,23 @@ const handleKeydown = (event: KeyboardEvent) => {
     emit('send')
   }
 }
+
+const textareaRef = ref<HTMLTextAreaElement | null>(null)
+
+const focusComposer = () => {
+  textareaRef.value?.focus()
+}
+
+defineExpose({
+  focusComposer
+})
 </script>
 
 <template>
   <section class="input-shell">
     <div class="composer">
       <textarea
+        ref="textareaRef"
         :value="modelValue"
         rows="2"
         placeholder="直接聊天，回车发送。输入“打开设置”或“隐藏到托盘”。"

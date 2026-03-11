@@ -10,8 +10,14 @@ import type { PetMode } from '../types/assistant'
 
 const props = defineProps<{
   mode: PetMode
-  bubbleText: string
 }>()
+
+const emit = defineEmits<{
+  activate: []
+}>()
+
+let pointerStartX = 0
+let pointerStartY = 0
 
 const artwork = computed(() => {
   const map: Record<PetMode, { src: string; alt: string }> = {
@@ -36,6 +42,20 @@ const startDrag = async (event: MouseEvent) => {
     // Keep the declarative drag region as the primary path and only use this as a fallback.
   }
 }
+
+const rememberPointerOrigin = (event: PointerEvent) => {
+  pointerStartX = event.clientX
+  pointerStartY = event.clientY
+}
+
+const activatePet = (event: PointerEvent) => {
+  const movedX = Math.abs(event.clientX - pointerStartX)
+  const movedY = Math.abs(event.clientY - pointerStartY)
+
+  if (movedX <= 6 && movedY <= 6) {
+    emit('activate')
+  }
+}
 </script>
 
 <template>
@@ -44,13 +64,9 @@ const startDrag = async (event: MouseEvent) => {
     :class="`mode-${mode}`"
     data-tauri-drag-region
     @mousedown.left="startDrag"
+    @pointerdown.left="rememberPointerOrigin"
+    @pointerup.left="activatePet"
   >
-    <transition name="bubble">
-      <div v-if="bubbleText" class="speech-bubble">
-        <p>{{ bubbleText }}</p>
-      </div>
-    </transition>
-
     <div class="pet-aura aura-a" />
     <div class="pet-aura aura-b" />
     <div class="pet-shadow" />
@@ -71,9 +87,8 @@ const startDrag = async (event: MouseEvent) => {
 .pet-shell {
   position: relative;
   width: 100%;
-  max-width: 296px;
-  height: 352px;
-  padding-top: 126px;
+  max-width: 244px;
+  height: 248px;
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -100,20 +115,20 @@ const startDrag = async (event: MouseEvent) => {
 }
 
 .aura-a {
-  width: 144px;
-  height: 144px;
+  width: 136px;
+  height: 136px;
   left: 50%;
-  top: 178px;
-  transform: translateX(-102px);
+  top: 86px;
+  transform: translateX(-96px);
   background: rgba(134, 221, 245, 0.24);
 }
 
 .aura-b {
-  width: 128px;
-  height: 128px;
+  width: 120px;
+  height: 120px;
   left: 50%;
-  top: 192px;
-  transform: translateX(12px);
+  top: 98px;
+  transform: translateX(10px);
   background: rgba(255, 185, 124, 0.14);
 }
 
@@ -130,7 +145,7 @@ const startDrag = async (event: MouseEvent) => {
 .pet-body {
   position: relative;
   z-index: 1;
-  width: min(228px, calc(100% - 40px));
+  width: min(224px, calc(100% - 10px));
   display: flex;
   justify-content: center;
   align-items: flex-end;
@@ -145,50 +160,6 @@ const startDrag = async (event: MouseEvent) => {
   user-select: none;
   -webkit-user-drag: none;
   pointer-events: none;
-}
-
-.speech-bubble {
-  position: absolute;
-  top: 4px;
-  left: 50%;
-  z-index: 3;
-  width: min(280px, calc(100% - 12px));
-  min-height: 56px;
-  padding: 13px 16px;
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.96);
-  color: #183949;
-  box-shadow:
-    0 16px 30px rgba(6, 18, 30, 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.86);
-  transform: translateX(-50%);
-  pointer-events: none;
-}
-
-.speech-bubble::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  bottom: -8px;
-  width: 16px;
-  height: 16px;
-  background: rgba(255, 255, 255, 0.96);
-  transform: translateX(-50%) rotate(45deg);
-  border-radius: 4px;
-}
-
-.speech-bubble p {
-  margin: 0;
-  position: relative;
-  z-index: 1;
-  max-height: 8.7em;
-  overflow: hidden;
-  font-size: 12.5px;
-  line-height: 1.45;
-  text-align: left;
-  display: -webkit-box;
-  -webkit-line-clamp: 6;
-  -webkit-box-orient: vertical;
 }
 
 .mode-listening .aura-a {
@@ -225,17 +196,6 @@ const startDrag = async (event: MouseEvent) => {
 
 .motion-guarded {
   animation: guardedAlert 1.8s ease-in-out infinite;
-}
-
-.bubble-enter-active,
-.bubble-leave-active {
-  transition: opacity 0.18s ease, transform 0.18s ease;
-}
-
-.bubble-enter-from,
-.bubble-leave-to {
-  opacity: 0;
-  transform: translateX(-50%) translateY(10px);
 }
 
 @keyframes idleFloat {

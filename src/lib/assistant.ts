@@ -2,9 +2,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { emit, emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   ActionApprovalRequest,
+  AssistantWindowView,
   AiConstraintProfile,
   ActionExecutionResult,
   AssistantSnapshot,
+  BubbleWindowState,
   ChatMessage,
   ChatResponse,
   CodexCliStatus,
@@ -269,23 +271,41 @@ const rethrowIfDesktopRuntime = (error: unknown): void => {
 export type SettingsSection = 'settings' | 'actions'
 
 const SETTINGS_WINDOW_LABEL = 'settings'
+const BUBBLE_WINDOW_LABEL = 'bubble'
 const SNAPSHOT_UPDATED_EVENT = 'penguinpal://assistant-snapshot'
 const SETTINGS_SECTION_EVENT = 'penguinpal://settings-section'
+const BUBBLE_STATE_EVENT = 'penguinpal://bubble-state'
 
 let browserSettingsWindow: Window | null = null
 
 const normalizeSettingsSection = (value: string | null | undefined): SettingsSection =>
   value === 'actions' ? 'actions' : 'settings'
 
+const normalizeWindowView = (value: string | null | undefined): AssistantWindowView => {
+  if (value === 'settings' || value === 'bubble') {
+    return value
+  }
+
+  return 'pet'
+}
+
 const settingsWindowUrl = (section: SettingsSection) =>
   `/?view=settings&section=${section}`
 
-export const isSettingsWindowView = (): boolean => {
+export const readWindowView = (): AssistantWindowView => {
   if (typeof window === 'undefined') {
-    return false
+    return 'pet'
   }
 
-  return new URL(window.location.href).searchParams.get('view') === 'settings'
+  return normalizeWindowView(new URL(window.location.href).searchParams.get('view'))
+}
+
+export const isSettingsWindowView = (): boolean => {
+  return readWindowView() === 'settings'
+}
+
+export const isBubbleWindowView = (): boolean => {
+  return readWindowView() === 'bubble'
 }
 
 export const readRequestedSettingsSection = (): SettingsSection => {
@@ -312,6 +332,26 @@ export const listenForAssistantSnapshot = async (
   }
 
   return listen<AssistantSnapshot>(SNAPSHOT_UPDATED_EVENT, (event) => {
+    handler(event.payload)
+  })
+}
+
+export const publishBubbleWindowState = async (state: BubbleWindowState): Promise<void> => {
+  if (!isTauriRuntime()) {
+    return
+  }
+
+  await emitTo(BUBBLE_WINDOW_LABEL, BUBBLE_STATE_EVENT, state)
+}
+
+export const listenForBubbleWindowState = async (
+  handler: (state: BubbleWindowState) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<BubbleWindowState>(BUBBLE_STATE_EVENT, (event) => {
     handler(event.payload)
   })
 }

@@ -5,9 +5,15 @@
   "local": true,
   "windows": [
     "main",
-    "settings"
+    "settings",
+    "bubble"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-ignore-cursor-events"
   ]
 }

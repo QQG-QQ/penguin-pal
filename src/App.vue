@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { getCurrentWindow, LogicalSize, PhysicalPosition } from '@tauri-apps/api/window'
+import FloatingBubble from './components/FloatingBubble.vue'
 import InputBox from './components/InputBox.vue'
 import Penguin from './components/Penguin.vue'
 import SettingsDrawer from './components/SettingsDrawer.vue'
@@ -11,11 +13,14 @@ import {
   getAssistantSnapshot,
   getCodexCliStatus,
   hideAssistantWindow,
-  isSettingsWindowView,
+  isBubbleWindowView,
   listenForAssistantSnapshot,
+  listenForBubbleWindowState,
   listenForSettingsSectionChange,
   openSettingsWindow,
+  publishBubbleWindowState,
   publishAssistantSnapshot,
+  readWindowView,
   readRequestedSettingsSection,
   requestDesktopAction,
   saveProviderConfig,
@@ -25,8 +30,10 @@ import {
 } from './lib/assistant'
 import type {
   ActionApprovalRequest,
+  AssistantWindowView,
   AiConstraintProfile,
   AssistantSnapshot,
+  BubbleWindowState,
   CodexCliStatus,
   DesktopAction,
   PetMode,
@@ -59,6 +66,11 @@ const actionCommandMap: Record<string, string[]> = {
   focus_window: ['唤起桌宠', '聚焦桌宠', '显示桌宠'],
   show_window: ['显示主面板', '显示窗口']
 }
+
+const PET_WINDOW_COLLAPSED = { width: 248, height: 252 }
+const PET_WINDOW_EXPANDED = { width: 312, height: 340 }
+const PET_HEAD_ANCHOR_Y = 34
+const PET_BODY_BOTTOM_Y = 244
 
 const emptyConstraints = (): AiConstraintProfile => ({
   label: 'Codex Guardrails',
@@ -139,12 +151,19 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   clearOAuthToken: false
 })
 
-const windowView = ref<'pet' | 'settings'>(isSettingsWindowView() ? 'settings' : 'pet')
+const windowView = ref<AssistantWindowView>(readWindowView())
 const snapshot = ref<AssistantSnapshot>(emptySnapshot())
 const settingsDraft = ref<ProviderConfigInput>(toDraft(snapshot.value))
 const drawerSection = ref<SettingsSection>(readRequestedSettingsSection())
 const messageDraft = ref('')
 const bubbleText = ref('')
+const bubbleWindowState = ref<BubbleWindowState>({
+  visible: false,
+  text: '',
+  anchorX: 0,
+  anchorY: 0,
+  petBottomY: 0
+})
 const busy = ref(false)
 const savingSettings = ref(false)
 const authBusy = ref(false)
@@ -157,6 +176,8 @@ const listening = ref(false)
 const visualMode = ref<PetMode | null>(null)
 const microphoneAvailable = ref(false)
 const textInputFocused = ref(false)
+const composerVisible = ref(false)
+const inputBoxRef = ref<{ focusComposer: () => void } | null>(null)
 
 let recognition: SpeechRecognition | null = null
 let recognitionBuffer = ''
@@ -167,12 +188,19 @@ let mediaDevicesCleanup: (() => void) | null = null
 let microphonePermissionRequested = false
 let snapshotListenerCleanup: (() => void) | null = null
 let sectionListenerCleanup: (() => void) | null = null
+let bubbleStateListenerCleanup: (() => void) | null = null
+let windowMovedCleanup: (() => void) | null = null
+let windowResizedCleanup: (() => void) | null = null
 let autoListenTimer: number | null = null
 let speechPlaybackActive = false
 
 const isSettingsView = computed(() => windowView.value === 'settings')
+const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWindowView())
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
 const activeProviderLabel = computed(() => providerLabels[snapshot.value.provider.kind])
+const showComposer = computed(
+  () => composerVisible.value || textInputFocused.value || Boolean(messageDraft.value.trim())
+)
 
 const canSubmitApproval = computed(() => {
   if (!pendingApproval.value || busy.value) {
@@ -210,6 +238,9 @@ const shouldAutoListen = computed(
 )
 
 const normalizeCommand = (value: string) => value.replace(/\s+/g, '').toLowerCase()
+
+const isTauriDesktop = () =>
+  typeof window !== 'undefined' && typeof window.__TAURI_INTERNALS__ !== 'undefined'
 
 const resolveErrorMessage = (error: unknown, fallback: string): string => {
   if (error instanceof Error && error.message.trim()) {
@@ -259,6 +290,78 @@ const clearBubbleTimer = () => {
 const clearBubble = () => {
   clearBubbleTimer()
   bubbleText.value = ''
+}
+
+const syncPetWindowFrame = async () => {
+  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
+    return
+  }
+
+  const appWindow = getCurrentWindow()
+  const nextSize = showComposer.value ? PET_WINDOW_EXPANDED : PET_WINDOW_COLLAPSED
+  const position = await appWindow.outerPosition()
+  const size = await appWindow.outerSize()
+
+  if (size.width === nextSize.width && size.height === nextSize.height) {
+    return
+  }
+
+  const bottomCenterX = position.x + Math.round(size.width / 2)
+  const bottomY = position.y + size.height
+
+  await appWindow.setSize(new LogicalSize(nextSize.width, nextSize.height))
+  await appWindow.setPosition(
+    new PhysicalPosition(
+      Math.round(bottomCenterX - nextSize.width / 2),
+      Math.round(bottomY - nextSize.height)
+    )
+  )
+}
+
+const buildBubbleWindowState = async (): Promise<BubbleWindowState> => {
+  const text = bubbleText.value.trim()
+  if (!text || !isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
+    return {
+      visible: false,
+      text: '',
+      anchorX: 0,
+      anchorY: 0,
+      petBottomY: 0
+    }
+  }
+
+  const appWindow = getCurrentWindow()
+  const position = await appWindow.outerPosition()
+  const size = await appWindow.outerSize()
+
+  return {
+    visible: true,
+    text,
+    anchorX: Math.round(position.x + size.width / 2),
+    anchorY: position.y + PET_HEAD_ANCHOR_Y,
+    petBottomY: position.y + PET_BODY_BOTTOM_Y
+  }
+}
+
+const syncBubbleWindow = async () => {
+  if (!isTauriDesktop() || isBubbleView.value) {
+    return
+  }
+
+  const nextState = await buildBubbleWindowState()
+  bubbleWindowState.value = nextState
+  await publishBubbleWindowState(nextState)
+}
+
+const revealComposer = async () => {
+  if (isSettingsView.value || isBubbleView.value) {
+    return
+  }
+
+  composerVisible.value = true
+  await syncPetWindowFrame()
+  await nextTick()
+  inputBoxRef.value?.focusComposer()
 }
 
 const clearAutoListenTimer = () => {
@@ -873,6 +976,7 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
 }
 
 const handleInputFocus = () => {
+  composerVisible.value = true
   textInputFocused.value = true
   clearAutoListenTimer()
 
@@ -884,10 +988,35 @@ const handleInputFocus = () => {
 
 const handleInputBlur = () => {
   textInputFocused.value = false
+  if (!messageDraft.value.trim() && !busy.value) {
+    composerVisible.value = false
+    void syncPetWindowFrame()
+  }
   scheduleAutoListening(320)
 }
 
+const setupPetWindowListeners = async () => {
+  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
+    return
+  }
+
+  const appWindow = getCurrentWindow()
+  windowMovedCleanup = await appWindow.onMoved(() => {
+    void syncBubbleWindow()
+  })
+  windowResizedCleanup = await appWindow.onResized(() => {
+    void syncBubbleWindow()
+  })
+}
+
 const setupCrossWindowListeners = async () => {
+  if (isBubbleView.value) {
+    bubbleStateListenerCleanup = await listenForBubbleWindowState((nextState) => {
+      bubbleWindowState.value = nextState
+    })
+    return
+  }
+
   snapshotListenerCleanup = await listenForAssistantSnapshot((nextSnapshot) => {
     applySnapshot(nextSnapshot)
   })
@@ -899,7 +1028,33 @@ const setupCrossWindowListeners = async () => {
   }
 }
 
+watch(showComposer, (visible, previousVisible) => {
+  if (isSettingsView.value || isBubbleView.value) {
+    return
+  }
+
+  void syncPetWindowFrame().then(() => syncBubbleWindow())
+
+  if (visible && !previousVisible) {
+    void nextTick(() => {
+      inputBoxRef.value?.focusComposer()
+    })
+  }
+})
+
+watch(
+  () => bubbleText.value,
+  () => {
+    void syncBubbleWindow()
+  }
+)
+
 onMounted(() => {
+  if (isBubbleView.value) {
+    void setupCrossWindowListeners()
+    return
+  }
+
   void loadSnapshot()
   void refreshCodexLoginStatus(true)
   void refreshMicrophoneAvailability(!isSettingsView.value).then(() => {
@@ -907,6 +1062,10 @@ onMounted(() => {
   })
   setupMediaDeviceWatcher()
   void setupCrossWindowListeners()
+  if (!isSettingsView.value) {
+    void syncPetWindowFrame().then(() => syncBubbleWindow())
+    void setupPetWindowListeners()
+  }
 })
 
 onBeforeUnmount(() => {
@@ -916,6 +1075,9 @@ onBeforeUnmount(() => {
   mediaDevicesCleanup?.()
   snapshotListenerCleanup?.()
   sectionListenerCleanup?.()
+  bubbleStateListenerCleanup?.()
+  windowMovedCleanup?.()
+  windowResizedCleanup?.()
   if (voiceReplySupported.value) {
     window.speechSynthesis.cancel()
   }
@@ -997,17 +1159,25 @@ onBeforeUnmount(() => {
     </transition>
   </div>
 
+  <div v-else-if="isBubbleView" class="bubble-shell">
+    <FloatingBubble :state="bubbleWindowState" />
+  </div>
+
   <div v-else class="app-shell">
     <div class="pet-stack">
-      <Penguin :mode="activeMode" :bubble-text="bubbleText" />
+      <Penguin :mode="activeMode" @activate="revealComposer" />
 
-      <InputBox
-        v-model="messageDraft"
-        :busy="busy"
-        @send="sendMessage()"
-        @focus="handleInputFocus"
-        @blur="handleInputBlur"
-      />
+      <transition name="composer">
+        <InputBox
+          v-if="showComposer"
+          ref="inputBoxRef"
+          v-model="messageDraft"
+          :busy="busy"
+          @send="sendMessage()"
+          @focus="handleInputFocus"
+          @blur="handleInputBlur"
+        />
+      </transition>
     </div>
 
     <transition name="confirm">
@@ -1108,14 +1278,22 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
+.bubble-shell {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: visible;
+  pointer-events: none;
+}
+
 .app-shell {
   position: relative;
   width: 100%;
   height: 100%;
   display: flex;
-  align-items: stretch;
+  align-items: flex-end;
   justify-content: center;
-  padding: 0 0 10px;
+  padding: 0;
   overflow: visible;
 }
 
@@ -1130,10 +1308,10 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 8px;
   width: 100%;
   height: 100%;
-  padding: 0 8px;
+  padding: 0;
 }
 
 .confirm-shell {
@@ -1270,5 +1448,16 @@ body {
 .confirm-enter-from,
 .confirm-leave-to {
   opacity: 0;
+}
+
+.composer-enter-active,
+.composer-leave-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.composer-enter-from,
+.composer-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
 }
 </style>
