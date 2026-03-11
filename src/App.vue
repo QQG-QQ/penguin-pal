@@ -77,7 +77,7 @@ const emptySnapshot = (): AssistantSnapshot => ({
     model: providerDefaults.mock,
     baseUrl: null,
     systemPrompt:
-      '你是一只严格遵守白名单规则的管理员企鹅助手，任何桌面动作都必须经过人工确认。',
+      '你是一只管理员企鹅桌宠。普通聊天时直接回答，只有涉及权限、隐私或电脑控制时再简短说明限制。',
     allowNetwork: true,
     voiceReply: true,
     retainHistory: true,
@@ -1113,10 +1113,10 @@ body {
   width: 100%;
   height: 100%;
   display: flex;
-  align-items: flex-end;
+  align-items: stretch;
   justify-content: center;
-  padding: 6px 8px 10px;
-  overflow: hidden;
+  padding: 0 0 10px;
+  overflow: visible;
 }
 
 .pet-stack,
@@ -1129,8 +1129,11 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  width: min(100%, 284px);
+  justify-content: flex-end;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  padding: 0 8px;
 }
 
 .confirm-shell {

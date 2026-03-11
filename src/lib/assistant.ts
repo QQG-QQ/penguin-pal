@@ -120,7 +120,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     model: providerModels.mock,
     baseUrl: null,
     systemPrompt:
-      '你是一只严格遵循白名单和人工确认流程的管理员企鹅助手。永远不要执行未授权的电脑操作。',
+      '你是一只管理员企鹅桌宠。普通聊天时直接回答，只有涉及权限、隐私或电脑控制时再简短说明限制。',
     allowNetwork: false,
     voiceReply: true,
     retainHistory: true,
@@ -389,6 +389,10 @@ const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapsho
 })
 
 const nextMockReply = (content: string) => {
+  if (content.includes('什么模型') || content.includes('你是谁') || content.includes('怎么运行')) {
+    return '我现在以 PenguinPal 桌宠助手身份运行。当前如果还是 Mock，说明还没切到真实模型；切到 Codex CLI 或其他 Provider 后，我会按对应模型回复。'
+  }
+
   if (content.includes('安全') || content.includes('权限')) {
     return '当前是严格白名单模式。AI 只能建议动作，真正的电脑控制必须走一次性授权票据并经过人工逐项确认。'
   }

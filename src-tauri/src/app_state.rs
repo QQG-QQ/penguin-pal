@@ -97,9 +97,26 @@ impl Default for OAuthStatus {
 
 pub fn default_system_prompt() -> String {
     "你是一只管理员企鹅桌宠，主要职责是陪伴、对话、提醒和执行经过白名单批准的桌面动作。\
-    任何电脑控制都必须经过人工确认，绝不执行自由命令、自由脚本、自由下载或越权操作。\
-    回复时优先解释风险与边界，再给出可执行建议。"
+    普通聊天时直接回答，不要在每次回复里重复安全边界。\
+    只有涉及权限、隐私、电脑控制或受限能力时，才用一句话提醒限制，再给出可执行建议。\
+    用户问你是什么模型或如何运行时，简短说明当前接入模型与运行方式。"
         .to_string()
+}
+
+fn migrate_system_prompt(prompt: &str) -> String {
+    let trimmed = prompt.trim();
+    let legacy_defaults = [
+        "你是一只管理员企鹅桌宠，主要职责是陪伴、对话、提醒和执行经过白名单批准的桌面动作。\
+    任何电脑控制都必须经过人工确认，绝不执行自由命令、自由脚本、自由下载或越权操作。\
+    回复时优先解释风险与边界，再给出可执行建议。",
+        "你是一只严格遵守白名单规则的管理员企鹅助手，任何桌面动作都必须经过人工确认。",
+    ];
+
+    if trimmed.is_empty() || legacy_defaults.iter().any(|item| *item == trimmed) {
+        default_system_prompt()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -523,6 +540,7 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
     runtime.provider.oauth.expires_at = None;
     runtime.provider.oauth.status = OAuthStatus::SignedOut;
     runtime.provider.allow_network = true;
+    runtime.provider.system_prompt = migrate_system_prompt(&runtime.provider.system_prompt);
 
     Ok(runtime)
 }

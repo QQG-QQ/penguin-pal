@@ -70,11 +70,14 @@ const startDrag = async (event: MouseEvent) => {
 <style scoped>
 .pet-shell {
   position: relative;
-  width: 220px;
-  height: 276px;
+  width: 100%;
+  max-width: 296px;
+  height: 352px;
+  padding-top: 126px;
   display: flex;
   align-items: flex-end;
   justify-content: center;
+  overflow: visible;
   user-select: none;
   -webkit-user-select: none;
   cursor: grab;
@@ -97,18 +100,20 @@ const startDrag = async (event: MouseEvent) => {
 }
 
 .aura-a {
-  width: 132px;
-  height: 132px;
-  left: 14px;
-  top: 92px;
+  width: 144px;
+  height: 144px;
+  left: 50%;
+  top: 178px;
+  transform: translateX(-102px);
   background: rgba(134, 221, 245, 0.24);
 }
 
 .aura-b {
-  width: 120px;
-  height: 120px;
-  right: 8px;
-  top: 104px;
+  width: 128px;
+  height: 128px;
+  left: 50%;
+  top: 192px;
+  transform: translateX(12px);
   background: rgba(255, 185, 124, 0.14);
 }
 
@@ -116,14 +121,16 @@ const startDrag = async (event: MouseEvent) => {
   width: 112px;
   height: 16px;
   bottom: 18px;
+  left: 50%;
   border-radius: 999px;
   background: radial-gradient(circle, rgba(12, 30, 43, 0.18), rgba(12, 30, 43, 0));
+  transform: translateX(-50%);
 }
 
 .pet-body {
   position: relative;
   z-index: 1;
-  width: 212px;
+  width: min(228px, calc(100% - 40px));
   display: flex;
   justify-content: center;
   align-items: flex-end;
@@ -131,8 +138,8 @@ const startDrag = async (event: MouseEvent) => {
 
 .penguin-art {
   display: block;
-  width: 212px;
-  height: 212px;
+  width: 100%;
+  height: auto;
   transform-origin: 50% 78%;
   filter: drop-shadow(0 12px 18px rgba(8, 20, 31, 0.14));
   user-select: none;
@@ -142,12 +149,13 @@ const startDrag = async (event: MouseEvent) => {
 
 .speech-bubble {
   position: absolute;
-  top: 8px;
+  top: 4px;
   left: 50%;
   z-index: 3;
-  width: min(206px, calc(100% - 10px));
-  padding: 11px 13px;
-  border-radius: 19px;
+  width: min(280px, calc(100% - 12px));
+  min-height: 56px;
+  padding: 13px 16px;
+  border-radius: 22px;
   background: rgba(255, 255, 255, 0.96);
   color: #183949;
   box-shadow:
@@ -161,9 +169,9 @@ const startDrag = async (event: MouseEvent) => {
   content: '';
   position: absolute;
   left: 50%;
-  bottom: -10px;
-  width: 18px;
-  height: 18px;
+  bottom: -8px;
+  width: 16px;
+  height: 16px;
   background: rgba(255, 255, 255, 0.96);
   transform: translateX(-50%) rotate(45deg);
   border-radius: 4px;
@@ -173,8 +181,14 @@ const startDrag = async (event: MouseEvent) => {
   margin: 0;
   position: relative;
   z-index: 1;
-  font-size: 13px;
-  line-height: 1.5;
+  max-height: 8.7em;
+  overflow: hidden;
+  font-size: 12.5px;
+  line-height: 1.45;
+  text-align: left;
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
 }
 
 .mode-listening .aura-a {

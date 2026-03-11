@@ -228,6 +228,11 @@ fn mock_reply(history: &[ChatMessage]) -> String {
         .map(|message| message.content.as_str())
         .unwrap_or_default();
 
+    if latest.contains("什么模型") || latest.contains("你是谁") || latest.contains("怎么运行") {
+        return "我现在以 PenguinPal 桌宠助手身份运行。当前如果选中 Mock，就说明还没切到真实模型；切到 Codex CLI 或其他 Provider 后，我会按对应模型工作。"
+            .to_string();
+    }
+
     if latest.contains("安全") || latest.contains("权限") {
         return "当前桌宠运行在严格白名单模式。AI 只能提出建议，真正的系统动作只能通过动作面板，并且高风险操作必须逐项确认。"
             .to_string();
