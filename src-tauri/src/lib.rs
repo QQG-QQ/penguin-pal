@@ -1044,7 +1044,7 @@ pub fn run() {
             app.manage(ControlServiceState::new());
             let _ = history::prepare_storage(&app.handle());
 
-            let control_service_status = match control::http::start(app.handle()) {
+            let control_service_status = match control::http::start(app.handle().clone()) {
                 Ok(address) => {
                     eprintln!("PenguinPal local control service listening on {address}");
                     ("ok", format!("控制服务已启动：{address}"), 1u8)
