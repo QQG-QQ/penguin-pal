@@ -62,7 +62,7 @@ defineExpose({
         ref="textareaRef"
         :value="modelValue"
         rows="2"
-        placeholder="直接聊天，回车发送。输入“打开设置”或“隐藏到托盘”。"
+        placeholder="直接聊天，回车发送。输入 /help、打开设置 或 隐藏到托盘。"
         :disabled="busy"
         @focus="emit('focus')"
         @blur="emit('blur')"

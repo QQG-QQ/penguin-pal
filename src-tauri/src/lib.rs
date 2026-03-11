@@ -1,6 +1,7 @@
 mod ai;
 mod app_state;
 mod codex_runtime;
+mod control;
 mod audio;
 mod desktop;
 mod history;
@@ -20,6 +21,7 @@ use crate::{
         ProviderConfigInput, RuntimeState, DEFAULT_OAUTH_REDIRECT_URL,
     },
     codex_runtime::{apply_private_env, private_auth_path, resolve_for_app},
+    control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
 };
@@ -139,6 +141,11 @@ fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
 #[tauri::command]
 fn get_codex_cli_status(app: AppHandle) -> CodexCliStatus {
     inspect_codex_cli_status(&app)
+}
+
+#[tauri::command]
+fn get_control_service_status(app: AppHandle) -> Result<ControlServiceStatus, String> {
+    control_router::service_status(&app).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1034,7 +1041,33 @@ pub fn run() {
             let runtime = load(&app.handle())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(Mutex::new(runtime));
+            app.manage(ControlServiceState::new());
             let _ = history::prepare_storage(&app.handle());
+
+            let control_service_status = match control::http::start(app.handle()) {
+                Ok(address) => {
+                    eprintln!("PenguinPal local control service listening on {address}");
+                    ("ok", format!("控制服务已启动：{address}"), 1u8)
+                }
+                Err(error) => {
+                    eprintln!("PenguinPal local control service failed to start: {error}");
+                    ("error", format!("控制服务启动失败：{error}"), 1u8)
+                }
+            };
+
+            let runtime_state: State<'_, Mutex<RuntimeState>> = app.state();
+            if let Ok(mut runtime) = runtime_state.lock() {
+                audit::push_entry(
+                    &mut runtime.audit_trail,
+                    audit::record(
+                        "control_service_startup",
+                        control_service_status.0,
+                        control_service_status.1,
+                        control_service_status.2,
+                    ),
+                );
+                let _ = save(&app.handle(), &runtime);
+            }
 
             tray::create_tray(app)?;
 
@@ -1056,6 +1089,7 @@ pub fn run() {
             complete_oauth_sign_in,
             disconnect_oauth_sign_in,
             get_codex_cli_status,
+            get_control_service_status,
             start_codex_cli_login,
             send_chat_message,
             request_desktop_action,

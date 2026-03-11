@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import ControlPanel from './ControlPanel.vue'
+import { presetModelCatalog } from '../lib/modelCatalog'
 import type {
   AiConstraintProfile,
   CodexCliStatus,
@@ -48,65 +49,7 @@ const providerOptions: Array<{ label: string; value: ProviderKind }> = [
   { label: 'Mock', value: 'mock' }
 ]
 
-type ModelPreset = {
-  id: string
-  label: string
-  kind: ProviderKind
-  model: string
-  baseUrl: string | null
-  authMode: ProviderConfigInput['authMode']
-}
-
-const presetOptions: ModelPreset[] = [
-  {
-    id: 'codex-cli',
-    label: 'Codex CLI（官方登录）',
-    kind: 'codexCli',
-    model: 'gpt-5-codex',
-    baseUrl: null,
-    authMode: 'oauth'
-  },
-  {
-    id: 'openai',
-    label: 'OpenAI 官方',
-    kind: 'openAi',
-    model: 'gpt-4.1-mini',
-    baseUrl: null,
-    authMode: 'apiKey'
-  },
-  {
-    id: 'anthropic',
-    label: 'Anthropic 官方',
-    kind: 'anthropic',
-    model: 'claude-3-5-sonnet-latest',
-    baseUrl: null,
-    authMode: 'apiKey'
-  },
-  {
-    id: 'openrouter',
-    label: 'OpenRouter',
-    kind: 'openAiCompatible',
-    model: 'openai/gpt-4.1-mini',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    authMode: 'apiKey'
-  },
-  {
-    id: 'deepseek',
-    label: 'DeepSeek',
-    kind: 'openAiCompatible',
-    model: 'deepseek-chat',
-    baseUrl: 'https://api.deepseek.com/v1',
-    authMode: 'apiKey'
-  },
-  {
-    id: 'ollama',
-    label: 'Ollama（本地）',
-    kind: 'openAiCompatible',
-    model: 'llama3.1',
-    baseUrl: 'http://127.0.0.1:11434/v1',
-    authMode: 'apiKey'
-  }
-]
+const presetOptions = presetModelCatalog
 
 const selectedPreset = ref('custom')
 const applyingPreset = ref(false)

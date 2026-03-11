@@ -5,7 +5,17 @@ import FloatingBubble from './components/FloatingBubble.vue'
 import InputBox from './components/InputBox.vue'
 import Penguin from './components/Penguin.vue'
 import SettingsDrawer from './components/SettingsDrawer.vue'
+import {
+  COMMAND_CONFIRMATION_TIMEOUT_MS,
+  createClearConversationConfirmation,
+  createModelSetConfirmation,
+  isPendingCommandExpired,
+  resolvePendingCommandInput,
+  type PendingCommandConfirmation
+} from './lib/commandConfirmation'
+import { findModelCatalogEntry, modelCatalog } from './lib/modelCatalog'
 import { buildWorkAreaRect, clampWindowPositionToWorkArea } from './lib/petLayout'
+import { parseSlashCommand, slashHelpText } from './lib/slashCommands'
 import {
   cancelDesktopActionApproval,
   clearConversation,
@@ -195,6 +205,7 @@ const authBusy = ref(false)
 const oauthNotice = ref('')
 const codexStatus = ref<CodexCliStatus>(emptyCodexStatus())
 const pendingApproval = ref<ActionApprovalRequest | null>(null)
+const pendingCommandConfirmation = ref<PendingCommandConfirmation | null>(null)
 const approvalPhrase = ref('')
 const approvalChecks = ref<Record<string, boolean>>({})
 const listening = ref(false)
@@ -227,6 +238,7 @@ let windowResizedCleanup: (() => void) | null = null
 let autoListenTimer: number | null = null
 let speechPlaybackActive = false
 let petClampTimer: number | null = null
+let pendingCommandTimer: number | null = null
 let petClampInFlight = false
 let inputHistoryCursor = -1
 let draftBeforeHistoryNavigation = ''
@@ -238,7 +250,11 @@ const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWin
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
 const activeProviderLabel = computed(() => providerLabels[snapshot.value.provider.kind])
 const showComposer = computed(
-  () => composerVisible.value || textInputFocused.value || Boolean(messageDraft.value.trim())
+  () =>
+    composerVisible.value ||
+    textInputFocused.value ||
+    Boolean(messageDraft.value.trim()) ||
+    Boolean(pendingCommandConfirmation.value)
 )
 
 const canSubmitApproval = computed(() => {
@@ -272,6 +288,7 @@ const shouldAutoListen = computed(
     !busy.value &&
     !textInputFocused.value &&
     !pendingApproval.value &&
+    !pendingCommandConfirmation.value &&
     !speechPlaybackActive &&
     !messageDraft.value.trim()
 )
@@ -873,12 +890,64 @@ const clearPendingApproval = () => {
   approvalChecks.value = {}
 }
 
+const clearPendingCommandTimer = () => {
+  if (pendingCommandTimer !== null) {
+    window.clearTimeout(pendingCommandTimer)
+    pendingCommandTimer = null
+  }
+}
+
+const clearPendingCommandConfirmation = () => {
+  clearPendingCommandTimer()
+  pendingCommandConfirmation.value = null
+}
+
+const handlePendingCommandExpiry = () => {
+  const pending = pendingCommandConfirmation.value
+  if (!pending || !isPendingCommandExpired(pending)) {
+    return
+  }
+
+  clearPendingCommandConfirmation()
+  announce('这次命令确认已超时，请重新输入命令。', 'guarded')
+}
+
+const setPendingCommandConfirmation = (nextPending: PendingCommandConfirmation | null) => {
+  clearPendingCommandTimer()
+  pendingCommandConfirmation.value = nextPending
+
+  if (!nextPending) {
+    return
+  }
+
+  composerVisible.value = true
+  const ttl = Math.max(0, nextPending.expiresAt - Date.now())
+  pendingCommandTimer = window.setTimeout(() => {
+    handlePendingCommandExpiry()
+  }, ttl)
+}
+
+const getPendingCommandConfirmation = () => {
+  const pending = pendingCommandConfirmation.value
+  if (!pending) {
+    return null
+  }
+
+  if (isPendingCommandExpired(pending)) {
+    handlePendingCommandExpiry()
+    return null
+  }
+
+  return pending
+}
+
 const setPendingApproval = (approvalRequest: ActionApprovalRequest | null | undefined) => {
   if (!approvalRequest) {
     clearPendingApproval()
     return
   }
 
+  clearPendingCommandConfirmation()
   pendingApproval.value = approvalRequest
   approvalPhrase.value = ''
   approvalChecks.value = Object.fromEntries(
@@ -918,6 +987,128 @@ const persistSettings = async (draft: ProviderConfigInput) => {
   }
 
   return saveProviderConfig(nextDraft)
+}
+
+const isCurrentModelEntry = (entry: { kind: ProviderKind; model: string; baseUrl: string | null }) =>
+  snapshot.value.provider.kind === entry.kind &&
+  snapshot.value.provider.model === entry.model &&
+  snapshot.value.provider.baseUrl === entry.baseUrl
+
+const buildModelListText = () => {
+  const lines = modelCatalog.map((entry) => {
+    const marker = isCurrentModelEntry(entry) ? '• 当前' : '•'
+    return `${marker} ${entry.id}：${entry.label}`
+  })
+
+  return `可切换模型：\n${lines.join('\n')}\n\n使用 /model set <name> 切换。`
+}
+
+const buildHistorySummaryText = () => {
+  const recentInputs = inputHistory.value.slice(-3)
+  const inputSummary =
+    recentInputs.length > 0
+      ? recentInputs
+          .map((item, index) => `${index + 1}. ${item}`)
+          .join('\n')
+      : '暂无已发送输入。'
+
+  return `输入历史：${inputHistory.value.length} 条\n今日回复历史：${todayReplyHistory.value.length} 条\n\n最近输入：\n${inputSummary}\n\n完整今日回复历史可在设置窗口查看。`
+}
+
+const applyModelCatalogEntry = async (modelId: string) => {
+  const entry = findModelCatalogEntry(modelId)
+  if (!entry) {
+    announce('未找到待切换的模型配置，请重新执行 /model set。', 'guarded')
+    return
+  }
+
+  const nextDraft = toDraft(snapshot.value)
+  nextDraft.kind = entry.kind
+  nextDraft.model = entry.model
+  nextDraft.baseUrl = entry.baseUrl
+  nextDraft.authMode = entry.authMode
+  nextDraft.clearApiKey = false
+  nextDraft.clearOAuthToken = false
+
+  const nextSnapshot = await persistSettings(nextDraft)
+  await syncSnapshot(nextSnapshot)
+  const authHint =
+    entry.authMode === 'apiKey' && !nextSnapshot.provider.apiKeyLoaded
+      ? ' 当前还没有加载 API Key，如需实际调用外部模型，还要去设置页补充密钥。'
+      : ''
+
+  announce(`已切换到 ${entry.label}。${authHint}`)
+}
+
+const executePendingCommand = async (pending: PendingCommandConfirmation) => {
+  busy.value = true
+  visualMode.value = 'guarded'
+
+  try {
+    if (pending.kind === 'modelSet') {
+      await applyModelCatalogEntry(pending.payload.modelId)
+      return
+    }
+
+    if (pending.kind === 'clearConversation') {
+      await resetConversation(true)
+      return
+    }
+  } catch (error) {
+    announce(error instanceof Error ? error.message : '命令执行失败', 'guarded')
+  } finally {
+    busy.value = false
+    resetVisualModeSoon(900)
+  }
+}
+
+const confirmPendingCommand = async () => {
+  const pending = getPendingCommandConfirmation()
+  if (!pending || busy.value) {
+    return
+  }
+
+  clearPendingCommandConfirmation()
+  await executePendingCommand(pending)
+}
+
+const cancelPendingCommand = () => {
+  const pending = getPendingCommandConfirmation()
+  if (!pending) {
+    return
+  }
+
+  clearPendingCommandConfirmation()
+  announce('本次命令已取消。', 'guarded')
+}
+
+const handlePendingCommandInput = async (content: string) => {
+  const pending = getPendingCommandConfirmation()
+  if (!pending) {
+    return false
+  }
+
+  const decision = resolvePendingCommandInput(content)
+  if (decision === 'confirm') {
+    await confirmPendingCommand()
+    return true
+  }
+
+  if (decision === 'cancel') {
+    cancelPendingCommand()
+    return true
+  }
+
+  announce('当前有待确认命令，请先输入 yes / no，或点击确认 / 取消。', 'guarded')
+  return true
+}
+
+const beginPendingCommandConfirmation = (pending: PendingCommandConfirmation) => {
+  setPendingCommandConfirmation(pending)
+  announce(
+    `${pending.prompt} 请在 ${Math.round(COMMAND_CONFIRMATION_TIMEOUT_MS / 1000)} 秒内输入 yes / no，或点击确认 / 取消。`,
+    'guarded'
+  )
 }
 
 const refreshMicrophoneAvailability = async (requestPermission = false) => {
@@ -1145,6 +1336,75 @@ const maybeHandleLocalCommand = async (content: string) => {
   return false
 }
 
+const handleSlashCommand = async (content: string) => {
+  const parsed = parseSlashCommand(content)
+  if (!parsed) {
+    return false
+  }
+
+  if (!parsed.ok) {
+    announce(parsed.message, 'guarded')
+    return true
+  }
+
+  switch (parsed.command.kind) {
+    case 'help':
+      announce(slashHelpText, 'guarded')
+      return true
+    case 'modelCurrent':
+      announce(
+        `当前对话引擎：${activeProviderLabel.value}。\n模型标识：${snapshot.value.provider.model}。`,
+        'guarded'
+      )
+      return true
+    case 'modelList':
+      announce(buildModelListText(), 'guarded')
+      return true
+    case 'modelSet': {
+      const entry = findModelCatalogEntry(parsed.command.target)
+      if (!entry) {
+        announce(
+          `未找到模型“${parsed.command.target}”。\n\n${buildModelListText()}`,
+          'guarded'
+        )
+        return true
+      }
+
+      if (isCurrentModelEntry(entry)) {
+        announce(`当前已经是 ${entry.label}。`, 'guarded')
+        return true
+      }
+
+      if (pendingApproval.value) {
+        announce('当前还有桌面动作待确认，请先处理那个确认流。', 'guarded')
+        return true
+      }
+
+      beginPendingCommandConfirmation(createModelSetConfirmation(entry))
+      return true
+    }
+    case 'history':
+      announce(buildHistorySummaryText(), 'guarded')
+      return true
+    case 'clearConversation':
+      if (pendingApproval.value) {
+        announce('当前还有桌面动作待确认，请先处理那个确认流。', 'guarded')
+        return true
+      }
+
+      beginPendingCommandConfirmation(createClearConversationConfirmation())
+      return true
+    case 'openSettings': {
+      const opened = await openDrawer('settings')
+      announce(
+        opened ? '设置窗口已经打开。' : '设置窗口打开失败，请检查当前运行环境。',
+        opened ? 'speaking' : 'guarded'
+      )
+      return true
+    }
+  }
+}
+
 const sendMessage = async (value = messageDraft.value) => {
   const content = value.trim()
   if (!content || busy.value || isSettingsView.value) {
@@ -1161,6 +1421,17 @@ const sendMessage = async (value = messageDraft.value) => {
   }
   clearAutoListenTimer()
   clearBubble()
+  resetInputHistoryNavigation()
+
+  if (await handlePendingCommandInput(content)) {
+    scheduleAutoListening(260)
+    return
+  }
+
+  if (await handleSlashCommand(content)) {
+    scheduleAutoListening(260)
+    return
+  }
 
   if (await maybeHandleLocalCommand(content)) {
     scheduleAutoListening(260)
@@ -1508,6 +1779,7 @@ onBeforeUnmount(() => {
   resetBubbleDismissState()
   clearAutoListenTimer()
   clearPetClampTimer()
+  clearPendingCommandTimer()
   mediaDevicesCleanup?.()
   snapshotListenerCleanup?.()
   sectionListenerCleanup?.()
@@ -1621,6 +1893,36 @@ onBeforeUnmount(() => {
           @history-up="recallOlderInput"
           @history-down="recallNewerInput"
         />
+      </transition>
+
+      <transition name="composer">
+        <section v-if="pendingCommandConfirmation" class="command-confirm-strip">
+          <div class="command-confirm-copy">
+            <p class="eyebrow dark">Slash Command Pending</p>
+            <strong>{{ pendingCommandConfirmation.title }}</strong>
+            <p>{{ pendingCommandConfirmation.prompt }}</p>
+            <span class="command-confirm-hint">输入 yes / no，或点击按钮。20 秒内有效。</span>
+          </div>
+
+          <div class="command-confirm-actions">
+            <button
+              type="button"
+              class="panel-chip muted"
+              :disabled="busy"
+              @click="cancelPendingCommand"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              class="confirm-button"
+              :disabled="busy"
+              @click="confirmPendingCommand"
+            >
+              确认
+            </button>
+          </div>
+        </section>
       </transition>
     </div>
 
@@ -1766,6 +2068,45 @@ body {
   padding: 12px;
   background: rgba(4, 15, 24, 0.34);
   backdrop-filter: blur(10px);
+}
+
+.command-confirm-strip {
+  width: min(100%, 304px);
+  padding: 12px 14px;
+  border-radius: 22px;
+  background: rgba(12, 31, 45, 0.9);
+  color: #eff8fb;
+  box-shadow:
+    0 16px 28px rgba(5, 16, 27, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.command-confirm-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.command-confirm-copy strong {
+  font-size: 14px;
+  color: #f3fbff;
+}
+
+.command-confirm-copy p,
+.command-confirm-hint {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.command-confirm-hint {
+  color: rgba(220, 238, 246, 0.78);
+  font-size: 12px;
+}
+
+.command-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .settings-confirm-shell {
