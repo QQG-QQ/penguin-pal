@@ -20,17 +20,52 @@ pub fn find_element(app: &AppHandle, selector_value: &Value) -> ControlResult<Va
 
 pub fn click_element(app: &AppHandle, selector_value: &Value) -> ControlResult<Value> {
     let selector = selector::parse_selector(selector_value)?;
+    let selector_json = selector::selector_to_value(&selector)?;
+    let _ = logging::append_log(
+        app,
+        "click_element",
+        "request",
+        selector_json.to_string(),
+    );
     let mut result = run_uia(
         app,
         "click_element",
         &selector,
         None,
         &format!(
-            r#"{UIA_PREAMBLE}
-{INPUT_PREAMBLE}
+            r#"{INPUT_PREAMBLE}
 {CLICK_HELPER}
 $payload = $env:PENGUINPAL_CONTROL_ARGS | ConvertFrom-Json
-$found = Find-ElementCore $payload.selector
+$selectorSummary = [pscustomobject]@{{
+  windowTitle = [string]$payload.selector.windowTitle
+  automationId = [string]$payload.selector.automationId
+  name = [string]$payload.selector.name
+  controlType = [string]$payload.selector.controlType
+  className = [string]$payload.selector.className
+  matchMode = [string]$payload.selector.matchMode
+}}
+$window = Get-WindowElement $payload.selector
+$windowSummary = [pscustomobject]@{{
+  title = [string]$window.Current.Name
+  automationId = [string]$window.Current.AutomationId
+  controlType = [string](Get-ControlTypeName $window)
+  className = [string]$window.Current.ClassName
+}}
+try {{
+  $window.SetFocus()
+  Start-Sleep -Milliseconds 120
+}} catch {{}}
+try {{
+  $found = Find-ElementCore $payload.selector
+}} catch {{
+  $debug = [pscustomobject]@{{
+    selector = $selectorSummary
+    window = $windowSummary
+    stage = 'find_after_focus'
+    error = $_.Exception.Message
+  }}
+  throw ('未找到匹配的 UI 元素。 debug=' + ($debug | ConvertTo-Json -Compress -Depth 6))
+}}
 $element = $found.element
 $summary = Convert-ElementSummary $element $found.windowTitle
 $supportedPatterns = New-Object System.Collections.Generic.List[string]
@@ -106,6 +141,8 @@ if ($null -eq $strategy) {{
 
 if ($null -eq $strategy) {{
   $debug = [pscustomobject]@{{
+    selector = $selectorSummary
+    window = $windowSummary
     controlType = $summary.controlType
     supportedPatterns = @($supportedPatterns.ToArray())
     strategy = $null
@@ -117,6 +154,8 @@ if ($null -eq $strategy) {{
   strategy = $strategy
   element = $summary
   debug = [pscustomobject]@{{
+    selector = $selectorSummary
+    window = $windowSummary
     controlType = $summary.controlType
     supportedPatterns = @($supportedPatterns.ToArray())
     strategy = $strategy
@@ -265,6 +304,9 @@ fn run_uia(
 
     let script = format!("{UIA_PREAMBLE}\n{body}");
     run_powershell_json(app, tool, &script, Some(&root), timeout).map_err(|error| {
+        if let Some(detail) = error.payload().detail.as_deref() {
+            let _ = logging::append_log(app, tool, "error_detail", detail);
+        }
         if error
             .payload()
             .detail
