@@ -4,6 +4,7 @@ use tauri::AppHandle;
 
 use crate::control::{
     errors::{ControlError, ControlResult},
+    logging,
     types::UiSelector,
 };
 
@@ -19,7 +20,7 @@ pub fn find_element(app: &AppHandle, selector_value: &Value) -> ControlResult<Va
 
 pub fn click_element(app: &AppHandle, selector_value: &Value) -> ControlResult<Value> {
     let selector = selector::parse_selector(selector_value)?;
-    run_uia(
+    let mut result = run_uia(
         app,
         "click_element",
         &selector,
@@ -31,17 +32,110 @@ pub fn click_element(app: &AppHandle, selector_value: &Value) -> ControlResult<V
 $payload = $env:PENGUINPAL_CONTROL_ARGS | ConvertFrom-Json
 $found = Find-ElementCore $payload.selector
 $element = $found.element
-try {{
-  $pattern = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-  $pattern.Invoke()
-}} catch {{
-  Click-ElementCenter $element
+$summary = Convert-ElementSummary $element $found.windowTitle
+$supportedPatterns = New-Object System.Collections.Generic.List[string]
+$attemptErrors = New-Object System.Collections.Generic.List[string]
+$strategy = $null
+
+function Try-GetPattern($element, $pattern, [string]$name, $supportedPatterns) {{
+  try {{
+    $instance = $element.GetCurrentPattern($pattern)
+    if ($null -ne $instance) {{
+      $supportedPatterns.Add($name) | Out-Null
+      return $instance
+    }}
+  }} catch {{}}
+  return $null
 }}
-Convert-ElementSummary $element $found.windowTitle | ConvertTo-Json -Compress -Depth 6
+
+function Try-ClickStrategy([string]$name, [scriptblock]$Action, $attemptErrors) {{
+  try {{
+    & $Action
+    return $true
+  }} catch {{
+    $attemptErrors.Add(($name + ': ' + $_.Exception.Message)) | Out-Null
+    return $false
+  }}
+}}
+
+$invokePattern = Try-GetPattern $element ([System.Windows.Automation.InvokePattern]::Pattern) 'InvokePattern' $supportedPatterns
+$selectionItemPattern = Try-GetPattern $element ([System.Windows.Automation.SelectionItemPattern]::Pattern) 'SelectionItemPattern' $supportedPatterns
+$legacyPattern = Try-GetPattern $element ([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern) 'LegacyIAccessiblePattern' $supportedPatterns
+$expandCollapsePattern = Try-GetPattern $element ([System.Windows.Automation.ExpandCollapsePattern]::Pattern) 'ExpandCollapsePattern' $supportedPatterns
+$togglePattern = Try-GetPattern $element ([System.Windows.Automation.TogglePattern]::Pattern) 'TogglePattern' $supportedPatterns
+
+if ($summary.controlType -in @('MenuBarItem', 'MenuItem')) {{
+  if ($null -ne $expandCollapsePattern -and (Try-ClickStrategy 'ExpandCollapsePattern.Expand' {{ $expandCollapsePattern.Expand() }} $attemptErrors)) {{
+    $strategy = 'ExpandCollapsePattern.Expand'
+  }}
+}}
+
+if ($null -eq $strategy -and $null -ne $invokePattern) {{
+  if (Try-ClickStrategy 'InvokePattern.Invoke' {{ $invokePattern.Invoke() }} $attemptErrors) {{
+    $strategy = 'InvokePattern.Invoke'
+  }}
+}}
+
+if ($null -eq $strategy -and $null -ne $selectionItemPattern) {{
+  if (Try-ClickStrategy 'SelectionItemPattern.Select' {{ $selectionItemPattern.Select() }} $attemptErrors) {{
+    $strategy = 'SelectionItemPattern.Select'
+  }}
+}}
+
+if ($null -eq $strategy -and $null -ne $legacyPattern) {{
+  if (Try-ClickStrategy 'LegacyIAccessiblePattern.DoDefaultAction' {{ $legacyPattern.DoDefaultAction() }} $attemptErrors) {{
+    $strategy = 'LegacyIAccessiblePattern.DoDefaultAction'
+  }}
+}}
+
+if ($null -eq $strategy -and $null -ne $togglePattern) {{
+  if (Try-ClickStrategy 'TogglePattern.Toggle' {{ $togglePattern.Toggle() }} $attemptErrors) {{
+    $strategy = 'TogglePattern.Toggle'
+  }}
+}}
+
+if ($null -eq $strategy) {{
+  if (Try-ClickStrategy 'SetFocus+CenterClick' {{
+    $element.SetFocus()
+    Start-Sleep -Milliseconds 80
+    Click-ElementCenter $element
+  }} $attemptErrors) {{
+    $strategy = 'SetFocus+CenterClick'
+  }}
+}}
+
+if ($null -eq $strategy) {{
+  $debug = [pscustomobject]@{{
+    controlType = $summary.controlType
+    supportedPatterns = @($supportedPatterns.ToArray())
+    strategy = $null
+    attemptErrors = @($attemptErrors.ToArray())
+  }}
+  throw ('click_element 执行失败。 debug=' + ($debug | ConvertTo-Json -Compress -Depth 6))
+}}
+[pscustomobject]@{{
+  strategy = $strategy
+  element = $summary
+  debug = [pscustomobject]@{{
+    controlType = $summary.controlType
+    supportedPatterns = @($supportedPatterns.ToArray())
+    strategy = $strategy
+    attemptErrors = @($attemptErrors.ToArray())
+  }}
+}} | ConvertTo-Json -Compress -Depth 6
 "#,
         ),
         Duration::from_secs(5),
-    )
+    )?;
+
+    if let Some(debug) = result.get("debug").cloned() {
+        let _ = logging::append_log(app, "click_element", "debug", debug.to_string());
+        if let Some(object) = result.as_object_mut() {
+            object.remove("debug");
+        }
+    }
+
+    Ok(result)
 }
 
 pub fn get_element_text(app: &AppHandle, selector_value: &Value) -> ControlResult<Value> {
