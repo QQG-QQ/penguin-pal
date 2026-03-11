@@ -6,8 +6,12 @@ import {
   chooseBubbleCandidate,
   finalizeBubbleLayout
 } from '../lib/petLayout'
-import { publishBubbleInteractionState } from '../lib/assistant'
-import type { BubbleWindowState } from '../types/assistant'
+import {
+  publishBubbleInteractionState,
+  publishBubbleLayoutMetrics,
+  requestBubbleDismiss
+} from '../lib/assistant'
+import type { BubbleLayoutMetrics, BubbleWindowState } from '../types/assistant'
 
 const props = defineProps<{
   state: BubbleWindowState
@@ -21,6 +25,31 @@ const tailSide = ref<'bottom' | 'left' | 'right'>('bottom')
 const tailOffsetX = ref(56)
 const tailOffsetY = ref(48)
 const interactionActive = ref(false)
+const pinned = ref(false)
+const hoverActive = ref(false)
+const scrollActive = ref(false)
+const activeMessageId = ref(0)
+let scrollIdleTimer: number | null = null
+
+const waitForStableLayout = async () => {
+  await nextTick()
+  await new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve())
+    })
+  })
+}
+
+const clearScrollIdleTimer = () => {
+  if (scrollIdleTimer !== null) {
+    window.clearTimeout(scrollIdleTimer)
+    scrollIdleTimer = null
+  }
+}
+
+const syncCompositeInteractionState = async () => {
+  await syncInteractionState(hoverActive.value || scrollActive.value)
+}
 
 const syncInteractionState = async (active: boolean) => {
   if (interactionActive.value === active) {
@@ -31,7 +60,58 @@ const syncInteractionState = async (active: boolean) => {
   await publishBubbleInteractionState(active)
 }
 
+const measureBubbleLayout = (): BubbleLayoutMetrics | null => {
+  const bubble = bubbleRef.value
+  if (!bubble) {
+    return null
+  }
+
+  const rect = bubble.getBoundingClientRect()
+  const scrollHeight = Math.ceil(bubble.scrollHeight)
+  const clientHeight = Math.ceil(bubble.clientHeight)
+
+  return {
+    messageId: props.state.messageId,
+    charCount: props.state.text.trim().length,
+    scrollHeight,
+    clientHeight,
+    contentHeight: Math.ceil(rect.height),
+    isScrollable: scrollHeight > clientHeight + 2
+  }
+}
+
+const handlePointerEnter = () => {
+  hoverActive.value = true
+  void syncCompositeInteractionState()
+}
+
+const handlePointerLeave = () => {
+  hoverActive.value = false
+  void syncCompositeInteractionState()
+}
+
+const handleScrollActivity = () => {
+  scrollActive.value = true
+  void syncCompositeInteractionState()
+  clearScrollIdleTimer()
+  scrollIdleTimer = window.setTimeout(() => {
+    scrollActive.value = false
+    void syncCompositeInteractionState()
+  }, 720)
+}
+
+const dismissPinnedBubble = async () => {
+  await syncInteractionState(true)
+  await requestBubbleDismiss(props.state.messageId)
+  await syncInteractionState(false)
+}
+
 const hideBubbleWindow = async () => {
+  clearScrollIdleTimer()
+  hoverActive.value = false
+  scrollActive.value = false
+  pinned.value = false
+  activeMessageId.value = 0
   await syncInteractionState(false)
   try {
     await getCurrentWindow().hide()
@@ -46,12 +126,12 @@ const syncBubbleWindow = async () => {
     return
   }
 
-  await nextTick()
-
-  const bubble = bubbleRef.value
-  if (!bubble) {
-    return
+  if (activeMessageId.value !== props.state.messageId) {
+    activeMessageId.value = props.state.messageId
+    pinned.value = false
   }
+
+  await waitForStableLayout()
 
   const monitor = await currentMonitor()
   const workArea = buildWorkAreaRect(
@@ -65,7 +145,26 @@ const syncBubbleWindow = async () => {
   bubbleMaxWidth.value = candidate.maxWidth
   bubbleMaxHeight.value = candidate.maxHeight
 
-  await nextTick()
+  await waitForStableLayout()
+
+  let metrics = measureBubbleLayout()
+  if (!metrics) {
+    return
+  }
+
+  if (pinned.value !== metrics.isScrollable) {
+    pinned.value = metrics.isScrollable
+    await waitForStableLayout()
+    metrics = measureBubbleLayout()
+    if (!metrics) {
+      return
+    }
+  }
+
+  const bubble = bubbleRef.value
+  if (!bubble) {
+    return
+  }
 
   const measured = bubble.getBoundingClientRect()
   const layout = finalizeBubbleLayout(props.state, workArea, candidate, {
@@ -82,6 +181,7 @@ const syncBubbleWindow = async () => {
   await appWindow.setSize(new LogicalSize(Math.ceil(measured.width), Math.ceil(measured.height)))
   await appWindow.setPosition(new PhysicalPosition(layout.left, layout.top))
   await appWindow.show()
+  await publishBubbleLayoutMetrics(metrics)
 }
 
 watch(
@@ -105,6 +205,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearScrollIdleTimer()
   void syncInteractionState(false)
 })
 </script>
@@ -115,18 +216,31 @@ onBeforeUnmount(() => {
       v-if="state.visible"
       ref="bubbleRef"
       class="floating-bubble"
-      :class="[placement, `tail-${tailSide}`]"
+      :class="[placement, `tail-${tailSide}`, { 'has-close': pinned }]"
       :style="{
         '--tail-x': `${tailOffsetX}px`,
         '--tail-y': `${tailOffsetY}px`,
         '--bubble-max-width': `${bubbleMaxWidth}px`,
         '--bubble-max-height': `${bubbleMaxHeight}px`
       }"
-      @mouseenter="syncInteractionState(true)"
-      @mouseleave="syncInteractionState(false)"
-      @focusin="syncInteractionState(true)"
-      @focusout="syncInteractionState(false)"
+      @mouseenter="handlePointerEnter"
+      @mouseleave="handlePointerLeave"
+      @focusin="handlePointerEnter"
+      @focusout="handlePointerLeave"
+      @wheel.passive="handleScrollActivity"
+      @scroll.passive="handleScrollActivity"
     >
+      <button
+        v-if="pinned"
+        type="button"
+        class="bubble-close"
+        aria-label="关闭气泡"
+        title="关闭气泡"
+        @click.stop="dismissPinnedBubble"
+        @mouseenter="handlePointerEnter"
+      >
+        ×
+      </button>
       <p>{{ state.text }}</p>
     </div>
   </div>
@@ -158,6 +272,10 @@ onBeforeUnmount(() => {
   scrollbar-width: thin;
 }
 
+.floating-bubble.has-close {
+  padding-right: 44px;
+}
+
 .floating-bubble::after {
   content: '';
   position: absolute;
@@ -166,6 +284,35 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.98);
   transform: rotate(45deg);
   border-radius: 3px;
+}
+
+.bubble-close {
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  z-index: 2;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(23, 56, 75, 0.08);
+  color: rgba(23, 56, 75, 0.78);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.62;
+  transition:
+    opacity 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.bubble-close:hover,
+.bubble-close:focus-visible {
+  opacity: 1;
+  background: rgba(23, 56, 75, 0.16);
+  color: #17384b;
+  outline: none;
 }
 
 .floating-bubble.tail-bottom::after {

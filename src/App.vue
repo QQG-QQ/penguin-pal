@@ -20,6 +20,8 @@ import {
   isBubbleWindowView,
   listenForAssistantSnapshot,
   listenForBubbleInteractionState,
+  listenForBubbleDismissRequest,
+  listenForBubbleLayoutMetrics,
   listenForBubbleWindowState,
   listenForSettingsSectionChange,
   listenForTodayReplyHistory,
@@ -40,6 +42,8 @@ import type {
   AssistantWindowView,
   AiConstraintProfile,
   AssistantSnapshot,
+  BubbleLayoutMetrics,
+  BubbleMessageTier,
   BubbleWindowState,
   CodexCliStatus,
   DesktopAction,
@@ -79,6 +83,7 @@ const actionCommandMap: Record<string, string[]> = {
 const PET_WINDOW_COLLAPSED = { width: 248, height: 252 }
 const PET_WINDOW_EXPANDED = { width: 312, height: 340 }
 const hiddenBubbleState = (): BubbleWindowState => ({
+  messageId: 0,
   visible: false,
   text: '',
   anchorX: 0,
@@ -180,6 +185,9 @@ const messageDraft = ref('')
 const inputHistory = ref<string[]>([])
 const todayReplyHistory = ref<ReplyHistoryEntry[]>([])
 const bubbleText = ref('')
+const bubbleMessageId = ref(0)
+const bubbleLayoutMetrics = ref<BubbleLayoutMetrics | null>(null)
+const bubbleMessageTier = ref<BubbleMessageTier | null>(null)
 const bubbleWindowState = ref<BubbleWindowState>(hiddenBubbleState())
 const busy = ref(false)
 const savingSettings = ref(false)
@@ -211,6 +219,8 @@ let snapshotListenerCleanup: (() => void) | null = null
 let sectionListenerCleanup: (() => void) | null = null
 let bubbleStateListenerCleanup: (() => void) | null = null
 let bubbleInteractionListenerCleanup: (() => void) | null = null
+let bubbleLayoutMetricsListenerCleanup: (() => void) | null = null
+let bubbleDismissRequestCleanup: (() => void) | null = null
 let todayReplyHistoryListenerCleanup: (() => void) | null = null
 let windowMovedCleanup: (() => void) | null = null
 let windowResizedCleanup: (() => void) | null = null
@@ -221,6 +231,7 @@ let petClampInFlight = false
 let inputHistoryCursor = -1
 let draftBeforeHistoryNavigation = ''
 const bubbleInteractionActive = ref(false)
+let lastBubbleDebugKey = ''
 
 const isSettingsView = computed(() => windowView.value === 'settings')
 const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWindowView())
@@ -332,6 +343,10 @@ const resetBubbleDismissState = () => {
 
 const clearBubble = () => {
   resetBubbleDismissState()
+  bubbleMessageId.value = 0
+  bubbleLayoutMetrics.value = null
+  bubbleMessageTier.value = null
+  lastBubbleDebugKey = ''
   bubbleText.value = ''
 }
 
@@ -355,31 +370,110 @@ const refreshTodayReplyHistory = async (publish = true) => {
   await applyTodayReplyHistory(await getTodayReplyHistory(), publish)
 }
 
-const computeBubbleAutoDismissMs = (content: string, override?: number | null) => {
+const clampDuration = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max)
+
+const computeBubbleDismissDecision = (
+  metrics: BubbleLayoutMetrics,
+  override?: number | null
+): { tier: BubbleMessageTier; autoHideDuration: number | null; showCloseButton: boolean } => {
   if (override !== undefined) {
-    return override
+    return {
+      tier: override === null ? 'pinned' : 'short',
+      autoHideDuration: override,
+      showCloseButton: override === null
+    }
   }
 
-  const text = content.trim()
-  const charCount = text.length
-  const lineBreakCount = (text.match(/\n/g) ?? []).length
-  const estimatedLineCount = Math.max(1, lineBreakCount + Math.ceil(charCount / 22))
-
-  if (charCount >= 520 || estimatedLineCount >= 14) {
-    return null
+  if (metrics.isScrollable) {
+    return {
+      tier: 'pinned',
+      autoHideDuration: null,
+      showCloseButton: true
+    }
   }
 
-  return Math.min(22000, Math.max(3600, 2400 + charCount * 34 + estimatedLineCount * 420))
+  if (metrics.contentHeight <= 96) {
+    return {
+      tier: 'short',
+      autoHideDuration: clampDuration(4000 + metrics.charCount * 18, 4000, 6000),
+      showCloseButton: false
+    }
+  }
+
+  if (metrics.contentHeight <= 168) {
+    return {
+      tier: 'medium',
+      autoHideDuration: clampDuration(8000 + metrics.charCount * 24, 8000, 14000),
+      showCloseButton: false
+    }
+  }
+
+  return {
+    tier: 'long',
+    autoHideDuration: clampDuration(15000 + metrics.charCount * 18, 15000, 24000),
+    showCloseButton: false
+  }
 }
 
-const finalizeBubbleDismiss = (session: number) => {
-  if (session !== speechSession) {
+const logBubbleDecision = (
+  metrics: BubbleLayoutMetrics,
+  decision: { tier: BubbleMessageTier; autoHideDuration: number | null; showCloseButton: boolean }
+) => {
+  if (!import.meta.env.DEV) {
     return
   }
 
-  bubbleText.value = ''
-  bubbleDismissRemainingMs = null
-  bubbleDismissDeadline = 0
+  const logKey = [
+    metrics.messageId,
+    metrics.charCount,
+    metrics.contentHeight,
+    metrics.scrollHeight,
+    metrics.clientHeight,
+    metrics.isScrollable,
+    decision.tier,
+    decision.autoHideDuration
+  ].join(':')
+
+  if (lastBubbleDebugKey === logKey) {
+    return
+  }
+
+  lastBubbleDebugKey = logKey
+  console.info('[PenguinPal bubble decision]', {
+    charCount: metrics.charCount,
+    contentHeight: metrics.contentHeight,
+    scrollHeight: metrics.scrollHeight,
+    clientHeight: metrics.clientHeight,
+    isScrollable: metrics.isScrollable,
+    tier: decision.tier,
+    autoHideDuration: decision.autoHideDuration,
+    showCloseButton: decision.showCloseButton
+  })
+}
+
+const applyBubbleLayoutMetrics = (metrics: BubbleLayoutMetrics) => {
+  if (metrics.messageId !== bubbleMessageId.value || !bubbleText.value.trim()) {
+    return
+  }
+
+  bubbleLayoutMetrics.value = metrics
+  const decision = computeBubbleDismissDecision(metrics)
+  bubbleMessageTier.value = decision.tier
+  bubbleDismissRemainingMs = decision.autoHideDuration
+  logBubbleDecision(metrics, decision)
+
+  if (!speechPlaybackActive) {
+    scheduleBubbleDismiss(metrics.messageId, decision.autoHideDuration)
+  }
+}
+
+const finalizeBubbleDismiss = (session: number) => {
+  if (session !== bubbleMessageId.value) {
+    return
+  }
+
+  clearBubble()
   resetVisualModeSoon(0)
   scheduleAutoListening()
 }
@@ -428,7 +522,7 @@ const resumeBubbleDismiss = (delay = 0) => {
     return
   }
 
-  const session = speechSession
+  const session = bubbleMessageId.value
   const resume = () => {
     scheduleBubbleDismiss(session, bubbleDismissRemainingMs)
   }
@@ -450,6 +544,19 @@ const handleBubbleInteractionState = (active: boolean) => {
   }
 
   resumeBubbleDismiss(220)
+}
+
+const handleBubbleDismissRequest = (messageId: number) => {
+  if (messageId !== bubbleMessageId.value) {
+    return
+  }
+
+  clearBubble()
+  resetVisualModeSoon(0)
+
+  if (!speechPlaybackActive) {
+    scheduleAutoListening(220)
+  }
 }
 
 const pushInputHistoryLocally = (content: string) => {
@@ -610,6 +717,7 @@ const buildBubbleWindowState = async (): Promise<BubbleWindowState> => {
   const position = await appWindow.outerPosition()
 
   return {
+    messageId: bubbleMessageId.value,
     visible: true,
     text,
     anchorX: Math.round(position.x + petLayout.anchorX),
@@ -683,9 +791,19 @@ const showBubble = (content: string, mode: PetMode = 'speaking', duration?: numb
     window.speechSynthesis.cancel()
   }
   resetBubbleDismissState()
+  bubbleMessageId.value = session
+  bubbleLayoutMetrics.value = null
+  bubbleMessageTier.value = null
+  lastBubbleDebugKey = ''
+  if (duration !== undefined) {
+    bubbleDismissRemainingMs = duration
+  }
   bubbleText.value = content
   visualMode.value = mode
-  scheduleBubbleDismiss(session, computeBubbleAutoDismissMs(content, duration))
+
+  if (duration === null) {
+    bubbleMessageTier.value = 'pinned'
+  }
 }
 
 const speakReply = (content: string) => {
@@ -696,10 +814,14 @@ const speakReply = (content: string) => {
 
   const session = ++speechSession
   resetBubbleDismissState()
+  bubbleMessageId.value = session
+  bubbleLayoutMetrics.value = null
+  bubbleMessageTier.value = null
+  lastBubbleDebugKey = ''
   window.speechSynthesis.cancel()
   clearAutoListenTimer()
   speechPlaybackActive = true
-  bubbleDismissRemainingMs = computeBubbleAutoDismissMs(content)
+  bubbleDismissRemainingMs = null
 
   if (recognition && listening.value) {
     submitVoiceAfterStop = false
@@ -1311,6 +1433,14 @@ const setupCrossWindowListeners = async () => {
     handleBubbleInteractionState(active)
   })
 
+  bubbleLayoutMetricsListenerCleanup = await listenForBubbleLayoutMetrics((metrics) => {
+    applyBubbleLayoutMetrics(metrics)
+  })
+
+  bubbleDismissRequestCleanup = await listenForBubbleDismissRequest((messageId) => {
+    handleBubbleDismissRequest(messageId)
+  })
+
   todayReplyHistoryListenerCleanup = await listenForTodayReplyHistory((entries) => {
     todayReplyHistory.value = entries
   })
@@ -1383,6 +1513,8 @@ onBeforeUnmount(() => {
   sectionListenerCleanup?.()
   bubbleStateListenerCleanup?.()
   bubbleInteractionListenerCleanup?.()
+  bubbleLayoutMetricsListenerCleanup?.()
+  bubbleDismissRequestCleanup?.()
   todayReplyHistoryListenerCleanup?.()
   windowMovedCleanup?.()
   windowResizedCleanup?.()

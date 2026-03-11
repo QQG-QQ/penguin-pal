@@ -183,7 +183,19 @@ export interface PetLayoutMetrics {
   faceBottom: number
 }
 
+export type BubbleMessageTier = 'short' | 'medium' | 'long' | 'pinned'
+
+export interface BubbleLayoutMetrics {
+  messageId: number
+  charCount: number
+  scrollHeight: number
+  clientHeight: number
+  contentHeight: number
+  isScrollable: boolean
+}
+
 export interface BubbleWindowState {
+  messageId: number
   visible: boolean
   text: string
   anchorX: number

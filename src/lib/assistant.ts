@@ -6,6 +6,7 @@ import type {
   AiConstraintProfile,
   ActionExecutionResult,
   AssistantSnapshot,
+  BubbleLayoutMetrics,
   BubbleWindowState,
   ChatMessage,
   ChatResponse,
@@ -342,6 +343,8 @@ const SNAPSHOT_UPDATED_EVENT = 'penguinpal://assistant-snapshot'
 const SETTINGS_SECTION_EVENT = 'penguinpal://settings-section'
 const BUBBLE_STATE_EVENT = 'penguinpal://bubble-state'
 const BUBBLE_INTERACTION_EVENT = 'penguinpal://bubble-interaction'
+const BUBBLE_LAYOUT_METRICS_EVENT = 'penguinpal://bubble-layout-metrics'
+const BUBBLE_DISMISS_EVENT = 'penguinpal://bubble-dismiss'
 const TODAY_REPLY_HISTORY_EVENT = 'penguinpal://today-reply-history'
 
 let browserSettingsWindow: Window | null = null
@@ -441,6 +444,46 @@ export const listenForBubbleInteractionState = async (
 
   return listen<boolean>(BUBBLE_INTERACTION_EVENT, (event) => {
     handler(Boolean(event.payload))
+  })
+}
+
+export const publishBubbleLayoutMetrics = async (metrics: BubbleLayoutMetrics): Promise<void> => {
+  if (!isTauriRuntime()) {
+    return
+  }
+
+  await emitTo(MAIN_WINDOW_LABEL, BUBBLE_LAYOUT_METRICS_EVENT, metrics)
+}
+
+export const listenForBubbleLayoutMetrics = async (
+  handler: (metrics: BubbleLayoutMetrics) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<BubbleLayoutMetrics>(BUBBLE_LAYOUT_METRICS_EVENT, (event) => {
+    handler(event.payload)
+  })
+}
+
+export const requestBubbleDismiss = async (messageId: number): Promise<void> => {
+  if (!isTauriRuntime()) {
+    return
+  }
+
+  await emitTo(MAIN_WINDOW_LABEL, BUBBLE_DISMISS_EVENT, messageId)
+}
+
+export const listenForBubbleDismissRequest = async (
+  handler: (messageId: number) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<number>(BUBBLE_DISMISS_EVENT, (event) => {
+    handler(Number(event.payload ?? 0))
   })
 }
 
