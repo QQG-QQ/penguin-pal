@@ -18,6 +18,19 @@ const emit = defineEmits<{
 
 let pointerStartX = 0
 let pointerStartY = 0
+let pointerPressed = false
+let dragStarted = false
+let longPressTimer: number | null = null
+
+const CLICK_MOVE_TOLERANCE = 6
+const LONG_PRESS_DRAG_DELAY_MS = 250
+
+const clearLongPressTimer = () => {
+  if (longPressTimer !== null) {
+    window.clearTimeout(longPressTimer)
+    longPressTimer = null
+  }
+}
 
 const artwork = computed(() => {
   const map: Record<PetMode, { src: string; alt: string }> = {
@@ -31,30 +44,48 @@ const artwork = computed(() => {
   return map[props.mode]
 })
 
-const startDrag = async (event: MouseEvent) => {
-  if (event.buttons !== 1) {
-    return
-  }
-
-  try {
-    await startMainWindowDrag()
-  } catch {
-    // Keep the declarative drag region as the primary path and only use this as a fallback.
-  }
-}
-
 const rememberPointerOrigin = (event: PointerEvent) => {
   pointerStartX = event.clientX
   pointerStartY = event.clientY
+  pointerPressed = true
+  dragStarted = false
+  clearLongPressTimer()
+  longPressTimer = window.setTimeout(async () => {
+    if (!pointerPressed || dragStarted) {
+      return
+    }
+
+    dragStarted = true
+
+    try {
+      await startMainWindowDrag()
+    } catch {
+      dragStarted = false
+    }
+  }, LONG_PRESS_DRAG_DELAY_MS)
 }
 
 const activatePet = (event: PointerEvent) => {
+  clearLongPressTimer()
+  pointerPressed = false
+
+  if (dragStarted) {
+    dragStarted = false
+    return
+  }
+
   const movedX = Math.abs(event.clientX - pointerStartX)
   const movedY = Math.abs(event.clientY - pointerStartY)
 
-  if (movedX <= 6 && movedY <= 6) {
+  if (movedX <= CLICK_MOVE_TOLERANCE && movedY <= CLICK_MOVE_TOLERANCE) {
     emit('activate')
   }
+}
+
+const cancelPointerInteraction = () => {
+  clearLongPressTimer()
+  pointerPressed = false
+  dragStarted = false
 }
 </script>
 
@@ -62,16 +93,15 @@ const activatePet = (event: PointerEvent) => {
   <section
     class="pet-shell"
     :class="`mode-${mode}`"
-    data-tauri-drag-region
-    @mousedown.left="startDrag"
     @pointerdown.left="rememberPointerOrigin"
     @pointerup.left="activatePet"
+    @pointercancel="cancelPointerInteraction"
   >
     <div class="pet-aura aura-a" />
     <div class="pet-aura aura-b" />
     <div class="pet-shadow" />
 
-    <div class="pet-body" data-tauri-drag-region>
+    <div class="pet-body">
       <img
         class="penguin-art"
         :class="`motion-${mode}`"
