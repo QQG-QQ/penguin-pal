@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, TimeZone};
+use chrono::Local;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fs,
@@ -247,12 +247,4 @@ pub fn clear_today_reply_history(app: &AppHandle) -> Result<Vec<ReplyHistoryEntr
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(vec![]),
         Err(error) => Err(error.to_string()),
     }
-}
-
-pub fn format_timestamp(timestamp: u64) -> String {
-    Local
-        .timestamp_millis_opt(timestamp as i64)
-        .single()
-        .map(|value: DateTime<Local>| value.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_else(|| "未知时间".to_string())
 }

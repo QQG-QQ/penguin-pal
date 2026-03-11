@@ -335,11 +335,14 @@ const rethrowIfDesktopRuntime = (error: unknown): void => {
 
 export type SettingsSection = 'settings' | 'actions'
 
+const MAIN_WINDOW_LABEL = 'main'
 const SETTINGS_WINDOW_LABEL = 'settings'
 const BUBBLE_WINDOW_LABEL = 'bubble'
 const SNAPSHOT_UPDATED_EVENT = 'penguinpal://assistant-snapshot'
 const SETTINGS_SECTION_EVENT = 'penguinpal://settings-section'
 const BUBBLE_STATE_EVENT = 'penguinpal://bubble-state'
+const BUBBLE_INTERACTION_EVENT = 'penguinpal://bubble-interaction'
+const TODAY_REPLY_HISTORY_EVENT = 'penguinpal://today-reply-history'
 
 let browserSettingsWindow: Window | null = null
 
@@ -417,6 +420,46 @@ export const listenForBubbleWindowState = async (
   }
 
   return listen<BubbleWindowState>(BUBBLE_STATE_EVENT, (event) => {
+    handler(event.payload)
+  })
+}
+
+export const publishBubbleInteractionState = async (active: boolean): Promise<void> => {
+  if (!isTauriRuntime()) {
+    return
+  }
+
+  await emitTo(MAIN_WINDOW_LABEL, BUBBLE_INTERACTION_EVENT, active)
+}
+
+export const listenForBubbleInteractionState = async (
+  handler: (active: boolean) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<boolean>(BUBBLE_INTERACTION_EVENT, (event) => {
+    handler(Boolean(event.payload))
+  })
+}
+
+export const publishTodayReplyHistory = async (entries: ReplyHistoryEntry[]): Promise<void> => {
+  if (!isTauriRuntime()) {
+    return
+  }
+
+  await emit(TODAY_REPLY_HISTORY_EVENT, entries)
+}
+
+export const listenForTodayReplyHistory = async (
+  handler: (entries: ReplyHistoryEntry[]) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<ReplyHistoryEntry[]>(TODAY_REPLY_HISTORY_EVENT, (event) => {
     handler(event.payload)
   })
 }

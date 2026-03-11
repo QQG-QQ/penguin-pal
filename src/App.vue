@@ -19,9 +19,12 @@ import {
   hideAssistantWindow,
   isBubbleWindowView,
   listenForAssistantSnapshot,
+  listenForBubbleInteractionState,
   listenForBubbleWindowState,
   listenForSettingsSectionChange,
+  listenForTodayReplyHistory,
   openSettingsWindow,
+  publishTodayReplyHistory,
   publishBubbleWindowState,
   publishAssistantSnapshot,
   readWindowView,
@@ -198,12 +201,17 @@ let recognition: SpeechRecognition | null = null
 let recognitionBuffer = ''
 let submitVoiceAfterStop = false
 let bubbleTimer: number | null = null
+let bubbleResumeTimer: number | null = null
+let bubbleDismissRemainingMs: number | null = null
+let bubbleDismissDeadline = 0
 let speechSession = 0
 let mediaDevicesCleanup: (() => void) | null = null
 let microphonePermissionRequested = false
 let snapshotListenerCleanup: (() => void) | null = null
 let sectionListenerCleanup: (() => void) | null = null
 let bubbleStateListenerCleanup: (() => void) | null = null
+let bubbleInteractionListenerCleanup: (() => void) | null = null
+let todayReplyHistoryListenerCleanup: (() => void) | null = null
 let windowMovedCleanup: (() => void) | null = null
 let windowResizedCleanup: (() => void) | null = null
 let autoListenTimer: number | null = null
@@ -212,6 +220,7 @@ let petClampTimer: number | null = null
 let petClampInFlight = false
 let inputHistoryCursor = -1
 let draftBeforeHistoryNavigation = ''
+const bubbleInteractionActive = ref(false)
 
 const isSettingsView = computed(() => windowView.value === 'settings')
 const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWindowView())
@@ -306,8 +315,23 @@ const clearBubbleTimer = () => {
   }
 }
 
-const clearBubble = () => {
+const clearBubbleResumeTimer = () => {
+  if (bubbleResumeTimer !== null) {
+    window.clearTimeout(bubbleResumeTimer)
+    bubbleResumeTimer = null
+  }
+}
+
+const resetBubbleDismissState = () => {
   clearBubbleTimer()
+  clearBubbleResumeTimer()
+  bubbleDismissRemainingMs = null
+  bubbleDismissDeadline = 0
+  bubbleInteractionActive.value = false
+}
+
+const clearBubble = () => {
+  resetBubbleDismissState()
   bubbleText.value = ''
 }
 
@@ -320,8 +344,112 @@ const loadInputHistory = async () => {
   inputHistory.value = await getInputHistory()
 }
 
-const refreshTodayReplyHistory = async () => {
-  todayReplyHistory.value = await getTodayReplyHistory()
+const applyTodayReplyHistory = async (entries: ReplyHistoryEntry[], publish = true) => {
+  todayReplyHistory.value = entries
+  if (publish) {
+    await publishTodayReplyHistory(entries)
+  }
+}
+
+const refreshTodayReplyHistory = async (publish = true) => {
+  await applyTodayReplyHistory(await getTodayReplyHistory(), publish)
+}
+
+const computeBubbleAutoDismissMs = (content: string, override?: number | null) => {
+  if (override !== undefined) {
+    return override
+  }
+
+  const text = content.trim()
+  const charCount = text.length
+  const lineBreakCount = (text.match(/\n/g) ?? []).length
+  const estimatedLineCount = Math.max(1, lineBreakCount + Math.ceil(charCount / 22))
+
+  if (charCount >= 520 || estimatedLineCount >= 14) {
+    return null
+  }
+
+  return Math.min(22000, Math.max(3600, 2400 + charCount * 34 + estimatedLineCount * 420))
+}
+
+const finalizeBubbleDismiss = (session: number) => {
+  if (session !== speechSession) {
+    return
+  }
+
+  bubbleText.value = ''
+  bubbleDismissRemainingMs = null
+  bubbleDismissDeadline = 0
+  resetVisualModeSoon(0)
+  scheduleAutoListening()
+}
+
+const scheduleBubbleDismiss = (session: number, delayMs: number | null) => {
+  clearBubbleTimer()
+
+  if (delayMs === null) {
+    bubbleDismissRemainingMs = null
+    bubbleDismissDeadline = 0
+    return
+  }
+
+  const nextDelay = Math.max(1500, delayMs)
+  bubbleDismissRemainingMs = nextDelay
+
+  if (bubbleInteractionActive.value || speechPlaybackActive || !bubbleText.value.trim()) {
+    return
+  }
+
+  bubbleDismissDeadline = Date.now() + nextDelay
+  bubbleTimer = window.setTimeout(() => {
+    finalizeBubbleDismiss(session)
+  }, nextDelay)
+}
+
+const pauseBubbleDismiss = () => {
+  clearBubbleResumeTimer()
+  if (bubbleTimer === null) {
+    return
+  }
+
+  bubbleDismissRemainingMs = Math.max(2200, bubbleDismissDeadline - Date.now())
+  clearBubbleTimer()
+}
+
+const resumeBubbleDismiss = (delay = 0) => {
+  clearBubbleResumeTimer()
+
+  if (
+    bubbleDismissRemainingMs === null ||
+    bubbleInteractionActive.value ||
+    speechPlaybackActive ||
+    !bubbleText.value.trim()
+  ) {
+    return
+  }
+
+  const session = speechSession
+  const resume = () => {
+    scheduleBubbleDismiss(session, bubbleDismissRemainingMs)
+  }
+
+  if (delay > 0) {
+    bubbleResumeTimer = window.setTimeout(resume, delay)
+    return
+  }
+
+  resume()
+}
+
+const handleBubbleInteractionState = (active: boolean) => {
+  bubbleInteractionActive.value = active
+
+  if (active) {
+    pauseBubbleDismiss()
+    return
+  }
+
+  resumeBubbleDismiss(220)
 }
 
 const pushInputHistoryLocally = (content: string) => {
@@ -549,22 +677,15 @@ const resetVisualModeSoon = (delay = 700) => {
   }, delay)
 }
 
-const showBubble = (content: string, mode: PetMode = 'speaking', duration = 4200) => {
+const showBubble = (content: string, mode: PetMode = 'speaking', duration?: number | null) => {
   const session = ++speechSession
   if (voiceReplySupported.value) {
     window.speechSynthesis.cancel()
   }
-  clearBubbleTimer()
+  resetBubbleDismissState()
   bubbleText.value = content
   visualMode.value = mode
-  bubbleTimer = window.setTimeout(() => {
-    if (session !== speechSession) {
-      return
-    }
-    bubbleText.value = ''
-    resetVisualModeSoon(0)
-    scheduleAutoListening()
-  }, duration)
+  scheduleBubbleDismiss(session, computeBubbleAutoDismissMs(content, duration))
 }
 
 const speakReply = (content: string) => {
@@ -574,10 +695,11 @@ const speakReply = (content: string) => {
   }
 
   const session = ++speechSession
-  clearBubbleTimer()
+  resetBubbleDismissState()
   window.speechSynthesis.cancel()
   clearAutoListenTimer()
   speechPlaybackActive = true
+  bubbleDismissRemainingMs = computeBubbleAutoDismissMs(content)
 
   if (recognition && listening.value) {
     submitVoiceAfterStop = false
@@ -600,9 +722,8 @@ const speakReply = (content: string) => {
       return
     }
     speechPlaybackActive = false
-    bubbleText.value = ''
-    resetVisualModeSoon()
-    scheduleAutoListening(320)
+    visualMode.value = 'idle'
+    resumeBubbleDismiss(160)
   }
   utterance.onerror = () => {
     if (session !== speechSession) {
@@ -610,7 +731,6 @@ const speakReply = (content: string) => {
     }
     speechPlaybackActive = false
     showBubble(content, 'speaking')
-    scheduleAutoListening(320)
   }
 
   window.speechSynthesis.speak(utterance)
@@ -790,7 +910,7 @@ const resetConversation = async (announceAfter = false) => {
 
 const clearTodayHistoryRecords = async () => {
   try {
-    todayReplyHistory.value = await clearTodayReplyHistory()
+    await applyTodayReplyHistory(await clearTodayReplyHistory())
     announce('今日回复历史已经清空。', 'speaking')
   } catch (error) {
     announce(error instanceof Error ? error.message : '清空今日回复历史失败', 'guarded')
@@ -1187,6 +1307,14 @@ const setupCrossWindowListeners = async () => {
     applySnapshot(nextSnapshot)
   })
 
+  bubbleInteractionListenerCleanup = await listenForBubbleInteractionState((active) => {
+    handleBubbleInteractionState(active)
+  })
+
+  todayReplyHistoryListenerCleanup = await listenForTodayReplyHistory((entries) => {
+    todayReplyHistory.value = entries
+  })
+
   if (isSettingsView.value) {
     sectionListenerCleanup = await listenForSettingsSectionChange((section) => {
       drawerSection.value = section
@@ -1247,13 +1375,15 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   recognition?.stop()
-  clearBubbleTimer()
+  resetBubbleDismissState()
   clearAutoListenTimer()
   clearPetClampTimer()
   mediaDevicesCleanup?.()
   snapshotListenerCleanup?.()
   sectionListenerCleanup?.()
   bubbleStateListenerCleanup?.()
+  bubbleInteractionListenerCleanup?.()
+  todayReplyHistoryListenerCleanup?.()
   windowMovedCleanup?.()
   windowResizedCleanup?.()
   if (voiceReplySupported.value) {

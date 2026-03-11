@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition } from '@tauri-apps/api/window'
 import {
   buildWorkAreaRect,
   chooseBubbleCandidate,
   finalizeBubbleLayout
 } from '../lib/petLayout'
+import { publishBubbleInteractionState } from '../lib/assistant'
 import type { BubbleWindowState } from '../types/assistant'
 
 const props = defineProps<{
@@ -19,8 +20,19 @@ const placement = ref<'above' | 'upper-left' | 'upper-right'>('above')
 const tailSide = ref<'bottom' | 'left' | 'right'>('bottom')
 const tailOffsetX = ref(56)
 const tailOffsetY = ref(48)
+const interactionActive = ref(false)
+
+const syncInteractionState = async (active: boolean) => {
+  if (interactionActive.value === active) {
+    return
+  }
+
+  interactionActive.value = active
+  await publishBubbleInteractionState(active)
+}
 
 const hideBubbleWindow = async () => {
+  await syncInteractionState(false)
   try {
     await getCurrentWindow().hide()
   } catch {
@@ -84,12 +96,16 @@ onMounted(async () => {
   const appWindow = getCurrentWindow()
 
   try {
-    await appWindow.setIgnoreCursorEvents(true)
+    await appWindow.setIgnoreCursorEvents(false)
   } catch {
     // ignore in unsupported runtimes
   }
 
   await syncBubbleWindow()
+})
+
+onBeforeUnmount(() => {
+  void syncInteractionState(false)
 })
 </script>
 
@@ -106,6 +122,10 @@ onMounted(async () => {
         '--bubble-max-width': `${bubbleMaxWidth}px`,
         '--bubble-max-height': `${bubbleMaxHeight}px`
       }"
+      @mouseenter="syncInteractionState(true)"
+      @mouseleave="syncInteractionState(false)"
+      @focusin="syncInteractionState(true)"
+      @focusout="syncInteractionState(false)"
     >
       <p>{{ state.text }}</p>
     </div>
@@ -128,6 +148,7 @@ onMounted(async () => {
   max-height: var(--bubble-max-height, 220px);
   overflow-x: hidden;
   overflow-y: auto;
+  pointer-events: auto;
   padding: 12px 16px;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.98);
