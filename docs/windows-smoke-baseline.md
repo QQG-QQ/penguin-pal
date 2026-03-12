@@ -6,6 +6,23 @@
 
 控制层第一版已经在 Windows 真机上完成一轮最小烟测，当前可作为后续回归基线。
 
+当前默认授权策略已更新：
+
+- `list_windows`
+- `focus_window`
+- `open_app`
+- `read_clipboard`
+- `type_text`
+- `send_hotkey`
+
+以上工具默认直通，不再要求在设置页提升权限，也不会再进入一次性确认。
+
+仍然保留确认的高风险动作：
+
+- `click_at`
+- `click_element`
+- `set_element_value`
+
 已确认通过：
 
 1. `pending / confirm / cancel` 机制
@@ -85,7 +102,7 @@ Notepad 示例结果：
 示例：
 
 - `send_hotkey CTRL+V`
-  - `confirm -> success`
+  - 基线验证时为 `confirm -> success`
   - `result.sequence="^v"`
 
 ## Notepad 推荐 selector

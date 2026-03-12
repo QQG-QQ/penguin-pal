@@ -90,12 +90,11 @@ const providerLabels: Record<ProviderKind, string> = {
 const DEFAULT_OAUTH_REDIRECT_URL = 'http://127.0.0.1:8976/oauth/callback'
 
 const actionCommandMap: Record<string, string[]> = {
-  open_notepad: ['打开记事本', '记事本'],
-  open_calculator: ['打开计算器', '计算器'],
-  open_downloads: ['打开下载目录', '下载目录', 'downloads'],
   focus_window: ['唤起桌宠', '聚焦桌宠', '显示桌宠'],
   show_window: ['显示主面板', '显示窗口']
 }
+
+const localDirectActionIds = new Set(['focus_window', 'show_window'])
 
 const PET_WINDOW_COLLAPSED = { width: 248, height: 252 }
 const PET_WINDOW_EXPANDED = { width: 312, height: 340 }
@@ -1522,6 +1521,9 @@ const findDirectAction = (content: string) => {
 
   return (
     snapshot.value.allowedActions.find((action) => {
+      if (!localDirectActionIds.has(action.id)) {
+        return false
+      }
       const keywords = actionCommandMap[action.id] ?? [action.title]
       return keywords.some((keyword) => normalized.includes(normalizeCommand(keyword)))
     }) ?? null

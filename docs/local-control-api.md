@@ -52,15 +52,18 @@
   "message": "该控制动作需要先确认后执行。",
   "pendingRequest": {
     "id": "control-1711111111111-abcd1234",
-    "tool": "type_text",
-    "title": "待确认：输入文本",
-    "prompt": "即将向当前活动窗口输入 6 个字符。",
+    "tool": "click_at",
+    "title": "待确认：点击坐标",
+    "prompt": "即将对当前活动窗口执行坐标点击：x=120，y=240，button=left。",
     "preview": {
-      "textLength": 6,
-      "textPreview": "hello!"
+      "x": 120,
+      "y": 240,
+      "button": "left"
     },
     "args": {
-      "text": "hello!"
+      "x": 120,
+      "y": 240,
+      "button": "left"
     },
     "createdAt": 1711111111111,
     "expiresAt": 1711111141111,
@@ -72,7 +75,7 @@
 
 ## 工具清单
 
-### L0 只读
+### L0 默认直通
 
 #### `list_windows`
 
@@ -94,8 +97,6 @@
   }
 ]
 ```
-
-### L1 低风险写 / 敏感只读
 
 #### `focus_window`
 
@@ -124,6 +125,48 @@
 }
 ```
 
+#### `read_clipboard`
+
+- `args`: `{}`
+- `success.result` 示例：
+
+```json
+{
+  "text": "剪贴板里的文本"
+}
+```
+
+#### `type_text`
+
+- `args`
+  - `text: string` 必填
+- 限制：单行纯文本，最大 `500` 字符
+- `success.result` 示例：
+
+```json
+{
+  "typedLength": 12
+}
+```
+
+#### `send_hotkey`
+
+- `args`
+  - `keys: string[]` 必填
+- 限制：
+  - 仅支持一个主键
+  - 修饰键支持 `CTRL/ALT/SHIFT`
+  - 主键支持单字符、方向键、`ENTER/TAB/ESC/DELETE/BACKSPACE`、`F1..F24`
+- `success.result` 示例：
+
+```json
+{
+  "sequence": "^v"
+}
+```
+
+### L1 低风险写 / 敏感只读
+
 #### `capture_active_window`
 
 - `args`: `{}`
@@ -135,17 +178,6 @@
   "path": "C:\\Users\\...\\AppData\\Roaming\\com.penguinpal.app\\captures\\active-window-20260311-103011123.png",
   "width": 960,
   "height": 700
-}
-```
-
-#### `read_clipboard`
-
-- `args`: `{}`
-- `success.result` 示例：
-
-```json
-{
-  "text": "剪贴板里的文本"
 }
 ```
 
@@ -227,35 +259,6 @@
 - `success.result` 示例：同 `find_element`
 
 ### L2 高风险写，需要确认
-
-#### `type_text`
-
-- `args`
-  - `text: string` 必填
-- 限制：单行纯文本，最大 `500` 字符
-- `success.result` 示例：
-
-```json
-{
-  "typedLength": 12
-}
-```
-
-#### `send_hotkey`
-
-- `args`
-  - `keys: string[]` 必填
-- 限制：
-  - 仅支持一个主键
-  - 修饰键支持 `CTRL/ALT/SHIFT`
-  - 主键支持单字符、方向键、`ENTER/TAB/ESC/DELETE/BACKSPACE`、`F1..F24`
-- `success.result` 示例：
-
-```json
-{
-  "sequence": "^v"
-}
-```
 
 #### `click_at`
 
@@ -345,18 +348,22 @@
    - 预期：返回截图路径，文件实际存在
 5. `read_clipboard`
    - 预期：返回当前文本剪贴板
+6. `type_text`
+   - 预期：默认直接执行，不进入 `pending_confirmation`
+7. `send_hotkey`
+   - 预期：默认直接执行，不进入 `pending_confirmation`
 
 ### 高风险确认流
 
-1. `type_text`
-   - 首次调用预期：`pending_confirmation`
-   - `POST /confirm` 后预期：活动输入框收到文本
-2. `click_at`
+1. `click_at`
    - 首次调用预期：`pending_confirmation`
    - `POST /confirm` 后预期：指定窗口内相对坐标被点击
-3. `send_hotkey`
+2. `click_element`
    - 首次调用预期：`pending_confirmation`
-   - `POST /confirm` 后预期：例如 `CTRL+V` 能粘贴
+   - `POST /confirm` 后预期：元素被点击
+3. `set_element_value`
+   - 首次调用预期：`pending_confirmation`
+   - `POST /confirm` 后预期：元素文本被写入
 
 ### 最小 UIA
 

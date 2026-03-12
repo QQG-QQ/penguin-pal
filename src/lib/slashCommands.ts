@@ -219,5 +219,5 @@ export const slashHelpText = `可用命令：
 
 说明：
 - /model set 和 /clear 会先进入确认状态
-- /type、/hotkey、/click 会走本地控制层的高风险确认
+- /type、/hotkey 默认直接执行；/click 会走本地控制层的高风险确认
 - 有待确认动作时，优先输入 yes / no，或使用 /confirm /cancel`

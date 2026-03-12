@@ -12,12 +12,15 @@ use crate::control::{
     logging,
 };
 
-pub const WINDOW_ENUM_PREAMBLE: &str = r#"
+pub const POWERSHELL_UTF8_PREAMBLE: &str = r#"
 $ErrorActionPreference = 'Stop'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
+"#;
+
+pub const WINDOW_ENUM_PREAMBLE: &str = r#"
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -214,7 +217,7 @@ pub fn run_powershell_json(
     args: Option<&Value>,
     timeout: Duration,
 ) -> ControlResult<Value> {
-    let encoded = encode_powershell(script);
+    let encoded = encode_powershell(&format!("{POWERSHELL_UTF8_PREAMBLE}\n{script}"));
     let mut command = Command::new("powershell.exe");
     command
         .args([
