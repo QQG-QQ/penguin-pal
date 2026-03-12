@@ -15,7 +15,7 @@ use std::{process::Command, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    agent::router as agent_router,
+    agent::{router as agent_router, AgentTaskState},
     ai::{guardrails, memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
@@ -148,6 +148,16 @@ fn get_codex_cli_status(app: AppHandle) -> CodexCliStatus {
 #[tauri::command]
 fn get_control_service_status(app: AppHandle) -> Result<ControlServiceStatus, String> {
     control_router::service_status(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn confirm_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
+    agent_router::confirm_control_pending(&app, &pending_id)
+}
+
+#[tauri::command]
+fn cancel_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
+    agent_router::cancel_control_pending(&app, &pending_id)
 }
 
 #[tauri::command]
@@ -1076,6 +1086,7 @@ pub fn run() {
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(Mutex::new(runtime));
             app.manage(ControlServiceState::new());
+            app.manage(AgentTaskState::new());
             let _ = history::prepare_storage(&app.handle());
 
             let control_service_status = match control::http::start(app.handle().clone()) {
@@ -1124,6 +1135,8 @@ pub fn run() {
             disconnect_oauth_sign_in,
             get_codex_cli_status,
             get_control_service_status,
+            confirm_control_pending,
+            cancel_control_pending,
             start_codex_cli_login,
             send_chat_message,
             request_desktop_action,

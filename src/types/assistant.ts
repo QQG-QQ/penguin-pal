@@ -120,11 +120,21 @@ export interface ProviderConfigInput {
 }
 
 export type AgentRoute = 'chat' | 'control'
+export type AgentTaskStatus = 'running' | 'waitingConfirmation' | 'completed' | 'failed' | 'cancelled'
+
+export interface AgentTaskProgress {
+  taskId: string
+  taskTitle: string
+  stepIndex: number
+  stepCount: number
+  status: AgentTaskStatus
+}
 
 export interface AgentMessageMeta {
   route: AgentRoute
   plannedTools: string[]
   pendingRequest?: ControlPendingRequest | null
+  task?: AgentTaskProgress | null
 }
 
 export interface ChatResponse {

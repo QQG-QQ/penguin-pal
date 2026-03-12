@@ -1286,25 +1286,23 @@ export const listControlPending = async (): Promise<ControlPendingRequest[]> => 
 export const confirmControlPending = async (
   pendingId: string
 ): Promise<ControlToolInvokeResponse> => {
-  if (!isTauriRuntime()) {
+  try {
+    return await safeInvoke<ControlToolInvokeResponse>('confirm_control_pending', { pendingId })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     throw new Error(fallbackControlServiceStatus().message)
   }
-
-  return controlFetchJson<ControlToolInvokeResponse>(`/v1/pending/${pendingId}/confirm`, {
-    method: 'POST'
-  })
 }
 
 export const cancelControlPending = async (
   pendingId: string
 ): Promise<ControlToolInvokeResponse> => {
-  if (!isTauriRuntime()) {
+  try {
+    return await safeInvoke<ControlToolInvokeResponse>('cancel_control_pending', { pendingId })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     throw new Error(fallbackControlServiceStatus().message)
   }
-
-  return controlFetchJson<ControlToolInvokeResponse>(`/v1/pending/${pendingId}/cancel`, {
-    method: 'POST'
-  })
 }
 
 export const startCodexCliLogin = async (): Promise<CodexCliStatus> => {

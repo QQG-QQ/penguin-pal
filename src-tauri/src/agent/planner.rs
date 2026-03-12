@@ -51,6 +51,8 @@ fn parse_plan(raw: &str) -> Result<AgentPlan, String> {
     match plan.route {
         AgentRoute::Chat => Ok(AgentPlan {
             route: AgentRoute::Chat,
+            task_title: None,
+            stop_on_error: true,
             steps: vec![],
         }),
         AgentRoute::Control => {
@@ -58,8 +60,8 @@ fn parse_plan(raw: &str) -> Result<AgentPlan, String> {
                 return Err("规划模型返回了 control，但没有提供 steps。".to_string());
             }
 
-            if plan.steps.len() > 2 {
-                return Err("第一版桌面代理只允许最多 2 个规划步骤。".to_string());
+            if plan.steps.len() > 4 {
+                return Err("第一版桌面代理只允许最多 4 个规划步骤。".to_string());
             }
 
             Ok(plan)
