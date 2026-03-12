@@ -300,7 +300,7 @@ fn failed_execution(
     AgentExecutionResult {
         reply_text: lines.join("\n"),
         outcome: "control_failed".to_string(),
-        detail: reason,
+        detail: reason.clone(),
         planned_tools: task.planned_tools(),
         pending_request: None,
         task: Some(build_task_progress(
