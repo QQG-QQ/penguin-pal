@@ -437,14 +437,17 @@ async fn execute_step(
 }
 
 async fn capture_screen_context(app: &AppHandle) -> Result<Value, String> {
-    let state: tauri::State<'_, Mutex<RuntimeState>> = app.state();
-    let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
-    let provider = runtime.provider.clone();
-    let api_key = runtime.api_key.clone();
-    let oauth_access_token = runtime.oauth_access_token.clone();
-    let vision_channel = runtime.vision_channel.clone();
-    let vision_api_key = runtime.vision_api_key.clone();
-    drop(runtime);
+    let (provider, api_key, oauth_access_token, vision_channel, vision_api_key) = {
+        let state: tauri::State<'_, Mutex<RuntimeState>> = app.state();
+        let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        (
+            runtime.provider.clone(),
+            runtime.api_key.clone(),
+            runtime.oauth_access_token.clone(),
+            runtime.vision_channel.clone(),
+            runtime.vision_api_key.clone(),
+        )
+    };
 
     let context = screen_context::describe_current_screen(app, &vision_channel, vision_api_key).await;
     let mut value = serde_json::to_value(context).map_err(|error| error.to_string())?;
