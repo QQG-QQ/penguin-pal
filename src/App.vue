@@ -18,15 +18,19 @@ import { buildWorkAreaRect, clampWindowPositionToWorkArea } from './lib/petLayou
 import { parseSlashCommand, slashHelpText } from './lib/slashCommands'
 import {
   cancelDesktopActionApproval,
+  cancelControlPending,
   clearConversation,
   clearTodayReplyHistory,
   closeSettingsWindow,
+  confirmControlPending,
   confirmDesktopAction,
   getAssistantSnapshot,
+  getControlServiceStatus,
   getInputHistory,
   getTodayReplyHistory,
   getCodexCliStatus,
   hideAssistantWindow,
+  invokeControlTool,
   isBubbleWindowView,
   listenForAssistantSnapshot,
   listenForBubbleInteractionState,
@@ -45,6 +49,7 @@ import {
   saveProviderConfig,
   sendChatMessage,
   startCodexCliLogin,
+  listControlPending,
   type SettingsSection
 } from './lib/assistant'
 import type {
@@ -56,6 +61,8 @@ import type {
   BubbleMessageTier,
   BubbleWindowState,
   CodexCliStatus,
+  ControlPendingRequest,
+  ControlToolInvokeResponse,
   DesktopAction,
   PetLayoutMetrics,
   PetMode,
@@ -205,6 +212,7 @@ const authBusy = ref(false)
 const oauthNotice = ref('')
 const codexStatus = ref<CodexCliStatus>(emptyCodexStatus())
 const pendingApproval = ref<ActionApprovalRequest | null>(null)
+const controlPendingRequest = ref<ControlPendingRequest | null>(null)
 const pendingCommandConfirmation = ref<PendingCommandConfirmation | null>(null)
 const approvalPhrase = ref('')
 const approvalChecks = ref<Record<string, boolean>>({})
@@ -238,6 +246,7 @@ let windowResizedCleanup: (() => void) | null = null
 let autoListenTimer: number | null = null
 let speechPlaybackActive = false
 let petClampTimer: number | null = null
+let controlPendingTimer: number | null = null
 let pendingCommandTimer: number | null = null
 let petClampInFlight = false
 let inputHistoryCursor = -1
@@ -890,6 +899,57 @@ const clearPendingApproval = () => {
   approvalChecks.value = {}
 }
 
+const clearControlPendingTimer = () => {
+  if (controlPendingTimer !== null) {
+    window.clearTimeout(controlPendingTimer)
+    controlPendingTimer = null
+  }
+}
+
+const clearControlPendingRequest = () => {
+  clearControlPendingTimer()
+  controlPendingRequest.value = null
+}
+
+const handleControlPendingExpiry = () => {
+  const pending = controlPendingRequest.value
+  if (!pending || pending.expiresAt > Date.now()) {
+    return
+  }
+
+  clearControlPendingRequest()
+  announce('这次本地控制确认已超时，请重新输入命令。', 'guarded')
+}
+
+const setControlPendingRequest = (nextPending: ControlPendingRequest | null) => {
+  clearControlPendingTimer()
+  controlPendingRequest.value = nextPending
+
+  if (!nextPending) {
+    return
+  }
+
+  composerVisible.value = true
+  const ttl = Math.max(0, nextPending.expiresAt - Date.now())
+  controlPendingTimer = window.setTimeout(() => {
+    handleControlPendingExpiry()
+  }, ttl)
+}
+
+const getControlPendingRequest = () => {
+  const pending = controlPendingRequest.value
+  if (!pending) {
+    return null
+  }
+
+  if (pending.expiresAt <= Date.now()) {
+    handleControlPendingExpiry()
+    return null
+  }
+
+  return pending
+}
+
 const clearPendingCommandTimer = () => {
   if (pendingCommandTimer !== null) {
     window.clearTimeout(pendingCommandTimer)
@@ -1082,13 +1142,26 @@ const cancelPendingCommand = () => {
   announce('本次命令已取消。', 'guarded')
 }
 
+const resolvePendingDecisionInput = (content: string) => {
+  const normalized = content.trim().toLowerCase()
+  if (normalized === '/confirm') {
+    return 'confirm' as const
+  }
+
+  if (normalized === '/cancel') {
+    return 'cancel' as const
+  }
+
+  return resolvePendingCommandInput(content)
+}
+
 const handlePendingCommandInput = async (content: string) => {
   const pending = getPendingCommandConfirmation()
   if (!pending) {
     return false
   }
 
-  const decision = resolvePendingCommandInput(content)
+  const decision = resolvePendingDecisionInput(content)
   if (decision === 'confirm') {
     await confirmPendingCommand()
     return true
@@ -1100,6 +1173,275 @@ const handlePendingCommandInput = async (content: string) => {
   }
 
   announce('当前有待确认命令，请先输入 yes / no，或点击确认 / 取消。', 'guarded')
+  return true
+}
+
+const selectLatestControlPending = (pendingList: ControlPendingRequest[]) =>
+  [...pendingList].sort((left, right) => right.createdAt - left.createdAt)[0] ?? null
+
+const refreshControlPendingRequests = async () => {
+  const pendingList = await listControlPending()
+  setControlPendingRequest(selectLatestControlPending(pendingList))
+  return pendingList
+}
+
+const ensureActiveControlPending = async () => {
+  const current = getControlPendingRequest()
+  if (current) {
+    return current
+  }
+
+  const pendingList = await refreshControlPendingRequests()
+  return selectLatestControlPending(pendingList)
+}
+
+const summarizeControlPendingList = (pendingList: ControlPendingRequest[]) => {
+  if (pendingList.length === 0) {
+    return '当前没有本地控制待确认请求。'
+  }
+
+  const lines = pendingList
+    .sort((left, right) => right.createdAt - left.createdAt)
+    .slice(0, 6)
+    .map((pending, index) => {
+      const seconds = Math.max(0, Math.ceil((pending.expiresAt - Date.now()) / 1000))
+      return `${index + 1}. ${pending.tool} · ${pending.id}\n${pending.prompt}\n剩余约 ${seconds} 秒`
+    })
+
+  const remainder =
+    pendingList.length > 6 ? `\n\n其余 ${pendingList.length - 6} 条请继续用 /pending list 查看。` : ''
+
+  return `当前本地控制待确认：${pendingList.length} 条\n\n${lines.join('\n\n')}${remainder}`
+}
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+
+const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
+
+const buildWindowListText = (result: unknown) => {
+  const windows = asArray(result)
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .map((item) => ({
+      title: typeof item.title === 'string' ? item.title.trim() : '',
+      isActive: Boolean(item.isActive)
+    }))
+    .filter((item) => item.title)
+
+  if (windows.length === 0) {
+    return '当前没有读到可见窗口。'
+  }
+
+  const preview = windows.slice(0, 10).map((item, index) => {
+    const marker = item.isActive ? '• 当前' : '•'
+    return `${index + 1}. ${marker} ${item.title}`
+  })
+  const remainder =
+    windows.length > 10 ? `\n\n其余 ${windows.length - 10} 个窗口已省略。` : ''
+
+  return `当前可见窗口：${windows.length} 个\n\n${preview.join('\n')}${remainder}`
+}
+
+const buildClipboardReadText = (result: unknown) => {
+  const record = asRecord(result)
+  const text = typeof record?.text === 'string' ? record.text : ''
+  if (!text) {
+    return '剪贴板当前没有文本内容。'
+  }
+
+  const preview = text.length > 240 ? `${text.slice(0, 240)}…` : text
+  return `剪贴板文本：\n${preview}`
+}
+
+const summarizeControlSuccess = (
+  tool: string,
+  response: ControlToolInvokeResponse,
+  fallbackLabel?: string
+) => {
+  if (response.message?.trim()) {
+    return response.message
+  }
+
+  const result = response.result
+  const record = asRecord(result)
+
+  switch (tool) {
+    case 'list_windows':
+      return buildWindowListText(result)
+    case 'focus_window':
+      return `已聚焦窗口：${typeof record?.title === 'string' ? record.title : fallbackLabel ?? '目标窗口'}。`
+    case 'read_clipboard':
+      return buildClipboardReadText(result)
+    case 'type_text':
+      return `已向当前活动窗口输入 ${typeof record?.typedLength === 'number' ? record.typedLength : 0} 个字符。`
+    case 'send_hotkey':
+      return `已发送快捷键：${typeof record?.sequence === 'string' ? record.sequence : '指定按键'}。`
+    case 'click_at':
+      return `已执行坐标点击：${typeof record?.button === 'string' ? record.button : 'left'}。`
+    case 'cancel_pending':
+      return '本次本地控制待确认请求已取消。'
+    default:
+      return fallbackLabel ? `${fallbackLabel} 已执行。` : '本地控制命令已执行。'
+  }
+}
+
+const ensureControlCommandAvailable = () => {
+  if (pendingApproval.value) {
+    announce('当前还有桌面动作待确认，请先处理那个确认面板。', 'guarded')
+    return false
+  }
+
+  if (getPendingCommandConfirmation()) {
+    announce('当前还有 slash command 待确认，请先输入 yes / no，或点击确认 / 取消。', 'guarded')
+    return false
+  }
+
+  return true
+}
+
+const ensureControlServiceReady = async () => {
+  try {
+    const status = await getControlServiceStatus()
+    if (!status.running || !status.baseUrl) {
+      announce(status.message || '本地控制服务未启动。', 'guarded')
+      return false
+    }
+
+    return true
+  } catch (error) {
+    announce(error instanceof Error ? error.message : '本地控制服务状态检查失败。', 'guarded')
+    return false
+  }
+}
+
+const invokeSlashControlTool = async (
+  tool: string,
+  args: Record<string, unknown>,
+  options?: {
+    label?: string
+  }
+) => {
+  if (!ensureControlCommandAvailable()) {
+    return true
+  }
+
+  if (!(await ensureControlServiceReady())) {
+    return true
+  }
+
+  busy.value = true
+  visualMode.value = 'guarded'
+
+  try {
+    const response = await invokeControlTool(tool, args)
+    if (response.status === 'pending_confirmation' && response.pendingRequest) {
+      setControlPendingRequest(response.pendingRequest)
+      announce(
+        `${response.pendingRequest.prompt} 请在 30 秒内输入 yes / no，或使用 /confirm /cancel。`,
+        'guarded'
+      )
+      return true
+    }
+
+    announce(summarizeControlSuccess(tool, response, options?.label), 'guarded')
+    return true
+  } catch (error) {
+    announce(error instanceof Error ? error.message : '本地控制命令执行失败。', 'guarded')
+    return true
+  } finally {
+    busy.value = false
+    resetVisualModeSoon(900)
+  }
+}
+
+const confirmActiveControlPending = async () => {
+  if (!(await ensureControlServiceReady())) {
+    return
+  }
+
+  const pending = await ensureActiveControlPending()
+  if (!pending || busy.value) {
+    announce('当前没有可确认的本地控制请求。', 'guarded')
+    return
+  }
+
+  busy.value = true
+  visualMode.value = 'guarded'
+
+  try {
+    const response = await confirmControlPending(pending.id)
+    clearControlPendingRequest()
+    await refreshControlPendingRequests()
+    announce(summarizeControlSuccess(pending.tool, response), 'guarded')
+  } catch (error) {
+    announce(error instanceof Error ? error.message : '确认本地控制请求失败。', 'guarded')
+  } finally {
+    busy.value = false
+    resetVisualModeSoon(900)
+  }
+}
+
+const cancelActiveControlPending = async () => {
+  if (!(await ensureControlServiceReady())) {
+    return
+  }
+
+  const pending = await ensureActiveControlPending()
+  if (!pending || busy.value) {
+    announce('当前没有可取消的本地控制请求。', 'guarded')
+    return
+  }
+
+  busy.value = true
+  visualMode.value = 'guarded'
+
+  try {
+    const response = await cancelControlPending(pending.id)
+    clearControlPendingRequest()
+    await refreshControlPendingRequests()
+    announce(summarizeControlSuccess('cancel_pending', response), 'guarded')
+  } catch (error) {
+    announce(error instanceof Error ? error.message : '取消本地控制请求失败。', 'guarded')
+  } finally {
+    busy.value = false
+    resetVisualModeSoon(900)
+  }
+}
+
+const handleControlPendingInput = async (content: string) => {
+  let pending = getControlPendingRequest()
+  const decision = resolvePendingDecisionInput(content)
+
+  if (!pending) {
+    if (decision === 'blocked') {
+      return false
+    }
+
+    try {
+      pending = await ensureActiveControlPending()
+    } catch {
+      return false
+    }
+  }
+
+  if (!pending) {
+    return false
+  }
+
+  if (decision === 'confirm') {
+    await confirmActiveControlPending()
+    return true
+  }
+
+  if (decision === 'cancel') {
+    await cancelActiveControlPending()
+    return true
+  }
+
+  announce('当前有本地控制待确认，请先输入 yes / no，或使用 /confirm /cancel。', 'guarded')
   return true
 }
 
@@ -1347,61 +1689,113 @@ const handleSlashCommand = async (content: string) => {
     return true
   }
 
-  switch (parsed.command.kind) {
-    case 'help':
-      announce(slashHelpText, 'guarded')
-      return true
-    case 'modelCurrent':
-      announce(
-        `当前对话引擎：${activeProviderLabel.value}。\n模型标识：${snapshot.value.provider.model}。`,
-        'guarded'
-      )
-      return true
-    case 'modelList':
-      announce(buildModelListText(), 'guarded')
-      return true
-    case 'modelSet': {
-      const entry = findModelCatalogEntry(parsed.command.target)
-      if (!entry) {
+  try {
+    switch (parsed.command.kind) {
+      case 'help':
+        announce(slashHelpText, 'guarded')
+        return true
+      case 'windowsList':
+        return invokeSlashControlTool('list_windows', {}, { label: '窗口列表' })
+      case 'windowFocus':
+        return invokeSlashControlTool(
+          'focus_window',
+          { title: parsed.command.title, match: 'contains' },
+          { label: parsed.command.title }
+        )
+      case 'clipboardRead':
+        return invokeSlashControlTool('read_clipboard', {}, { label: '剪贴板文本' })
+      case 'controlPendingList': {
+        if (!(await ensureControlServiceReady())) {
+          return true
+        }
+
+        const pendingList = await refreshControlPendingRequests()
+        announce(summarizeControlPendingList(pendingList), 'guarded')
+        return true
+      }
+      case 'controlConfirm':
+        await confirmActiveControlPending()
+        return true
+      case 'controlCancel':
+        await cancelActiveControlPending()
+        return true
+      case 'controlType':
+        return invokeSlashControlTool(
+          'type_text',
+          { text: parsed.command.text },
+          { label: '输入文本' }
+        )
+      case 'controlHotkey':
+        return invokeSlashControlTool(
+          'send_hotkey',
+          { keys: parsed.command.keys },
+          { label: parsed.command.keys.join('+') }
+        )
+      case 'controlClick':
+        return invokeSlashControlTool(
+          'click_at',
+          {
+            x: parsed.command.x,
+            y: parsed.command.y,
+            button: parsed.command.button
+          },
+          { label: `${parsed.command.x}, ${parsed.command.y}` }
+        )
+      case 'modelCurrent':
         announce(
-          `未找到模型“${parsed.command.target}”。\n\n${buildModelListText()}`,
+          `当前对话引擎：${activeProviderLabel.value}。\n模型标识：${snapshot.value.provider.model}。`,
           'guarded'
         )
         return true
-      }
+      case 'modelList':
+        announce(buildModelListText(), 'guarded')
+        return true
+      case 'modelSet': {
+        const entry = findModelCatalogEntry(parsed.command.target)
+        if (!entry) {
+          announce(
+            `未找到模型“${parsed.command.target}”。\n\n${buildModelListText()}`,
+            'guarded'
+          )
+          return true
+        }
 
-      if (isCurrentModelEntry(entry)) {
-        announce(`当前已经是 ${entry.label}。`, 'guarded')
+        if (isCurrentModelEntry(entry)) {
+          announce(`当前已经是 ${entry.label}。`, 'guarded')
+          return true
+        }
+
+        if (pendingApproval.value) {
+          announce('当前还有桌面动作待确认，请先处理那个确认流。', 'guarded')
+          return true
+        }
+
+        beginPendingCommandConfirmation(createModelSetConfirmation(entry))
         return true
       }
+      case 'history':
+        announce(buildHistorySummaryText(), 'guarded')
+        return true
+      case 'clearConversation':
+        if (pendingApproval.value) {
+          announce('当前还有桌面动作待确认，请先处理那个确认流。', 'guarded')
+          return true
+        }
 
-      if (pendingApproval.value) {
-        announce('当前还有桌面动作待确认，请先处理那个确认流。', 'guarded')
+        beginPendingCommandConfirmation(createClearConversationConfirmation())
+        return true
+      case 'openSettings': {
+        const opened = await openDrawer('settings')
+        announce(
+          opened ? '设置窗口已经打开。' : '设置窗口打开失败，请检查当前运行环境。',
+          opened ? 'speaking' : 'guarded'
+        )
         return true
       }
-
-      beginPendingCommandConfirmation(createModelSetConfirmation(entry))
-      return true
     }
-    case 'history':
-      announce(buildHistorySummaryText(), 'guarded')
-      return true
-    case 'clearConversation':
-      if (pendingApproval.value) {
-        announce('当前还有桌面动作待确认，请先处理那个确认流。', 'guarded')
-        return true
-      }
-
-      beginPendingCommandConfirmation(createClearConversationConfirmation())
-      return true
-    case 'openSettings': {
-      const opened = await openDrawer('settings')
-      announce(
-        opened ? '设置窗口已经打开。' : '设置窗口打开失败，请检查当前运行环境。',
-        opened ? 'speaking' : 'guarded'
-      )
-      return true
-    }
+  } catch (error) {
+    announce(error instanceof Error ? error.message : 'Slash command 执行失败。', 'guarded')
+    return true
   }
 }
 
@@ -1422,6 +1816,11 @@ const sendMessage = async (value = messageDraft.value) => {
   clearAutoListenTimer()
   clearBubble()
   resetInputHistoryNavigation()
+
+  if (await handleControlPendingInput(content)) {
+    scheduleAutoListening(260)
+    return
+  }
 
   if (await handlePendingCommandInput(content)) {
     scheduleAutoListening(260)
@@ -1779,6 +2178,7 @@ onBeforeUnmount(() => {
   resetBubbleDismissState()
   clearAutoListenTimer()
   clearPetClampTimer()
+  clearControlPendingTimer()
   clearPendingCommandTimer()
   mediaDevicesCleanup?.()
   snapshotListenerCleanup?.()
@@ -1893,6 +2293,36 @@ onBeforeUnmount(() => {
           @history-up="recallOlderInput"
           @history-down="recallNewerInput"
         />
+      </transition>
+
+      <transition name="composer">
+        <section v-if="controlPendingRequest" class="command-confirm-strip">
+          <div class="command-confirm-copy">
+            <p class="eyebrow dark">Local Control Pending</p>
+            <strong>{{ controlPendingRequest.title }}</strong>
+            <p>{{ controlPendingRequest.prompt }}</p>
+            <span class="command-confirm-hint">输入 yes / no，或使用 /confirm /cancel。30 秒内有效。</span>
+          </div>
+
+          <div class="command-confirm-actions">
+            <button
+              type="button"
+              class="panel-chip muted"
+              :disabled="busy"
+              @click="cancelActiveControlPending"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              class="confirm-button"
+              :disabled="busy"
+              @click="confirmActiveControlPending"
+            >
+              确认
+            </button>
+          </div>
+        </section>
       </transition>
 
       <transition name="composer">

@@ -11,6 +11,9 @@ import type {
   ChatMessage,
   ChatResponse,
   CodexCliStatus,
+  ControlPendingRequest,
+  ControlServiceStatus,
+  ControlToolInvokeResponse,
   OAuthFlowResult,
   OAuthState,
   ProviderConfigInput,
@@ -348,6 +351,7 @@ const BUBBLE_DISMISS_EVENT = 'penguinpal://bubble-dismiss'
 const TODAY_REPLY_HISTORY_EVENT = 'penguinpal://today-reply-history'
 
 let browserSettingsWindow: Window | null = null
+let cachedControlBaseUrl: string | null = null
 
 const normalizeSettingsSection = (value: string | null | undefined): SettingsSection =>
   value === 'actions' ? 'actions' : 'settings'
@@ -564,6 +568,91 @@ const safeInvoke = async <T>(
   }
 
   return invoke<T>(command, args)
+}
+
+const fallbackControlServiceStatus = (): ControlServiceStatus => ({
+  running: false,
+  baseUrl: null,
+  toolCount: 0,
+  message: '当前不是桌宠运行时，本地控制层不可用。'
+})
+
+const normalizeControlResponseMessage = (payload: unknown) => {
+  if (!payload || typeof payload !== 'object') {
+    return '本地控制服务调用失败。'
+  }
+
+  const record = payload as Record<string, unknown>
+  const errorRecord =
+    record.error && typeof record.error === 'object'
+      ? (record.error as Record<string, unknown>)
+      : null
+
+  const candidates = [
+    errorRecord?.message,
+    record.message,
+    errorRecord?.detail
+  ]
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate
+    }
+  }
+
+  return '本地控制服务调用失败。'
+}
+
+const getControlBaseUrl = async () => {
+  if (cachedControlBaseUrl) {
+    return cachedControlBaseUrl
+  }
+
+  const status = await getControlServiceStatus()
+  if (!status.running || !status.baseUrl) {
+    throw new Error(status.message || '本地控制服务未启动。')
+  }
+
+  cachedControlBaseUrl = status.baseUrl
+  return cachedControlBaseUrl
+}
+
+const controlFetchJson = async <T>(path: string, init?: RequestInit): Promise<T> => {
+  if (typeof window === 'undefined' || typeof window.fetch !== 'function') {
+    throw new Error('当前环境不支持本地控制请求。')
+  }
+
+  const baseUrl = await getControlBaseUrl()
+  let response: Response
+  try {
+    response = await window.fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        ...(init?.headers ?? {})
+      }
+    })
+  } catch (error) {
+    cachedControlBaseUrl = null
+    throw normalizeRuntimeError(error)
+  }
+
+  const raw = await response.text()
+  const payload = raw ? (JSON.parse(raw) as unknown) : null
+  if (!response.ok) {
+    throw new Error(normalizeControlResponseMessage(payload))
+  }
+
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'status' in payload &&
+    (payload as Record<string, unknown>).status === 'error'
+  ) {
+    throw new Error(normalizeControlResponseMessage(payload))
+  }
+
+  return payload as T
 }
 
 const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapshot => ({
@@ -1158,6 +1247,64 @@ export const getCodexCliStatus = async (): Promise<CodexCliStatus> => {
     rethrowIfDesktopRuntime(error)
     return fallbackCodexStatus()
   }
+}
+
+export const getControlServiceStatus = async (): Promise<ControlServiceStatus> => {
+  try {
+    const status = await safeInvoke<ControlServiceStatus>('get_control_service_status')
+    cachedControlBaseUrl = status.running ? status.baseUrl : null
+    return status
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    cachedControlBaseUrl = null
+    return fallbackControlServiceStatus()
+  }
+}
+
+export const invokeControlTool = async (
+  tool: string,
+  args: Record<string, unknown>
+): Promise<ControlToolInvokeResponse> => {
+  if (!isTauriRuntime()) {
+    throw new Error(fallbackControlServiceStatus().message)
+  }
+
+  return controlFetchJson<ControlToolInvokeResponse>('/v1/tools/invoke', {
+    method: 'POST',
+    body: JSON.stringify({ tool, args })
+  })
+}
+
+export const listControlPending = async (): Promise<ControlPendingRequest[]> => {
+  if (!isTauriRuntime()) {
+    return []
+  }
+
+  return controlFetchJson<ControlPendingRequest[]>('/v1/pending')
+}
+
+export const confirmControlPending = async (
+  pendingId: string
+): Promise<ControlToolInvokeResponse> => {
+  if (!isTauriRuntime()) {
+    throw new Error(fallbackControlServiceStatus().message)
+  }
+
+  return controlFetchJson<ControlToolInvokeResponse>(`/v1/pending/${pendingId}/confirm`, {
+    method: 'POST'
+  })
+}
+
+export const cancelControlPending = async (
+  pendingId: string
+): Promise<ControlToolInvokeResponse> => {
+  if (!isTauriRuntime()) {
+    throw new Error(fallbackControlServiceStatus().message)
+  }
+
+  return controlFetchJson<ControlToolInvokeResponse>(`/v1/pending/${pendingId}/cancel`, {
+    method: 'POST'
+  })
 }
 
 export const startCodexCliLogin = async (): Promise<CodexCliStatus> => {

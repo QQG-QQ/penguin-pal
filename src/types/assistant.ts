@@ -170,6 +170,43 @@ export interface ReplyHistoryEntry {
   assistantReply: string
 }
 
+export interface ControlServiceStatus {
+  running: boolean
+  baseUrl: string | null
+  toolCount: number
+  message: string
+}
+
+export interface ControlErrorPayload {
+  code: string
+  message: string
+  detail?: string | null
+  retryable: boolean
+}
+
+export type ControlRiskLevel = 'readOnly' | 'writeLow' | 'writeHigh'
+
+export interface ControlPendingRequest {
+  id: string
+  tool: string
+  title: string
+  prompt: string
+  preview: Record<string, unknown>
+  args: Record<string, unknown>
+  createdAt: number
+  expiresAt: number
+  minimumPermissionLevel: number
+  riskLevel: ControlRiskLevel
+}
+
+export interface ControlToolInvokeResponse {
+  status: 'success' | 'pending_confirmation' | 'error'
+  result?: Record<string, unknown> | unknown[] | null
+  message?: string | null
+  pendingRequest?: ControlPendingRequest | null
+  error?: ControlErrorPayload | null
+}
+
 export interface PetLayoutMetrics {
   anchorX: number
   anchorY: number
