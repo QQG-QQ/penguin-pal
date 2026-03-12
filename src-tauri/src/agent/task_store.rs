@@ -15,12 +15,6 @@ pub fn replace_active_task(app: &AppHandle, next_task: Option<AgentTaskRun>) -> 
     Ok(())
 }
 
-pub fn take_active_task(app: &AppHandle) -> Result<Option<AgentTaskRun>, String> {
-    let state: State<'_, AgentTaskState> = app.state();
-    let mut task = state.active_task()?;
-    Ok(task.take())
-}
-
 pub fn take_task_waiting_on_pending(
     app: &AppHandle,
     pending_id: &str,

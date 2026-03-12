@@ -1,5 +1,7 @@
 use serde_json::json;
 
+use crate::control::windows::adapters::{browser, notepad, wechat};
+
 use super::types::{AgentPlan, AgentRoute, AgentToolStep};
 
 const CONTROL_HINTS: &[&str] = &[
@@ -109,6 +111,10 @@ fn parse_single_step_control(input: &str) -> Option<AgentPlan> {
 
 fn parse_focus_and_type(input: &str) -> Option<AgentPlan> {
     let (window_title, text) = parse_window_and_inline_text(input)?;
+    if is_wechat_title(&window_title) {
+        return Some(wechat::build_focus_and_draft_plan(&text));
+    }
+
     Some(plan(
         format!("切到 {window_title} 并输入文本"),
         vec![
@@ -131,22 +137,7 @@ fn parse_open_notepad_and_type(input: &str) -> Option<AgentPlan> {
     }
 
     let text = parse_inline_text_after_connector(input)?;
-    Some(plan(
-        "打开记事本并输入文本",
-        vec![
-            step("open_app", "打开记事本", json!({ "name": "notepad" })),
-            step("list_windows", "刷新窗口列表", json!({})),
-            step(
-                "focus_window",
-                "切到记事本窗口",
-                json!({
-                    "titleCandidates": ["Notepad", "记事本"],
-                    "match": "contains",
-                }),
-            ),
-            step("type_text", "输入文本", json!({ "text": text })),
-        ],
-    ))
+    Some(notepad::build_open_and_type_plan(&text))
 }
 
 fn parse_paste_clipboard(input: &str) -> Option<AgentPlan> {
@@ -200,22 +191,7 @@ fn parse_focus_browser_and_hotkey(input: &str) -> Option<AgentPlan> {
         return None;
     }
 
-    Some(plan(
-        "切到浏览器并按 Ctrl+L",
-        vec![
-            step("list_windows", "列出窗口", json!({})),
-            step(
-                "focus_window",
-                "切到浏览器窗口",
-                json!({
-                    "windowCategory": "browser",
-                    "titleCandidates": ["Chrome", "Edge", "Firefox", "浏览器"],
-                    "match": "contains",
-                }),
-            ),
-            step("send_hotkey", "发送 Ctrl+L", json!({ "keys": ["CTRL", "L"] })),
-        ],
-    ))
+    Some(browser::build_focus_and_ctrl_l_plan())
 }
 
 fn contains_any(input: &str, tokens: &[&str]) -> bool {
@@ -390,4 +366,9 @@ fn parse_hotkey(input: &str) -> Option<Vec<String>> {
     }
 
     None
+}
+
+fn is_wechat_title(title: &str) -> bool {
+    let lowered = title.trim().to_lowercase();
+    lowered.contains("微信") || lowered.contains("wechat")
 }

@@ -1,1 +1,3 @@
-// Reserved for future software-specific adapters such as WeChat or VS Code.
+pub mod browser;
+pub mod notepad;
+pub mod wechat;

@@ -11,7 +11,10 @@ use crate::{
 
 use super::{
     task_store,
-    types::{is_agent_tool_allowed, AgentPlan, AgentTaskProgress, AgentTaskRun, AgentToolStep},
+    types::{
+        is_agent_tool_allowed, AgentPlan, AgentTaskProgress, AgentTaskRun, AgentTaskStatus,
+        AgentToolStep,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -61,33 +64,36 @@ pub fn confirm_pending(app: &AppHandle, pending_id: &str) -> Result<ToolInvokeRe
             result,
         }),
     )?;
-    let response = execution_to_response(response);
-    if response.status == "error" {
-        return Err(
-            response
-                .message
-                .clone()
-                .unwrap_or_else(|| "桌面任务在确认后执行失败。".to_string()),
-        );
-    }
-
-    Ok(response)
+    Ok(execution_to_response(response))
 }
 
 pub fn cancel_pending(app: &AppHandle, pending_id: &str) -> Result<ToolInvokeResponse, String> {
     let matched_task = task_store::take_task_waiting_on_pending(app, pending_id)?;
     let cancelled = control_router::cancel(app, pending_id).map_err(|error| error.to_string())?;
 
-    let Some(task) = matched_task else {
+    let Some(mut task) = matched_task else {
         return Ok(cancelled);
     };
+
+    task.waiting_pending_id = None;
+    task.waiting_step_index = None;
+    task.updated_at = now_millis();
 
     let mut lines = task.completed_notes.clone();
     lines.push(format!("任务“{}”已取消。", task.task_title));
 
     Ok(ToolInvokeResponse {
         status: "success".to_string(),
-        result: cancelled.result,
+        result: Some(json!({
+            "cancelled": true,
+            "task": build_task_progress(
+                &task,
+                AgentTaskStatus::Cancelled,
+                task.next_step_index.max(1),
+                None,
+                Some("当前多步桌面任务已取消。".to_string()),
+            ),
+        })),
         message: Some(lines.join("\n")),
         pending_request: None,
         error: None,
@@ -264,13 +270,13 @@ fn completed_execution(task: &AgentTaskRun) -> AgentExecutionResult {
         ),
         planned_tools: task.planned_tools(),
         pending_request: None,
-        task: Some(AgentTaskProgress {
-            task_id: task.task_id.clone(),
-            task_title: task.task_title.clone(),
-            step_index: task.step_count(),
-            step_count: task.step_count(),
-            status: super::types::AgentTaskStatus::Completed,
-        }),
+        task: Some(build_task_progress(
+            task,
+            AgentTaskStatus::Completed,
+            task.step_count(),
+            None,
+            Some("任务已完成。".to_string()),
+        )),
     }
 }
 
@@ -280,6 +286,7 @@ fn failed_execution(
     step: &AgentToolStep,
     reason: String,
 ) -> AgentExecutionResult {
+    let failure_reason = reason.clone();
     let mut lines = task.completed_notes.clone();
     lines.push(format!(
         "任务“{}”在第 {}/{} 步失败：{}。\n原因：{}",
@@ -287,7 +294,7 @@ fn failed_execution(
         step_index + 1,
         task.step_count(),
         step_label(step),
-        reason
+        failure_reason
     ));
 
     AgentExecutionResult {
@@ -296,13 +303,13 @@ fn failed_execution(
         detail: reason,
         planned_tools: task.planned_tools(),
         pending_request: None,
-        task: Some(AgentTaskProgress {
-            task_id: task.task_id.clone(),
-            task_title: task.task_title.clone(),
-            step_index: step_index + 1,
-            step_count: task.step_count(),
-            status: super::types::AgentTaskStatus::Failed,
-        }),
+        task: Some(build_task_progress(
+            task,
+            AgentTaskStatus::Failed,
+            step_index + 1,
+            Some(step_label(step)),
+            Some(reason),
+        )),
     }
 }
 
@@ -318,27 +325,59 @@ fn blocked_execution(planned_tools: Vec<String>, message: String) -> AgentExecut
 }
 
 fn execution_to_response(result: AgentExecutionResult) -> ToolInvokeResponse {
-    let is_error = matches!(result.outcome.as_str(), "control_failed" | "control_blocked");
+    let AgentExecutionResult {
+        reply_text,
+        outcome,
+        detail,
+        planned_tools,
+        pending_request,
+        task,
+    } = result;
+
+    let is_error = matches!(outcome.as_str(), "control_failed" | "control_blocked");
+    let payload = if task.is_some() || !planned_tools.is_empty() {
+        Some(json!({
+            "plannedTools": planned_tools,
+            "task": task,
+        }))
+    } else {
+        None
+    };
     ToolInvokeResponse {
         status: if is_error {
             "error".to_string()
-        } else if result.pending_request.is_some() {
+        } else if pending_request.is_some() {
             "pending_confirmation".to_string()
         } else {
             "success".to_string()
         },
-        result: (!is_error).then_some(json!({
-            "plannedTools": result.planned_tools,
-            "task": result.task,
-        })),
-        message: Some(result.reply_text),
-        pending_request: result.pending_request,
+        result: payload,
+        message: Some(reply_text),
+        pending_request,
         error: is_error.then_some(crate::control::types::ControlErrorPayload {
-            code: result.outcome,
-            message: result.detail,
+            code: outcome,
+            message: detail,
             detail: None,
             retryable: false,
         }),
+    }
+}
+
+fn build_task_progress(
+    task: &AgentTaskRun,
+    status: AgentTaskStatus,
+    step_index: usize,
+    step_summary: Option<String>,
+    detail: Option<String>,
+) -> AgentTaskProgress {
+    AgentTaskProgress {
+        task_id: task.task_id.clone(),
+        task_title: task.task_title.clone(),
+        step_index,
+        step_count: task.step_count(),
+        status,
+        step_summary,
+        detail,
     }
 }
 

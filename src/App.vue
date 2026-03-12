@@ -54,6 +54,7 @@ import {
 } from './lib/assistant'
 import type {
   ActionApprovalRequest,
+  AgentTaskProgress,
   AssistantWindowView,
   AiConstraintProfile,
   AssistantSnapshot,
@@ -213,6 +214,7 @@ const codexStatus = ref<CodexCliStatus>(emptyCodexStatus())
 const pendingApproval = ref<ActionApprovalRequest | null>(null)
 const controlPendingRequest = ref<ControlPendingRequest | null>(null)
 const pendingCommandConfirmation = ref<PendingCommandConfirmation | null>(null)
+const agentTaskProgress = ref<AgentTaskProgress | null>(null)
 const approvalPhrase = ref('')
 const approvalChecks = ref<Record<string, boolean>>({})
 const listening = ref(false)
@@ -257,6 +259,45 @@ const isSettingsView = computed(() => windowView.value === 'settings')
 const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWindowView())
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
 const activeProviderLabel = computed(() => providerLabels[snapshot.value.provider.kind])
+const showAgentTaskStrip = computed(() => Boolean(agentTaskProgress.value))
+const agentTaskStatusLabel = computed(() => {
+  const status = agentTaskProgress.value?.status
+  switch (status) {
+    case 'running':
+      return '运行中'
+    case 'waitingConfirmation':
+      return '等待确认'
+    case 'completed':
+      return '已完成'
+    case 'failed':
+      return '失败'
+    case 'cancelled':
+      return '已取消'
+    default:
+      return ''
+  }
+})
+const agentTaskStepLabel = computed(() => {
+  const task = agentTaskProgress.value
+  if (!task) {
+    return ''
+  }
+
+  return `第 ${task.stepIndex}/${task.stepCount} 步`
+})
+const agentTaskToneClass = computed(() => {
+  const status = agentTaskProgress.value?.status
+  switch (status) {
+    case 'completed':
+      return 'task-status-strip success'
+    case 'failed':
+      return 'task-status-strip failure'
+    case 'cancelled':
+      return 'task-status-strip muted'
+    default:
+      return 'task-status-strip'
+  }
+})
 const showComposer = computed(
   () =>
     composerVisible.value ||
@@ -1220,6 +1261,47 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
 
+const asAgentTaskProgress = (value: unknown): AgentTaskProgress | null => {
+  const record = asRecord(value)
+  if (!record) {
+    return null
+  }
+
+  const taskId = typeof record.taskId === 'string' ? record.taskId : ''
+  const taskTitle = typeof record.taskTitle === 'string' ? record.taskTitle : ''
+  const stepIndex = typeof record.stepIndex === 'number' ? record.stepIndex : 0
+  const stepCount = typeof record.stepCount === 'number' ? record.stepCount : 0
+  const rawStatus = typeof record.status === 'string' ? record.status : null
+  const status =
+    rawStatus &&
+    ['running', 'waitingConfirmation', 'completed', 'failed', 'cancelled'].includes(rawStatus)
+      ? (rawStatus as AgentTaskProgress['status'])
+      : null
+
+  if (!taskId || !taskTitle || !stepCount || !status) {
+    return null
+  }
+
+  return {
+    taskId,
+    taskTitle,
+    stepIndex,
+    stepCount,
+    status,
+    stepSummary: typeof record.stepSummary === 'string' ? record.stepSummary : null,
+    detail: typeof record.detail === 'string' ? record.detail : null
+  }
+}
+
+const extractAgentTaskProgress = (response: ControlToolInvokeResponse) => {
+  const record = asRecord(response.result)
+  return asAgentTaskProgress(record?.task)
+}
+
+const setAgentTaskProgress = (nextTask: AgentTaskProgress | null) => {
+  agentTaskProgress.value = nextTask
+}
+
 const buildWindowListText = (result: unknown) => {
   const windows = asArray(result)
     .map((item) => asRecord(item))
@@ -1287,6 +1369,23 @@ const summarizeControlSuccess = (
   }
 }
 
+const summarizeControlOutcome = (
+  tool: string,
+  response: ControlToolInvokeResponse,
+  fallbackLabel?: string
+) => {
+  if (response.status === 'error') {
+    return (
+      response.message?.trim() ||
+      response.error?.detail ||
+      response.error?.message ||
+      '本地控制命令执行失败。'
+    )
+  }
+
+  return summarizeControlSuccess(tool, response, fallbackLabel)
+}
+
 const ensureControlCommandAvailable = () => {
   if (pendingApproval.value) {
     announce('当前还有桌面动作待确认，请先处理那个确认面板。', 'guarded')
@@ -1336,6 +1435,8 @@ const invokeSlashControlTool = async (
 
   try {
     const response = await invokeControlTool(tool, args)
+    setAgentTaskProgress(extractAgentTaskProgress(response))
+
     if (response.status === 'pending_confirmation' && response.pendingRequest) {
       setControlPendingRequest(response.pendingRequest)
       announce(
@@ -1345,7 +1446,8 @@ const invokeSlashControlTool = async (
       return true
     }
 
-    announce(summarizeControlSuccess(tool, response, options?.label), 'guarded')
+    clearControlPendingRequest()
+    announce(summarizeControlOutcome(tool, response, options?.label), 'guarded')
     return true
   } catch (error) {
     announce(error instanceof Error ? error.message : '本地控制命令执行失败。', 'guarded')
@@ -1372,9 +1474,16 @@ const confirmActiveControlPending = async () => {
 
   try {
     const response = await confirmControlPending(pending.id)
-    clearControlPendingRequest()
-    await refreshControlPendingRequests()
-    announce(summarizeControlSuccess(pending.tool, response), 'guarded')
+    setAgentTaskProgress(extractAgentTaskProgress(response))
+
+    if (response.status === 'pending_confirmation' && response.pendingRequest) {
+      setControlPendingRequest(response.pendingRequest)
+    } else {
+      clearControlPendingRequest()
+      await refreshControlPendingRequests()
+    }
+
+    announce(summarizeControlOutcome(pending.tool, response), 'guarded')
   } catch (error) {
     announce(error instanceof Error ? error.message : '确认本地控制请求失败。', 'guarded')
   } finally {
@@ -1399,9 +1508,10 @@ const cancelActiveControlPending = async () => {
 
   try {
     const response = await cancelControlPending(pending.id)
+    setAgentTaskProgress(extractAgentTaskProgress(response))
     clearControlPendingRequest()
     await refreshControlPendingRequests()
-    announce(summarizeControlSuccess('cancel_pending', response), 'guarded')
+    announce(summarizeControlOutcome('cancel_pending', response), 'guarded')
   } catch (error) {
     announce(error instanceof Error ? error.message : '取消本地控制请求失败。', 'guarded')
   } finally {
@@ -1847,8 +1957,11 @@ const sendMessage = async (value = messageDraft.value) => {
     pushInputHistoryLocally(content)
     applySnapshot(response.snapshot)
     await refreshTodayReplyHistory()
+    setAgentTaskProgress(response.agent?.route === 'control' ? (response.agent.task ?? null) : null)
     if (response.agent?.pendingRequest) {
       setControlPendingRequest(response.agent.pendingRequest)
+    } else if (response.agent?.route === 'control') {
+      clearControlPendingRequest()
     }
     announce(response.reply.content, response.agent?.route === 'control' ? 'guarded' : 'speaking')
   } catch (error) {
@@ -2301,6 +2414,22 @@ onBeforeUnmount(() => {
       </transition>
 
       <transition name="composer">
+        <section v-if="showAgentTaskStrip" :class="agentTaskToneClass">
+          <div class="command-confirm-copy">
+            <p class="eyebrow dark">Desktop Task</p>
+            <strong>{{ agentTaskProgress?.taskTitle }}</strong>
+            <p>{{ agentTaskStepLabel }} · {{ agentTaskStatusLabel }}</p>
+            <p v-if="agentTaskProgress?.stepSummary" class="task-step-summary">
+              当前步骤：{{ agentTaskProgress.stepSummary }}
+            </p>
+            <span v-if="agentTaskProgress?.detail" class="command-confirm-hint">
+              {{ agentTaskProgress.detail }}
+            </span>
+          </div>
+        </section>
+      </transition>
+
+      <transition name="composer">
         <section v-if="controlPendingRequest" class="command-confirm-strip">
           <div class="command-confirm-copy">
             <p class="eyebrow dark">Local Control Pending</p>
@@ -2516,6 +2645,29 @@ body {
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
+.task-status-strip {
+  width: min(100%, 304px);
+  padding: 11px 14px;
+  border-radius: 22px;
+  background: rgba(240, 248, 251, 0.92);
+  color: #17384b;
+  box-shadow:
+    0 12px 24px rgba(5, 16, 27, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+
+.task-status-strip.success {
+  background: rgba(231, 247, 239, 0.94);
+}
+
+.task-status-strip.failure {
+  background: rgba(255, 236, 233, 0.95);
+}
+
+.task-status-strip.muted {
+  background: rgba(235, 240, 244, 0.94);
+}
+
 .command-confirm-copy {
   display: grid;
   gap: 4px;
@@ -2534,6 +2686,15 @@ body {
 
 .command-confirm-hint {
   color: rgba(220, 238, 246, 0.78);
+  font-size: 12px;
+}
+
+.task-status-strip .command-confirm-hint {
+  color: #45606f;
+}
+
+.task-step-summary {
+  color: #27485c;
   font-size: 12px;
 }
 

@@ -53,6 +53,10 @@ pub struct AgentTaskProgress {
     pub step_index: usize,
     pub step_count: usize,
     pub status: AgentTaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,12 +149,23 @@ impl AgentTaskRun {
             .waiting_step_index
             .map(|index| index + 1)
             .unwrap_or_else(|| self.next_step_index.saturating_add(1).min(self.step_count().max(1)));
+        let step_summary = self
+            .waiting_step_index
+            .and_then(|index| self.plan.steps.get(index))
+            .and_then(|step| step.summary.clone())
+            .or_else(|| {
+                self.waiting_step_index
+                    .and_then(|index| self.plan.steps.get(index))
+                    .map(|step| step.tool.clone())
+            });
         AgentTaskProgress {
             task_id: self.task_id.clone(),
             task_title: self.task_title.clone(),
             step_index,
             step_count: self.step_count(),
             status: AgentTaskStatus::WaitingConfirmation,
+            step_summary,
+            detail: Some("等待本地控制确认。".to_string()),
         }
     }
 }

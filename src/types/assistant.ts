@@ -128,6 +128,8 @@ export interface AgentTaskProgress {
   stepIndex: number
   stepCount: number
   status: AgentTaskStatus
+  stepSummary?: string | null
+  detail?: string | null
 }
 
 export interface AgentMessageMeta {
