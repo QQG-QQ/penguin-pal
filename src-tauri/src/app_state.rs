@@ -7,6 +7,8 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
+use crate::agent::types::AgentMessageMeta;
+
 pub const HISTORY_LIMIT: usize = 24;
 pub const AUDIT_LIMIT: usize = 12;
 pub const DEFAULT_OAUTH_REDIRECT_URL: &str = "http://127.0.0.1:8976/oauth/callback";
@@ -344,6 +346,8 @@ pub struct ChatResponse {
     pub reply: ChatMessage,
     pub provider_label: String,
     pub snapshot: AssistantSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentMessageMeta>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,3 +1,4 @@
+mod agent;
 mod ai;
 mod app_state;
 mod codex_runtime;
@@ -14,6 +15,7 @@ use std::{process::Command, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
+    agent::router as agent_router,
     ai::{guardrails, memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
@@ -752,37 +754,68 @@ async fn send_chat_message(
         )
     };
 
-    let (reply_text, provider_label, outcome, detail) = match provider::respond(
-        &provider_config,
-        api_key,
-        oauth_access_token,
-        codex_command,
-        codex_home,
-        permission_level,
-        &allowed_actions,
-        &history_window,
-    )
-    .await
-    {
-            Ok((reply, label)) => (
-                reply,
-                label,
-                "ok".to_string(),
-                format!(
-                    "provider={} auth={} model={}",
-                    provider_config.kind.label(),
-                    match provider_config.auth_mode {
-                        AuthMode::ApiKey => "apiKey",
-                        AuthMode::OAuth => "oauth",
-                    },
-                    provider_config.model
-                ),
+    let (reply_text, provider_label, outcome, detail, agent_meta) =
+        match agent_router::maybe_handle_control_message(
+            &app,
+            &provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            permission_level,
+            &allowed_actions,
+            trimmed,
+        )
+        .await
+        {
+            Ok(Some(result)) => (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
             ),
+            Ok(None) => match provider::respond(
+                &provider_config,
+                api_key,
+                oauth_access_token,
+                codex_command,
+                codex_home,
+                permission_level,
+                &allowed_actions,
+                &history_window,
+            )
+            .await
+            {
+                Ok((reply, label)) => (
+                    reply,
+                    label,
+                    "ok".to_string(),
+                    format!(
+                        "provider={} auth={} model={}",
+                        provider_config.kind.label(),
+                        match provider_config.auth_mode {
+                            AuthMode::ApiKey => "apiKey",
+                            AuthMode::OAuth => "oauth",
+                        },
+                        provider_config.model
+                    ),
+                    None,
+                ),
+                Err(error) => (
+                    provider::fallback_reply(&error),
+                    "Safety fallback".to_string(),
+                    "fallback".to_string(),
+                    error,
+                    None,
+                ),
+            },
             Err(error) => (
                 provider::fallback_reply(&error),
                 "Safety fallback".to_string(),
                 "fallback".to_string(),
                 error,
+                None,
             ),
         };
 
@@ -830,6 +863,7 @@ async fn send_chat_message(
         reply: reply_message,
         provider_label,
         snapshot,
+        agent: agent_meta,
     })
 }
 

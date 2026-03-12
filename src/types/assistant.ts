@@ -119,10 +119,19 @@ export interface ProviderConfigInput {
   clearOAuthToken?: boolean
 }
 
+export type AgentRoute = 'chat' | 'control'
+
+export interface AgentMessageMeta {
+  route: AgentRoute
+  plannedTools: string[]
+  pendingRequest?: ControlPendingRequest | null
+}
+
 export interface ChatResponse {
   reply: ChatMessage
   providerLabel: string
   snapshot: AssistantSnapshot
+  agent?: AgentMessageMeta | null
 }
 
 export interface ActionApprovalCheck {

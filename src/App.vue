@@ -1845,7 +1845,10 @@ const sendMessage = async (value = messageDraft.value) => {
     pushInputHistoryLocally(content)
     applySnapshot(response.snapshot)
     await refreshTodayReplyHistory()
-    announce(response.reply.content)
+    if (response.agent?.pendingRequest) {
+      setControlPendingRequest(response.agent.pendingRequest)
+    }
+    announce(response.reply.content, response.agent?.route === 'control' ? 'guarded' : 'speaking')
   } catch (error) {
     announce(error instanceof Error ? error.message : '消息发送失败', 'guarded')
   } finally {

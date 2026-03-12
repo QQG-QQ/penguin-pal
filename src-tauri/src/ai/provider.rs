@@ -102,6 +102,99 @@ pub async fn respond(
     }
 }
 
+pub async fn plan_control_request(
+    provider: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    planner_prompt: &str,
+    user_input: &str,
+) -> Result<String, String> {
+    if matches!(provider.kind, ProviderKind::Mock) {
+        return Err("Mock provider 不支持自然语言桌面代理规划。".to_string());
+    }
+
+    if !provider.allow_network {
+        return Err("当前处于离线安全模式，已阻止外部规划模型调用。".to_string());
+    }
+
+    if matches!(provider.kind, ProviderKind::CodexCli) {
+        let command = codex_command
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "未检测到桌宠内置 Codex 运行时。".to_string())?;
+        let home_root = codex_home
+            .filter(|value| !value.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "当前未初始化桌宠私有 Codex 凭据目录。".to_string())?;
+        let prompt = format!(
+            "{planner_prompt}\n\n当前权限等级：L{permission_level}\n当前白名单动作数：{}\n用户输入：\n{}\n\n只输出 JSON。",
+            allowed_actions.len(),
+            user_input.trim()
+        );
+
+        return async_runtime::spawn_blocking(move || run_codex_exec(&command, &home_root, &prompt))
+            .await
+            .map_err(|error| format!("等待 Codex CLI 规划结果失败：{error}"))?;
+    }
+
+    match provider.kind {
+        ProviderKind::OpenAi => {
+            let credential =
+                credential_for_openai(provider, api_key, oauth_access_token, "OpenAI")?;
+            call_openai_like_prompt(
+                provider,
+                Some(credential.as_str()),
+                planner_prompt,
+                user_input,
+                "https://api.openai.com/v1",
+                "OpenAI",
+            )
+            .await
+        }
+        ProviderKind::Anthropic => {
+            if matches!(provider.auth_mode, AuthMode::OAuth) {
+                return Err(
+                    "Anthropic 当前未接入 OAuth bearer token，这个版本仅支持 API Key。"
+                        .to_string(),
+                );
+            }
+            let key = required_key(api_key, "Anthropic")?;
+            call_anthropic_prompt(provider, &key, planner_prompt, user_input).await
+        }
+        ProviderKind::OpenAiCompatible => {
+            let base_url = provider
+                .base_url
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "http://127.0.0.1:11434/v1".to_string());
+            let credential = match provider.auth_mode {
+                AuthMode::ApiKey => api_key
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string),
+                AuthMode::OAuth => Some(required_oauth_token(
+                    oauth_access_token,
+                    "OpenAI-Compatible",
+                )?),
+            };
+
+            call_openai_like_prompt(
+                provider,
+                credential.as_deref(),
+                planner_prompt,
+                user_input,
+                &base_url,
+                "OpenAI-Compatible",
+            )
+            .await
+        }
+        ProviderKind::Mock | ProviderKind::CodexCli => unreachable!(),
+    }
+}
+
 pub fn fallback_reply(error: &str) -> String {
     format!(
         "外部 AI 调用失败：{}。\n我没有执行任何桌面动作，也不会绕过白名单。你可以检查当前 provider 的登录状态、API Key、模型地址或切回 Mock 模式。",
@@ -298,6 +391,39 @@ async fn call_openai_like(
     Ok((reply, label.to_string()))
 }
 
+async fn call_openai_like_prompt(
+    provider: &ProviderConfig,
+    credential: Option<&str>,
+    planner_prompt: &str,
+    user_input: &str,
+    base_url: &str,
+    label: &str,
+) -> Result<String, String> {
+    let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let client = Client::new();
+    let payload = json!({
+        "model": provider.model,
+        "temperature": 0.0,
+        "messages": build_openai_messages_from_texts(planner_prompt, user_input),
+    });
+
+    let mut request = client.post(endpoint).json(&payload);
+    if let Some(token) = credential {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error| error.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("{label} 规划请求失败({status}): {body}"));
+    }
+
+    let value: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+    extract_openai_content(&value).ok_or_else(|| format!("{label} 规划返回内容为空或格式不兼容"))
+}
+
 async fn call_anthropic(
     provider: &ProviderConfig,
     api_key: &str,
@@ -348,6 +474,52 @@ async fn call_anthropic(
     Ok((reply, "Anthropic".to_string()))
 }
 
+async fn call_anthropic_prompt(
+    provider: &ProviderConfig,
+    api_key: &str,
+    planner_prompt: &str,
+    user_input: &str,
+) -> Result<String, String> {
+    let endpoint = provider
+        .base_url
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
+    let client = Client::new();
+    let payload = json!({
+        "model": provider.model,
+        "system": planner_prompt,
+        "max_tokens": 512,
+        "messages": build_anthropic_messages_from_texts(user_input),
+    });
+
+    let response = client
+        .post(endpoint)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let status = response.status();
+    let body = response.text().await.map_err(|error| error.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("Anthropic 规划请求失败({status}): {body}"));
+    }
+
+    let value: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+    value
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+        .map(|text| text.to_string())
+        .ok_or_else(|| "Anthropic 规划返回内容为空或格式不兼容".to_string())
+}
+
 fn build_openai_messages(system_prompt: &str, history: &[ChatMessage]) -> Vec<Value> {
     let mut messages = Vec::new();
 
@@ -368,6 +540,24 @@ fn build_openai_messages(system_prompt: &str, history: &[ChatMessage]) -> Vec<Va
     messages
 }
 
+fn build_openai_messages_from_texts(system_prompt: &str, user_input: &str) -> Vec<Value> {
+    let mut messages = Vec::new();
+
+    if !system_prompt.trim().is_empty() {
+        messages.push(json!({
+            "role": "system",
+            "content": system_prompt,
+        }));
+    }
+
+    messages.push(json!({
+        "role": "user",
+        "content": user_input,
+    }));
+
+    messages
+}
+
 fn build_anthropic_messages(history: &[ChatMessage]) -> Vec<Value> {
     history
         .iter()
@@ -379,6 +569,13 @@ fn build_anthropic_messages(history: &[ChatMessage]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn build_anthropic_messages_from_texts(user_input: &str) -> Vec<Value> {
+    vec![json!({
+        "role": "user",
+        "content": user_input,
+    })]
 }
 
 fn extract_openai_content(value: &Value) -> Option<String> {
