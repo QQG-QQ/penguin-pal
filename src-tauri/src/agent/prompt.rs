@@ -37,3 +37,13 @@ pub fn build_planner_prompt(tools: &[ControlToolDefinition]) -> String {
         9. 如果请求缺少必要参数，仍输出 route=chat，不要猜测隐私内容或代用户补全文本。"
     )
 }
+
+pub fn build_screen_planner_prompt(tools: &[ControlToolDefinition]) -> String {
+    format!(
+        "{}\n\
+        10. 在规划前必须先参考我提供的 screen context。不要忽略当前活动窗口、可见控件和上下文警告。\n\
+        11. 如果 screen context 显示当前界面信息不足，不要盲目规划点击或输入；优先输出 route=chat 或只规划更保守的窗口级动作。\n\
+        12. 如果当前活动窗口已经提供了足够的 UIA 线索，优先利用这些线索决定最小步骤。",
+        build_planner_prompt(tools)
+    )
+}

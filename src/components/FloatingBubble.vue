@@ -18,6 +18,7 @@ const props = defineProps<{
 }>()
 
 const bubbleRef = ref<HTMLElement | null>(null)
+const bubbleContentRef = ref<HTMLElement | null>(null)
 const bubbleMaxWidth = ref(320)
 const bubbleMaxHeight = ref(220)
 const placement = ref<'above' | 'upper-left' | 'upper-right'>('above')
@@ -62,13 +63,14 @@ const syncInteractionState = async (active: boolean) => {
 
 const measureBubbleLayout = (): BubbleLayoutMetrics | null => {
   const bubble = bubbleRef.value
-  if (!bubble) {
+  const bubbleContent = bubbleContentRef.value
+  if (!bubble || !bubbleContent) {
     return null
   }
 
   const rect = bubble.getBoundingClientRect()
-  const scrollHeight = Math.ceil(bubble.scrollHeight)
-  const clientHeight = Math.ceil(bubble.clientHeight)
+  const scrollHeight = Math.ceil(bubbleContent.scrollHeight)
+  const clientHeight = Math.ceil(bubbleContent.clientHeight)
 
   return {
     messageId: props.state.messageId,
@@ -152,8 +154,8 @@ const syncBubbleWindow = async () => {
     return
   }
 
-  if (pinned.value !== metrics.isScrollable) {
-    pinned.value = metrics.isScrollable
+  if (!pinned.value && metrics.isScrollable) {
+    pinned.value = true
     await waitForStableLayout()
     metrics = measureBubbleLayout()
     if (!metrics) {
@@ -227,8 +229,6 @@ onBeforeUnmount(() => {
       @mouseleave="handlePointerLeave"
       @focusin="handlePointerEnter"
       @focusout="handlePointerLeave"
-      @wheel.passive="handleScrollActivity"
-      @scroll.passive="handleScrollActivity"
     >
       <button
         v-if="pinned"
@@ -241,7 +241,14 @@ onBeforeUnmount(() => {
       >
         ×
       </button>
-      <p>{{ state.text }}</p>
+      <div
+        ref="bubbleContentRef"
+        class="bubble-content"
+        @wheel.passive="handleScrollActivity"
+        @scroll.passive="handleScrollActivity"
+      >
+        <p>{{ state.text }}</p>
+      </div>
     </div>
   </div>
 </template>
@@ -259,21 +266,25 @@ onBeforeUnmount(() => {
   display: block;
   width: max-content;
   max-width: var(--bubble-max-width, 320px);
-  max-height: var(--bubble-max-height, 220px);
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: visible;
   pointer-events: auto;
   padding: 12px 16px;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.98);
   color: #17384b;
   box-shadow: 0 10px 24px rgba(7, 18, 30, 0.1);
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
 }
 
 .floating-bubble.has-close {
   padding-right: 44px;
+}
+
+.bubble-content {
+  max-height: calc(var(--bubble-max-height, 220px) - 18px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .floating-bubble::after {
@@ -333,7 +344,7 @@ onBeforeUnmount(() => {
   transform: translateY(-50%) rotate(45deg);
 }
 
-.floating-bubble p {
+.bubble-content p {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;

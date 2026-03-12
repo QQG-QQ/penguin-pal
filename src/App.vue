@@ -97,8 +97,15 @@ const actionCommandMap: Record<string, string[]> = {
 
 const localDirectActionIds = new Set(['focus_window', 'show_window'])
 
-const PET_WINDOW_COLLAPSED = { width: 248, height: 252 }
-const PET_WINDOW_EXPANDED = { width: 312, height: 340 }
+const PET_WINDOW_BASE = { width: 252, height: 278 }
+const PET_WINDOW_PANEL_WIDTH = 320
+const PET_WINDOW_PANEL_GAP = 8
+const PET_WINDOW_PANEL_HEIGHTS = {
+  composer: 88,
+  task: 112,
+  controlPending: 130,
+  commandPending: 122
+} as const
 const hiddenBubbleState = (): BubbleWindowState => ({
   messageId: 0,
   visible: false,
@@ -249,6 +256,7 @@ let speechPlaybackActive = false
 let petClampTimer: number | null = null
 let controlPendingTimer: number | null = null
 let pendingCommandTimer: number | null = null
+let agentTaskTimer: number | null = null
 let petClampInFlight = false
 let inputHistoryCursor = -1
 let draftBeforeHistoryNavigation = ''
@@ -260,6 +268,8 @@ const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWin
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
 const activeProviderLabel = computed(() => providerLabels[snapshot.value.provider.kind])
 const showAgentTaskStrip = computed(() => Boolean(agentTaskProgress.value))
+const hasControlPending = computed(() => Boolean(controlPendingRequest.value))
+const hasPendingCommand = computed(() => Boolean(pendingCommandConfirmation.value))
 const agentTaskStatusLabel = computed(() => {
   const status = agentTaskProgress.value?.status
   switch (status) {
@@ -296,6 +306,27 @@ const agentTaskToneClass = computed(() => {
       return 'task-status-strip muted'
     default:
       return 'task-status-strip'
+  }
+})
+const petWindowFrame = computed(() => {
+  const panelCount = [
+    showComposer.value,
+    showAgentTaskStrip.value,
+    hasControlPending.value,
+    hasPendingCommand.value
+  ].filter(Boolean).length
+
+  const height =
+    PET_WINDOW_BASE.height +
+    (showComposer.value ? PET_WINDOW_PANEL_HEIGHTS.composer : 0) +
+    (showAgentTaskStrip.value ? PET_WINDOW_PANEL_HEIGHTS.task : 0) +
+    (hasControlPending.value ? PET_WINDOW_PANEL_HEIGHTS.controlPending : 0) +
+    (hasPendingCommand.value ? PET_WINDOW_PANEL_HEIGHTS.commandPending : 0) +
+    panelCount * PET_WINDOW_PANEL_GAP
+
+  return {
+    width: panelCount > 0 ? PET_WINDOW_PANEL_WIDTH : PET_WINDOW_BASE.width,
+    height
   }
 })
 const showComposer = computed(
@@ -746,7 +777,7 @@ const syncPetWindowFrame = async () => {
   }
 
   const appWindow = getCurrentWindow()
-  const nextSize = showComposer.value ? PET_WINDOW_EXPANDED : PET_WINDOW_COLLAPSED
+  const nextSize = petWindowFrame.value
   const position = await appWindow.outerPosition()
   const size = await appWindow.outerSize()
 
@@ -946,6 +977,13 @@ const clearControlPendingTimer = () => {
   }
 }
 
+const clearAgentTaskTimer = () => {
+  if (agentTaskTimer !== null) {
+    window.clearTimeout(agentTaskTimer)
+    agentTaskTimer = null
+  }
+}
+
 const clearControlPendingRequest = () => {
   clearControlPendingTimer()
   controlPendingRequest.value = null
@@ -958,6 +996,13 @@ const handleControlPendingExpiry = () => {
   }
 
   clearControlPendingRequest()
+  if (agentTaskProgress.value?.status === 'waitingConfirmation') {
+    setAgentTaskProgress({
+      ...agentTaskProgress.value,
+      status: 'failed',
+      detail: '等待本地控制确认已超时，任务已停止。'
+    })
+  }
   announce('这次本地控制确认已超时，请重新输入命令。', 'guarded')
 }
 
@@ -1299,7 +1344,27 @@ const extractAgentTaskProgress = (response: ControlToolInvokeResponse) => {
 }
 
 const setAgentTaskProgress = (nextTask: AgentTaskProgress | null) => {
+  clearAgentTaskTimer()
   agentTaskProgress.value = nextTask
+
+  if (!nextTask) {
+    return
+  }
+
+  if (nextTask.status === 'completed' || nextTask.status === 'cancelled') {
+    agentTaskTimer = window.setTimeout(() => {
+      agentTaskProgress.value = null
+      void syncPetWindowFrame().then(() => syncBubbleWindow())
+    }, 4200)
+    return
+  }
+
+  if (nextTask.status === 'failed') {
+    agentTaskTimer = window.setTimeout(() => {
+      agentTaskProgress.value = null
+      void syncPetWindowFrame().then(() => syncBubbleWindow())
+    }, 7200)
+  }
 }
 
 const buildWindowListText = (result: unknown) => {
@@ -2245,14 +2310,28 @@ watch(showComposer, (visible, previousVisible) => {
     return
   }
 
-  void syncPetWindowFrame().then(() => syncBubbleWindow())
-
   if (visible && !previousVisible) {
     void nextTick(() => {
       inputBoxRef.value?.focusComposer()
     })
   }
 })
+
+watch(
+  () => [
+    showComposer.value,
+    showAgentTaskStrip.value,
+    hasControlPending.value,
+    hasPendingCommand.value
+  ],
+  () => {
+    if (isSettingsView.value || isBubbleView.value) {
+      return
+    }
+
+    void syncPetWindowFrame().then(() => syncBubbleWindow())
+  }
+)
 
 watch(
   () => bubbleText.value,
@@ -2298,6 +2377,7 @@ onBeforeUnmount(() => {
   clearPetClampTimer()
   clearControlPendingTimer()
   clearPendingCommandTimer()
+  clearAgentTaskTimer()
   mediaDevicesCleanup?.()
   snapshotListenerCleanup?.()
   sectionListenerCleanup?.()

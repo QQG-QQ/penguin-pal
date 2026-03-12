@@ -26,7 +26,8 @@ pub async fn plan_with_model(
         .filter(|tool| is_agent_tool_allowed(&tool.name))
         .collect::<Vec<_>>();
     let prompt = prompt::build_planner_prompt(&allowed_tools);
-    let raw = provider::plan_control_request(
+
+    plan_with_model_input(
         provider_config,
         api_key,
         oauth_access_token,
@@ -37,12 +38,37 @@ pub async fn plan_with_model(
         &prompt,
         user_input,
     )
+    .await
+}
+
+pub async fn plan_with_model_input(
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    planner_prompt: &str,
+    planner_input: &str,
+) -> Result<AgentPlan, String> {
+    let raw = provider::plan_control_request(
+        provider_config,
+        api_key,
+        oauth_access_token,
+        codex_command,
+        codex_home,
+        permission_level,
+        allowed_actions,
+        planner_prompt,
+        planner_input,
+    )
     .await?;
 
     parse_plan(&raw)
 }
 
-fn parse_plan(raw: &str) -> Result<AgentPlan, String> {
+pub(crate) fn parse_plan(raw: &str) -> Result<AgentPlan, String> {
     let payload = extract_json(raw)
         .ok_or_else(|| format!("规划模型没有返回可解析的 JSON：{}", raw.trim()))?;
     let plan: AgentPlan =

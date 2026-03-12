@@ -3,8 +3,11 @@ pub mod intent;
 pub mod planner;
 pub mod prompt;
 pub mod router;
+pub mod screen_context;
+pub mod screen_planner;
 pub mod task_store;
 pub mod types;
+pub mod vision_context;
 
 use std::sync::Mutex;
 

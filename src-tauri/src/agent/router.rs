@@ -8,7 +8,8 @@ use crate::{
 use super::{
     executor,
     intent,
-    planner,
+    screen_context,
+    screen_planner,
     types::{AgentMessageMeta, AgentRoute},
 };
 
@@ -37,10 +38,12 @@ pub async fn maybe_handle_control_message(
         return Ok(None);
     }
 
-    let plan = if let Some(plan) = intent::parse_simple_control_plan(trimmed) {
-        Some(plan)
-    } else if intent::looks_like_control_request(trimmed) {
-        match planner::plan_with_model(
+    let looks_control = intent::parse_simple_control_plan(trimmed).is_some()
+        || intent::looks_like_control_request(trimmed);
+
+    let plan = if looks_control {
+        let screen_context = screen_context::describe_current_screen(app);
+        let plan_result = screen_planner::plan_from_screen_context(
             provider_config,
             api_key,
             oauth_access_token,
@@ -49,14 +52,16 @@ pub async fn maybe_handle_control_message(
             permission_level,
             allowed_actions,
             trimmed,
+            &screen_context,
         )
-        .await
-        {
+        .await;
+
+        match plan_result {
             Ok(plan) => Some(plan),
             Err(error) => {
                 return Ok(Some(AgentHandleResult {
                     reply_text: format!(
-                        "这句更像桌面控制请求，但我这次没能生成安全动作计划。请换成更明确的说法，例如“打开记事本并输入 hello”或“切到微信并输入你好”。\n\n详细原因：{}",
+                        "这句更像桌面控制请求，但我这次没能基于当前 screen context 生成安全动作计划。请换成更明确的说法，例如“打开记事本并输入 hello”或“切到微信并输入你好”。\n\n详细原因：{}",
                         error
                     ),
                     provider_label: "Desktop Agent".to_string(),

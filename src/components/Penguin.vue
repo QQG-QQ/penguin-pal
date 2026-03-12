@@ -150,11 +150,13 @@ const cancelPointerInteraction = () => {
 .pet-shell {
   position: relative;
   width: 100%;
-  max-width: 244px;
-  height: 248px;
+  max-width: 248px;
+  height: 264px;
   display: flex;
   align-items: flex-end;
   justify-content: center;
+  padding-top: 10px;
+  box-sizing: border-box;
   overflow: visible;
   user-select: none;
   -webkit-user-select: none;
@@ -208,7 +210,7 @@ const cancelPointerInteraction = () => {
 .pet-body {
   position: relative;
   z-index: 1;
-  width: min(224px, calc(100% - 10px));
+  width: min(228px, calc(100% - 8px));
   display: flex;
   justify-content: center;
   align-items: flex-end;
