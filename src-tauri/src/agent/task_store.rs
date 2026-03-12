@@ -1,4 +1,4 @@
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use super::{types::AgentTaskRun, AgentTaskState};
 
