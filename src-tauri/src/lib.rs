@@ -154,16 +154,16 @@ fn get_control_service_status(app: AppHandle) -> Result<ControlServiceStatus, St
 }
 
 #[tauri::command]
-fn confirm_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
-    if let Some(response) = test_agent::router::confirm_control_pending(&app, &pending_id)? {
+async fn confirm_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
+    if let Some(response) = test_agent::router::confirm_control_pending(&app, &pending_id).await? {
         return Ok(response);
     }
     agent_router::confirm_control_pending(&app, &pending_id)
 }
 
 #[tauri::command]
-fn cancel_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
-    if let Some(response) = test_agent::router::cancel_control_pending(&app, &pending_id)? {
+async fn cancel_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
+    if let Some(response) = test_agent::router::cancel_control_pending(&app, &pending_id).await? {
         return Ok(response);
     }
     agent_router::cancel_control_pending(&app, &pending_id)

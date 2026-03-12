@@ -45,7 +45,7 @@ pub async fn maybe_handle_test_message(
         }));
     };
 
-    let result = harness::execute_request(app, request)?;
+    let result = harness::execute_request(app, request).await?;
     Ok(Some(TestAgentHandleResult {
         reply_text: result.reply_text,
         provider_label: "Test Agent".to_string(),
@@ -69,16 +69,16 @@ pub async fn maybe_handle_test_message(
     }))
 }
 
-pub fn confirm_control_pending(
+pub async fn confirm_control_pending(
     app: &AppHandle,
     pending_id: &str,
 ) -> Result<Option<ToolInvokeResponse>, String> {
-    harness::confirm_pending(app, pending_id)
+    harness::confirm_pending(app, pending_id).await
 }
 
-pub fn cancel_control_pending(
+pub async fn cancel_control_pending(
     app: &AppHandle,
     pending_id: &str,
 ) -> Result<Option<ToolInvokeResponse>, String> {
-    harness::cancel_pending(app, pending_id)
+    harness::cancel_pending(app, pending_id).await
 }

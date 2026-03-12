@@ -41,7 +41,7 @@ struct CaseContext {
     last_result: Option<Value>,
 }
 
-pub fn execute_request(
+pub async fn execute_request(
     app: &AppHandle,
     request: TestRunRequest,
 ) -> Result<HarnessExecutionResult, String> {
@@ -93,10 +93,10 @@ pub fn execute_request(
         allow_supplementary_rerun: request.allow_supplementary_rerun,
     };
 
-    continue_run(app, &mut state, None)
+    continue_run(app, &mut state, None).await
 }
 
-pub fn confirm_pending(
+pub async fn confirm_pending(
     app: &AppHandle,
     pending_id: &str,
 ) -> Result<Option<ToolInvokeResponse>, String> {
@@ -131,11 +131,11 @@ pub fn confirm_pending(
     run.waiting_pending_id = None;
     run.current_case_index = waiting_index + 1;
 
-    let result = continue_run(app, &mut run, Some(current_case))?;
+    let result = continue_run(app, &mut run, Some(current_case)).await?;
     Ok(Some(to_tool_response(result)))
 }
 
-pub fn cancel_pending(
+pub async fn cancel_pending(
     app: &AppHandle,
     pending_id: &str,
 ) -> Result<Option<ToolInvokeResponse>, String> {
@@ -164,7 +164,7 @@ pub fn cancel_pending(
     }))
 }
 
-fn continue_run(
+async fn continue_run(
     app: &AppHandle,
     state: &mut TestRunState,
     resumed_case: Option<TestCase>,
@@ -172,25 +172,27 @@ fn continue_run(
     let mut case_context = CaseContext::default();
 
     if let Some(case) = resumed_case {
-        execute_case(app, state, &case, &mut case_context, true)?;
+        execute_case(app, state, &case, &mut case_context, true).await?;
     }
 
     while state.current_case_index < state.selected_cases.len() {
         let case = state.selected_cases[state.current_case_index].clone();
-        if let Some(result) = execute_case(app, state, &case, &mut CaseContext::default(), false)? {
+        if let Some(result) =
+            execute_case(app, state, &case, &mut CaseContext::default(), false).await?
+        {
             return Ok(result);
         }
         state.current_case_index += 1;
     }
 
     if state.allow_supplementary_rerun {
-        rerun_failed_cases(app, state)?;
+        rerun_failed_cases(app, state).await?;
     }
 
     finalize_report(app, state)
 }
 
-fn execute_case(
+async fn execute_case(
     app: &AppHandle,
     state: &mut TestRunState,
     case: &TestCase,
@@ -234,7 +236,7 @@ fn execute_case(
     };
 
     for (index, step) in case.steps.iter().enumerate().skip(start_step) {
-        match execute_step(app, case_context, step) {
+        match execute_step(app, case_context, step).await {
             Ok(StepOutcome::Done { payload, detail }) => {
                 case_result.step_results.push(super::types::TestStepResult {
                     index: index + 1,
@@ -321,7 +323,7 @@ fn execute_case(
     Ok(None)
 }
 
-fn rerun_failed_cases(app: &AppHandle, state: &mut TestRunState) -> Result<(), String> {
+async fn rerun_failed_cases(app: &AppHandle, state: &mut TestRunState) -> Result<(), String> {
     let failed_cases = state
         .report
         .failure_items
@@ -351,7 +353,7 @@ fn rerun_failed_cases(app: &AppHandle, state: &mut TestRunState) -> Result<(), S
         let probes = retry::supplementary_probes(&case, &failure);
         let mut probe_context = CaseContext::default();
         for probe in &probes {
-            let _ = execute_step(app, &mut probe_context, probe);
+            let _ = execute_step(app, &mut probe_context, probe).await;
         }
 
         if let Some(existing) = state
@@ -367,7 +369,7 @@ fn rerun_failed_cases(app: &AppHandle, state: &mut TestRunState) -> Result<(), S
 
         if let Some(position) = state.selected_cases.iter().position(|item| item.id == case.id) {
             state.current_case_index = position;
-            let _ = execute_case(app, state, &case, &mut CaseContext::default(), false)?;
+            let _ = execute_case(app, state, &case, &mut CaseContext::default(), false).await?;
         }
     }
 
@@ -384,7 +386,7 @@ enum StepOutcome {
     },
 }
 
-fn execute_step(
+async fn execute_step(
     app: &AppHandle,
     case_context: &mut CaseContext,
     step: &TestStep,
@@ -423,6 +425,7 @@ fn execute_step(
         }
         TestStep::CaptureScreenContext { .. } => {
             let screen_context = capture_screen_context(app)
+                .await
                 .map_err(|error| (TestFailureStage::StepExecute, error))?;
             case_context.screen_context = Some(screen_context.clone());
             Ok(StepOutcome::Done {
@@ -433,7 +436,7 @@ fn execute_step(
     }
 }
 
-fn capture_screen_context(app: &AppHandle) -> Result<Value, String> {
+async fn capture_screen_context(app: &AppHandle) -> Result<Value, String> {
     let state: tauri::State<'_, Mutex<RuntimeState>> = app.state();
     let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
     let provider = runtime.provider.clone();
@@ -443,11 +446,7 @@ fn capture_screen_context(app: &AppHandle) -> Result<Value, String> {
     let vision_api_key = runtime.vision_api_key.clone();
     drop(runtime);
 
-    let context = tauri::async_runtime::block_on(screen_context::describe_current_screen(
-        app,
-        &vision_channel,
-        vision_api_key,
-    ));
+    let context = screen_context::describe_current_screen(app, &vision_channel, vision_api_key).await;
     let mut value = serde_json::to_value(context).map_err(|error| error.to_string())?;
     if let Some(object) = value.as_object_mut() {
         object.insert(
