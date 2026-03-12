@@ -5,22 +5,27 @@ pub mod prompt;
 pub mod router;
 pub mod screen_context;
 pub mod screen_planner;
+pub mod screen_reconciler;
 pub mod task_store;
 pub mod types;
+pub mod vision_analyzer;
 pub mod vision_context;
+pub mod vision_types;
 
 use std::sync::Mutex;
 
-use self::types::AgentTaskRun;
+use self::{types::AgentTaskRun, vision_types::CachedVisionContext};
 
 pub struct AgentTaskState {
     active_task: Mutex<Option<AgentTaskRun>>,
+    vision_cache: Mutex<Option<CachedVisionContext>>,
 }
 
 impl AgentTaskState {
     pub fn new() -> Self {
         Self {
             active_task: Mutex::new(None),
+            vision_cache: Mutex::new(None),
         }
     }
 
@@ -28,5 +33,13 @@ impl AgentTaskState {
         self.active_task
             .lock()
             .map_err(|_| "桌面任务状态锁定失败".to_string())
+    }
+
+    pub fn vision_cache(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<CachedVisionContext>>, String> {
+        self.vision_cache
+            .lock()
+            .map_err(|_| "视觉上下文缓存锁定失败".to_string())
     }
 }

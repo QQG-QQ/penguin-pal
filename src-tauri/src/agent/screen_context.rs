@@ -2,9 +2,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::AppHandle;
 
-use crate::control::windows::{uia_context, windowing};
+use crate::{
+    app_state::ProviderConfig,
+    control::windows::{uia_context, windowing},
+};
 
-use super::vision_context;
+use super::{
+    prompt, screen_reconciler, vision_analyzer,
+    vision_types::{
+        ScreenContextConsistency, ScreenContextConsistencyKind, VisionCaptureInfo, VisionProviderStatus,
+        VisionProviderStatusKind, VisionWindowSummary,
+    },
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,17 +38,10 @@ pub struct ActiveWindowContext {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenContextSource {
     pub uia_available: bool,
+    pub vision_analyzed: bool,
     pub used_vision_fallback: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VisionFallbackInfo {
-    pub image_path: String,
-    pub width: i64,
-    pub height: i64,
-    pub window_title: String,
-    pub note: String,
+    pub vision_cache_hit: bool,
+    pub vision_provider_status: VisionProviderStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,11 +62,19 @@ pub struct ScreenContext {
     #[serde(default)]
     pub uia: Option<uia_context::WindowUiDescription>,
     #[serde(default)]
-    pub vision: Option<VisionFallbackInfo>,
+    pub vision: Option<VisionWindowSummary>,
+    #[serde(default)]
+    pub vision_capture: Option<VisionCaptureInfo>,
+    pub consistency: ScreenContextConsistency,
     pub summary: ScreenContextSummary,
 }
 
-pub fn describe_current_screen(app: &AppHandle) -> ScreenContext {
+pub async fn describe_current_screen(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+) -> ScreenContext {
     let mut warnings = Vec::new();
     let active_window_from_list = match windowing::list_windows(app) {
         Ok(value) => extract_active_window(&value),
@@ -103,36 +113,53 @@ pub fn describe_current_screen(app: &AppHandle) -> ScreenContext {
         .as_ref()
         .map(|description| description.visible_elements.len() < 3)
         .unwrap_or(true);
+    let vision_prompt = prompt::build_visual_analysis_prompt(&active_window.title);
+    let vision_context = vision_analyzer::analyze_active_window(
+        app,
+        provider_config,
+        api_key,
+        oauth_access_token,
+        &active_window.title,
+        active_window.class_name.as_deref(),
+        &vision_prompt,
+    )
+    .await;
+    let provider_status = vision_context.provider_status.clone();
+    let consistency = screen_reconciler::reconcile_screen_context(uia.as_ref(), &vision_context);
+    let mut vision_summary = vision_context.summary.clone();
 
-    let vision = if needs_vision_fallback {
-        match vision_context::vision_fallback_for_active_window(app) {
-            Ok(info) => Some(info),
-            Err(error) => {
-                warnings.push(format!("活动窗口截图失败：{error}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
+    if let Some(summary) = vision_summary.as_mut() {
+        summary.uia_consistency_hint = Some(consistency_label(&consistency.status).to_string());
+    }
+
+    if !matches!(provider_status.kind, VisionProviderStatusKind::Supported) {
+        warnings.push(format!("视觉状态：{}", provider_status.message));
+    }
+    warnings.extend(consistency.reasons.iter().cloned());
 
     let summary = ScreenContextSummary {
         visible_element_count: uia
             .as_ref()
             .map(|item| item.visible_elements.len())
             .unwrap_or(0),
-        primary_actions: summarize_primary_actions(uia.as_ref()),
+        primary_actions: summarize_primary_actions(uia.as_ref(), vision_summary.as_ref()),
         warnings,
     };
 
     ScreenContext {
         source: ScreenContextSource {
             uia_available: uia.is_some(),
-            used_vision_fallback: vision.is_some(),
+            vision_analyzed: vision_summary.is_some() || vision_context.capture.is_some(),
+            used_vision_fallback: needs_vision_fallback
+                && (vision_summary.is_some() || vision_context.capture.is_some()),
+            vision_cache_hit: vision_context.cache_hit,
+            vision_provider_status: provider_status,
         },
         active_window,
         uia,
-        vision,
+        vision: vision_summary,
+        vision_capture: vision_context.capture,
+        consistency,
         summary,
     }
 }
@@ -150,8 +177,25 @@ pub fn render_screen_context_for_prompt(context: &ScreenContext) -> String {
                 .unwrap_or("unknown")
         ),
         format!(
-            "- source: uiaAvailable={} usedVisionFallback={}",
-            context.source.uia_available, context.source.used_vision_fallback
+            "- source: uiaAvailable={} visionAnalyzed={} usedVisionFallback={} visionCacheHit={}",
+            context.source.uia_available,
+            context.source.vision_analyzed,
+            context.source.used_vision_fallback,
+            context.source.vision_cache_hit
+        ),
+        format!(
+            "- visionProviderStatus: kind={} message={}",
+            vision_status_label(&context.source.vision_provider_status.kind),
+            context.source.vision_provider_status.message
+        ),
+        format!(
+            "- consistency: status={} reasons={}",
+            consistency_label(&context.consistency.status),
+            if context.consistency.reasons.is_empty() {
+                "none".to_string()
+            } else {
+                context.consistency.reasons.join(" | ")
+            }
         ),
         format!(
             "- visibleElementCount: {}",
@@ -167,7 +211,7 @@ pub fn render_screen_context_for_prompt(context: &ScreenContext) -> String {
     }
 
     if let Some(uia) = &context.uia {
-        lines.push("- visibleElements:".to_string());
+        lines.push("- uia.visibleElements:".to_string());
         for (index, element) in uia.visible_elements.iter().take(10).enumerate() {
             lines.push(format!(
                 "  {}. role={} name={} automationId={} className={} enabled={} valuePreview={}",
@@ -181,13 +225,54 @@ pub fn render_screen_context_for_prompt(context: &ScreenContext) -> String {
             ));
         }
     } else {
-        lines.push("- visibleElements: unavailable".to_string());
+        lines.push("- uia.visibleElements: unavailable".to_string());
     }
 
     if let Some(vision) = &context.vision {
         lines.push(format!(
-            "- visionFallback: captured=true windowTitle={} imagePath={} size={}x{} note={}",
-            vision.window_title, vision.image_path, vision.width, vision.height, vision.note
+            "- vision.summary: schemaVersion={} windowKind={} pageKind={} certainty={} interactiveTarget={} confidence={}",
+            vision.schema_version,
+            vision.window_kind,
+            vision.page_kind.as_deref().unwrap_or("unknown"),
+            vision.certainty.as_deref().unwrap_or("unknown"),
+            vision.has_obvious_interactive_target,
+            vision
+                .confidence
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "unknown".to_string()),
+        ));
+        if !vision.primary_regions.is_empty() {
+            lines.push("- vision.primaryRegions:".to_string());
+            for (index, region) in vision.primary_regions.iter().take(6).enumerate() {
+                lines.push(format!(
+                    "  {}. type={} desc={}",
+                    index + 1,
+                    region.region_type,
+                    region.description
+                ));
+            }
+        }
+        if !vision.key_elements.is_empty() {
+            lines.push("- vision.keyElements:".to_string());
+            for (index, element) in vision.key_elements.iter().take(8).enumerate() {
+                lines.push(format!(
+                    "  {}. role={} label={} locationHint={} interactive={}",
+                    index + 1,
+                    element.role,
+                    element.label.as_deref().unwrap_or("unknown"),
+                    element.location_hint.as_deref().unwrap_or("unknown"),
+                    element.is_interactive
+                ));
+            }
+        }
+    } else {
+        lines.push("- vision.summary: unavailable".to_string());
+    }
+
+    if let Some(capture) = &context.vision_capture {
+        lines.push(format!(
+            "- vision.capture: path={} size={}x{} windowTitle={} note={}",
+            capture.image_path, capture.width, capture.height, capture.window_title, capture.note
         ));
     }
 
@@ -244,26 +329,68 @@ fn extract_active_window(value: &Value) -> Option<ActiveWindowContext> {
 }
 
 fn summarize_primary_actions(
-    description: Option<&uia_context::WindowUiDescription>,
+    uia: Option<&uia_context::WindowUiDescription>,
+    vision: Option<&VisionWindowSummary>,
 ) -> Vec<String> {
-    let Some(description) = description else {
-        return vec![];
-    };
+    let mut actions = Vec::new();
 
-    description
-        .visible_elements
-        .iter()
-        .filter_map(|element| {
-            let label = element
-                .name
-                .as_ref()
-                .or(element.automation_id.as_ref())
-                .or(element.class_name.as_ref())?;
-            if label.trim().is_empty() {
-                return None;
-            }
-            Some(format!("{}:{}", element.role, label.trim()))
-        })
-        .take(6)
-        .collect::<Vec<_>>()
+    if let Some(description) = uia {
+        actions.extend(
+            description
+                .visible_elements
+                .iter()
+                .filter_map(|element| {
+                    let label = element
+                        .name
+                        .as_ref()
+                        .or(element.automation_id.as_ref())
+                        .or(element.class_name.as_ref())?;
+                    if label.trim().is_empty() {
+                        return None;
+                    }
+                    Some(format!("{}:{}", element.role, label.trim()))
+                })
+                .take(6),
+        );
+    }
+
+    if actions.len() < 6 {
+        if let Some(summary) = vision {
+            actions.extend(
+                summary
+                    .key_elements
+                    .iter()
+                    .filter_map(|element| {
+                        let label = element.label.as_deref()?.trim();
+                        if label.is_empty() {
+                            return None;
+                        }
+                        Some(format!("{}:{}", element.role, label))
+                    })
+                    .take(6 - actions.len()),
+            );
+        }
+    }
+
+    actions
+}
+
+fn vision_status_label(kind: &VisionProviderStatusKind) -> &'static str {
+    match kind {
+        VisionProviderStatusKind::Supported => "supported",
+        VisionProviderStatusKind::Unknown => "unknown",
+        VisionProviderStatusKind::Unsupported => "unsupported",
+        VisionProviderStatusKind::DisabledOffline => "disabled_offline",
+        VisionProviderStatusKind::AnalysisFailed => "analysis_failed",
+    }
+}
+
+fn consistency_label(kind: &ScreenContextConsistencyKind) -> &'static str {
+    match kind {
+        ScreenContextConsistencyKind::Consistent => "consistent",
+        ScreenContextConsistencyKind::UiaOnly => "uia_only",
+        ScreenContextConsistencyKind::VisionOnly => "vision_only",
+        ScreenContextConsistencyKind::SoftConflict => "soft_conflict",
+        ScreenContextConsistencyKind::HardConflict => "hard_conflict",
+    }
 }

@@ -1,4 +1,7 @@
-use crate::control::types::ControlToolDefinition;
+use crate::{
+    agent::vision_types::VISION_SCHEMA_VERSION,
+    control::types::ControlToolDefinition,
+};
 
 pub fn build_planner_prompt(tools: &[ControlToolDefinition]) -> String {
     let tool_lines = tools
@@ -42,8 +45,48 @@ pub fn build_screen_planner_prompt(tools: &[ControlToolDefinition]) -> String {
     format!(
         "{}\n\
         10. 在规划前必须先参考我提供的 screen context。不要忽略当前活动窗口、可见控件和上下文警告。\n\
-        11. 如果 screen context 显示当前界面信息不足，不要盲目规划点击或输入；优先输出 route=chat 或只规划更保守的窗口级动作。\n\
-        12. 如果当前活动窗口已经提供了足够的 UIA 线索，优先利用这些线索决定最小步骤。",
+        11. 你会同时收到活动窗口信息、UIA 摘要、视觉摘要和 consistency 状态。规划时必须显式遵守 consistency 规则。\n\
+        12. consistency=consistent：可以正常规划，但仍然只能使用白名单工具。\n\
+        13. consistency=uia_only：只能保守规划，优先窗口级和低风险动作，不要规划高风险点击。\n\
+        14. consistency=vision_only：只允许只读或低风险动作，不要规划高风险点击。\n\
+        15. consistency=soft_conflict：只允许只读或低风险动作；如果请求必须依赖更激进操作，输出 route=chat。\n\
+        16. consistency=hard_conflict：直接输出 route=chat，不要生成任何高风险动作计划。\n\
+        17. 如果视觉 provider 不支持或视觉分析失败，我会在 screen context 里显式告诉你；不要假装看到了图片内容。\n\
+        18. 如果 screen context 显示当前界面信息不足，不要盲目规划点击或输入；优先输出 route=chat 或只规划更保守的窗口级动作。\n\
+        19. 如果当前活动窗口已经提供了足够的 UIA 线索，优先利用这些线索决定最小步骤。",
         build_planner_prompt(tools)
+    )
+}
+
+pub fn build_visual_analysis_prompt(active_window_title: &str) -> String {
+    format!(
+        "你是 PenguinPal 的活动窗口视觉摘要器。\
+        你会收到一张当前活动窗口截图。\
+        只输出严格 JSON，不能输出 markdown、解释、代码块或额外文字。\
+        不要假装识别了无法确认的文字，不要做 OCR 级别逐字转写。\
+        允许返回 unknown，不确定时宁可写 unknown，也不要瞎猜。\
+        输出 schema 必须是：\
+        {{\
+          \"schemaVersion\":\"{schema}\",\
+          \"windowKind\":\"browser|editor|chat_app|form|settings|dialog|unknown\",\
+          \"pageKind\":\"string|null\",\
+          \"certainty\":\"high|medium|low|unknown\",\
+          \"primaryRegions\":[{{\"regionType\":\"toolbar|sidebar|content|chatList|messageList|editorArea|addressBar|dialog|unknown\",\"description\":\"...\"}}],\
+          \"keyElements\":[{{\"role\":\"input|button|list|chatArea|addressBar|toolbar|menu|unknown\",\"label\":\"...|null\",\"locationHint\":\"top|left|right|bottom|center|unknown|null\",\"isInteractive\":true}}],\
+          \"hasObviousInteractiveTarget\":true,\
+          \"confidence\":0.0,\
+          \"notes\":[\"...\"],\
+          \"uiaConsistencyHint\":\"unknown\"\
+        }}\
+        当前活动窗口标题参考：{title}\
+        你要做的事：\
+        1. 判断当前窗口/页面大致类型。\
+        2. 总结主要区域，不超过 6 个。\
+        3. 总结关键元素，不超过 10 个。\
+        4. 判断是否存在明显可交互目标。\
+        5. 如果你无法确定，请使用 unknown。\
+        6. 不要输出坐标，不要建议点击，不要生成动作计划。",
+        schema = VISION_SCHEMA_VERSION,
+        title = active_window_title.trim()
     )
 }

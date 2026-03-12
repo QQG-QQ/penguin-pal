@@ -42,7 +42,13 @@ pub async fn maybe_handle_control_message(
         || intent::looks_like_control_request(trimmed);
 
     let plan = if looks_control {
-        let screen_context = screen_context::describe_current_screen(app);
+        let screen_context = screen_context::describe_current_screen(
+            app,
+            provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+        )
+        .await;
         let plan_result = screen_planner::plan_from_screen_context(
             provider_config,
             api_key,

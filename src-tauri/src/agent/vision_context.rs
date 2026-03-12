@@ -3,9 +3,9 @@ use tauri::AppHandle;
 
 use crate::control::windows::capture;
 
-use super::screen_context::VisionFallbackInfo;
+use super::vision_types::VisionCaptureInfo;
 
-pub fn vision_fallback_for_active_window(app: &AppHandle) -> Result<VisionFallbackInfo, String> {
+pub fn vision_fallback_for_active_window(app: &AppHandle) -> Result<VisionCaptureInfo, String> {
     let payload = capture::capture_active_window(app).map_err(|error| error.payload().message)?;
     let object = payload
         .as_object()
@@ -19,7 +19,7 @@ pub fn vision_fallback_for_active_window(app: &AppHandle) -> Result<VisionFallba
         .ok_or_else(|| "活动窗口截图缺少 path。".to_string())?
         .to_string();
 
-    Ok(VisionFallbackInfo {
+    Ok(VisionCaptureInfo {
         image_path,
         width: object.get("width").and_then(Value::as_i64).unwrap_or_default(),
         height: object
