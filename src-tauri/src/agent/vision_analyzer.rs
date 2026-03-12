@@ -166,9 +166,10 @@ fn status_from_analysis_error(error: &str) -> VisionProviderStatus {
 }
 
 fn update_runtime_vision_status(app: &AppHandle, status: &VisionProviderStatus) {
-    let Ok(state) = app.try_state::<Mutex<RuntimeState>>().ok_or(()) else {
+    let Some(state) = app.try_state::<Mutex<RuntimeState>>() else {
         return;
     };
+    let status = status.clone();
     if let Ok(mut runtime) = state.lock() {
         runtime.vision_channel_status = status.clone();
         runtime.vision_channel.last_error = match status.kind {
@@ -177,7 +178,7 @@ fn update_runtime_vision_status(app: &AppHandle, status: &VisionProviderStatus) 
             }
             _ => None,
         };
-    }
+    };
 }
 
 fn get_cached_context(

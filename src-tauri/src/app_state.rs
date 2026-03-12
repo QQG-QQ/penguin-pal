@@ -703,15 +703,15 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         Err(_) => return Ok(RuntimeState::default()),
     };
 
+    let vision_channel = persisted.vision_channel.clone();
+    let vision_channel_status =
+        current_vision_channel_status(&persisted.vision_channel, None);
     let mut runtime = RuntimeState {
         mode: persisted.mode,
         messages: persisted.messages,
         provider: persisted.provider,
-        vision_channel: persisted.vision_channel,
-        vision_channel_status: current_vision_channel_status(
-            &persisted.vision_channel,
-            None,
-        ),
+        vision_channel,
+        vision_channel_status,
         permission_level: 2,
         audit_trail: persisted.audit_trail,
         api_key: None,
