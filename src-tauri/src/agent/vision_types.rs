@@ -9,6 +9,7 @@ pub enum VisionProviderStatusKind {
     Supported,
     Unknown,
     Unsupported,
+    Timeout,
     DisabledOffline,
     AnalysisFailed,
 }

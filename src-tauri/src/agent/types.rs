@@ -9,6 +9,7 @@ use crate::app_state::now_millis;
 pub enum AgentRoute {
     Chat,
     Control,
+    Test,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

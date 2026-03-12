@@ -18,7 +18,9 @@ import type {
   OAuthState,
   ProviderConfigInput,
   ProviderKind,
-  ReplyHistoryEntry
+  ReplyHistoryEntry,
+  VisionChannelConfig,
+  VisionProviderStatus
 } from '../types/assistant'
 
 const providerModels: Record<ProviderKind, string> = {
@@ -104,6 +106,68 @@ const defaultConstraintsProfile = (): AiConstraintProfile => ({
   ]
 })
 
+const defaultVisionChannel = (): VisionChannelConfig => ({
+  enabled: false,
+  kind: 'disabled',
+  model: 'gpt-4.1-mini',
+  baseUrl: null,
+  allowNetwork: true,
+  apiKeyLoaded: false,
+  timeoutMs: 12000,
+  maxImageBytes: 3 * 1024 * 1024,
+  maxImageWidth: 1600,
+  maxImageHeight: 1200,
+  lastError: null
+})
+
+const fallbackVisionStatus = (
+  visionChannel: VisionChannelConfig,
+  apiKey?: string | null
+): VisionProviderStatus => {
+  if (
+    !visionChannel.enabled ||
+    visionChannel.kind === 'disabled'
+  ) {
+    return {
+      kind: 'unsupported',
+      message: '视觉副通道未启用。'
+    }
+  }
+
+  if (!visionChannel.allowNetwork) {
+    return {
+      kind: 'disabledOffline',
+      message: '当前处于离线安全模式，已阻止视觉分析。'
+    }
+  }
+
+  if (visionChannel.lastError?.trim()) {
+    return {
+      kind: visionChannel.lastError.includes('超时') ? 'timeout' : 'analysisFailed',
+      message: visionChannel.lastError
+    }
+  }
+
+  if (visionChannel.kind === 'openAi') {
+    if (!apiKey?.trim()) {
+      return {
+        kind: 'unsupported',
+        message: '视觉副通道缺少 OpenAI API Key。'
+      }
+    }
+
+    return {
+      kind: 'supported',
+      message: '视觉副通道已启用 OpenAI 图像分析。'
+    }
+  }
+
+  return {
+    kind: 'unknown',
+    message: 'OpenAI-Compatible 视觉副通道将按最佳努力尝试图像分析。'
+  }
+}
+
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const now = () => Date.now()
 
@@ -135,6 +199,8 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     authMode: 'apiKey',
     oauth: defaultOAuthState()
   },
+  visionChannel: defaultVisionChannel(),
+  visionChannelStatus: fallbackVisionStatus(defaultVisionChannel()),
   permissionLevel: 2,
   allowedActions: [
     {
@@ -655,18 +721,32 @@ const controlFetchJson = async <T>(path: string, init?: RequestInit): Promise<T>
   return payload as T
 }
 
-const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapshot => ({
-  ...snapshot,
-  provider: {
-    ...snapshot.provider,
-    apiKeyLoaded: Boolean(snapshot.provider.apiKeyLoaded),
-    oauth: {
-      ...snapshot.provider.oauth,
-      scopes: [...snapshot.provider.oauth.scopes],
-      accessTokenLoaded: Boolean(snapshot.provider.oauth.accessTokenLoaded)
-    }
+const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapshot => {
+  const visionChannel = {
+    ...defaultVisionChannel(),
+    ...(snapshot.visionChannel ?? {})
   }
-})
+
+  return {
+    ...snapshot,
+    provider: {
+      ...snapshot.provider,
+      apiKeyLoaded: Boolean(snapshot.provider.apiKeyLoaded),
+      oauth: {
+        ...snapshot.provider.oauth,
+        scopes: [...snapshot.provider.oauth.scopes],
+        accessTokenLoaded: Boolean(snapshot.provider.oauth.accessTokenLoaded)
+      }
+    },
+    visionChannel: {
+      ...visionChannel,
+      apiKeyLoaded: Boolean(visionChannel.apiKeyLoaded)
+    },
+    visionChannelStatus:
+      snapshot.visionChannelStatus ??
+      fallbackVisionStatus(visionChannel, visionChannel.apiKeyLoaded ? 'loaded' : '')
+  }
+}
 
 const nextMockReply = (content: string) => {
   if (content.includes('什么模型') || content.includes('你是谁') || content.includes('怎么运行')) {
@@ -776,6 +856,37 @@ export const saveProviderConfig = async (
           expiresAt: input.clearOAuthToken ? null : oauth.expiresAt
         }
       },
+      visionChannel: {
+        ...fallbackSnapshot.visionChannel,
+        enabled: input.visionChannel.enabled,
+        kind: input.visionChannel.kind,
+        model: input.visionChannel.model || defaultVisionChannel().model,
+        baseUrl: input.visionChannel.baseUrl,
+        allowNetwork: input.visionChannel.allowNetwork,
+        apiKeyLoaded: Boolean(input.visionChannel.apiKey?.trim()),
+        timeoutMs: input.visionChannel.timeoutMs,
+        maxImageBytes: input.visionChannel.maxImageBytes,
+        maxImageWidth: input.visionChannel.maxImageWidth,
+        maxImageHeight: input.visionChannel.maxImageHeight,
+        lastError: null
+      },
+      visionChannelStatus: fallbackVisionStatus(
+        {
+          ...fallbackSnapshot.visionChannel,
+          enabled: input.visionChannel.enabled,
+          kind: input.visionChannel.kind,
+          model: input.visionChannel.model || defaultVisionChannel().model,
+          baseUrl: input.visionChannel.baseUrl,
+          allowNetwork: input.visionChannel.allowNetwork,
+          apiKeyLoaded: Boolean(input.visionChannel.apiKey?.trim()),
+          timeoutMs: input.visionChannel.timeoutMs,
+          maxImageBytes: input.visionChannel.maxImageBytes,
+          maxImageWidth: input.visionChannel.maxImageWidth,
+          maxImageHeight: input.visionChannel.maxImageHeight,
+          lastError: null
+        },
+        input.visionChannel.apiKey
+      ),
       permissionLevel: input.permissionLevel,
       allowedActions: fallbackSnapshot.allowedActions.map((action) => ({
         ...action,

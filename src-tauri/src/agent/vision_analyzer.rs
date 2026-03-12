@@ -1,9 +1,11 @@
+use std::{fs, sync::Mutex};
+
 use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
     ai::provider,
-    app_state::{now_millis, ProviderConfig},
+    app_state::{now_millis, RuntimeState, VisionChannelConfig},
 };
 
 use super::{
@@ -17,9 +19,8 @@ use super::{
 
 pub async fn analyze_active_window(
     app: &AppHandle,
-    provider_config: &ProviderConfig,
+    vision_channel: &VisionChannelConfig,
     api_key: Option<String>,
-    oauth_access_token: Option<String>,
     active_window_title: &str,
     active_window_class_name: Option<&str>,
     vision_prompt: &str,
@@ -27,14 +28,16 @@ pub async fn analyze_active_window(
     if let Ok(Some(cached)) = get_cached_context(app, active_window_title, active_window_class_name) {
         let mut cached_context = cached.context;
         cached_context.cache_hit = true;
+        update_runtime_vision_status(app, &cached_context.provider_status);
         return cached_context;
     }
 
-    let provider_status = provider::vision_support_status(provider_config);
+    let provider_status = provider::vision_support_status(vision_channel, api_key.as_deref());
     if !matches!(
         provider_status.kind,
         VisionProviderStatusKind::Supported | VisionProviderStatusKind::Unknown
     ) {
+        update_runtime_vision_status(app, &provider_status);
         return VisionContext {
             provider_status,
             cache_hit: false,
@@ -46,11 +49,13 @@ pub async fn analyze_active_window(
     let capture = match vision_context::vision_fallback_for_active_window(app) {
         Ok(capture) => capture,
         Err(error) => {
+            let provider_status = VisionProviderStatus {
+                kind: VisionProviderStatusKind::AnalysisFailed,
+                message: format!("活动窗口截图失败：{error}"),
+            };
+            update_runtime_vision_status(app, &provider_status);
             return VisionContext {
-                provider_status: VisionProviderStatus {
-                    kind: VisionProviderStatusKind::AnalysisFailed,
-                    message: format!("活动窗口截图失败：{error}"),
-                },
+                provider_status,
                 cache_hit: false,
                 capture: None,
                 summary: None,
@@ -58,10 +63,23 @@ pub async fn analyze_active_window(
         }
     };
 
+    if let Some(limit_error) = validate_capture_against_limits(vision_channel, &capture) {
+        let provider_status = VisionProviderStatus {
+            kind: VisionProviderStatusKind::AnalysisFailed,
+            message: limit_error,
+        };
+        update_runtime_vision_status(app, &provider_status);
+        return VisionContext {
+            provider_status,
+            cache_hit: false,
+            capture: Some(capture),
+            summary: None,
+        };
+    }
+
     let analysis = provider::analyze_window_image(
-        provider_config,
+        vision_channel,
         api_key,
-        oauth_access_token,
         std::path::Path::new(&capture.image_path),
         vision_prompt,
     )
@@ -70,7 +88,7 @@ pub async fn analyze_active_window(
     let context = match analysis {
         Ok(raw) => match parse_vision_summary(&raw) {
             Ok(summary) => VisionContext {
-                provider_status,
+                provider_status: provider_status.clone(),
                 cache_hit: false,
                 capture: Some(capture),
                 summary: Some(summary),
@@ -86,15 +104,14 @@ pub async fn analyze_active_window(
             },
         },
         Err(error) => VisionContext {
-            provider_status: VisionProviderStatus {
-                kind: VisionProviderStatusKind::AnalysisFailed,
-                message: error,
-            },
+            provider_status: status_from_analysis_error(&error),
             cache_hit: false,
             capture: Some(capture),
             summary: None,
         },
     };
+
+    update_runtime_vision_status(app, &context.provider_status);
 
     let _ = set_cached_context(
         app,
@@ -104,6 +121,63 @@ pub async fn analyze_active_window(
     );
 
     context
+}
+
+fn validate_capture_against_limits(
+    vision_channel: &VisionChannelConfig,
+    capture: &super::vision_types::VisionCaptureInfo,
+) -> Option<String> {
+    if capture.width > i64::from(vision_channel.max_image_width)
+        || capture.height > i64::from(vision_channel.max_image_height)
+    {
+        return Some(format!(
+            "活动窗口截图尺寸 {}x{} 超出视觉副通道限制 {}x{}。",
+            capture.width,
+            capture.height,
+            vision_channel.max_image_width,
+            vision_channel.max_image_height
+        ));
+    }
+
+    let file_size = fs::metadata(&capture.image_path).ok().map(|meta| meta.len());
+    if file_size.is_some_and(|size| size > vision_channel.max_image_bytes) {
+        return Some(format!(
+            "活动窗口截图大小 {} 字节超出视觉副通道限制 {} 字节。",
+            file_size.unwrap_or_default(),
+            vision_channel.max_image_bytes
+        ));
+    }
+
+    None
+}
+
+fn status_from_analysis_error(error: &str) -> VisionProviderStatus {
+    if error.contains("超时") {
+        return VisionProviderStatus {
+            kind: VisionProviderStatusKind::Timeout,
+            message: error.to_string(),
+        };
+    }
+
+    VisionProviderStatus {
+        kind: VisionProviderStatusKind::AnalysisFailed,
+        message: error.to_string(),
+    }
+}
+
+fn update_runtime_vision_status(app: &AppHandle, status: &VisionProviderStatus) {
+    let Ok(state) = app.try_state::<Mutex<RuntimeState>>().ok_or(()) else {
+        return;
+    };
+    if let Ok(mut runtime) = state.lock() {
+        runtime.vision_channel_status = status.clone();
+        runtime.vision_channel.last_error = match status.kind {
+            VisionProviderStatusKind::AnalysisFailed | VisionProviderStatusKind::Timeout => {
+                Some(status.message.clone())
+            }
+            _ => None,
+        };
+    }
 }
 
 fn get_cached_context(

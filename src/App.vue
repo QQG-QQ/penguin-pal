@@ -160,6 +160,23 @@ const emptySnapshot = (): AssistantSnapshot => ({
       expiresAt: null
     }
   },
+  visionChannel: {
+    enabled: false,
+    kind: 'disabled',
+    model: 'gpt-4.1-mini',
+    baseUrl: null,
+    allowNetwork: true,
+    apiKeyLoaded: false,
+    timeoutMs: 12000,
+    maxImageBytes: 3 * 1024 * 1024,
+    maxImageWidth: 1600,
+    maxImageHeight: 1200,
+    lastError: null
+  },
+  visionChannelStatus: {
+    kind: 'unsupported',
+    message: '视觉副通道未启用。'
+  },
   permissionLevel: 2,
   allowedActions: [],
   auditTrail: [],
@@ -198,7 +215,20 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   oauthScopes: state.provider.oauth.scopes.join(' '),
   apiKey: '',
   clearApiKey: false,
-  clearOAuthToken: false
+  clearOAuthToken: false,
+  visionChannel: {
+    enabled: state.visionChannel.enabled,
+    kind: state.visionChannel.kind,
+    model: state.visionChannel.model,
+    baseUrl: state.visionChannel.baseUrl,
+    allowNetwork: state.visionChannel.allowNetwork,
+    timeoutMs: state.visionChannel.timeoutMs,
+    maxImageBytes: state.visionChannel.maxImageBytes,
+    maxImageWidth: state.visionChannel.maxImageWidth,
+    maxImageHeight: state.visionChannel.maxImageHeight,
+    apiKey: '',
+    clearApiKey: false
+  }
 })
 
 const windowView = ref<AssistantWindowView>(readWindowView())
@@ -1131,6 +1161,18 @@ const persistSettings = async (draft: ProviderConfigInput) => {
     nextDraft.model = providerDefaults[nextDraft.kind]
   }
 
+  if (!nextDraft.visionChannel.model.trim()) {
+    nextDraft.visionChannel.model =
+      nextDraft.visionChannel.kind === 'openAiCompatible' ? 'gpt-4.1-mini' : 'gpt-4.1-mini'
+  }
+
+  if (nextDraft.visionChannel.kind === 'disabled' || !nextDraft.visionChannel.enabled) {
+    nextDraft.visionChannel.enabled = false
+    nextDraft.visionChannel.baseUrl = null
+  } else if (nextDraft.visionChannel.kind === 'openAi') {
+    nextDraft.visionChannel.baseUrl = null
+  }
+
   return saveProviderConfig(nextDraft)
 }
 
@@ -2022,13 +2064,18 @@ const sendMessage = async (value = messageDraft.value) => {
     pushInputHistoryLocally(content)
     applySnapshot(response.snapshot)
     await refreshTodayReplyHistory()
-    setAgentTaskProgress(response.agent?.route === 'control' ? (response.agent.task ?? null) : null)
+    setAgentTaskProgress(
+      response.agent && response.agent.route !== 'chat' ? (response.agent.task ?? null) : null
+    )
     if (response.agent?.pendingRequest) {
       setControlPendingRequest(response.agent.pendingRequest)
-    } else if (response.agent?.route === 'control') {
+    } else if (response.agent && response.agent.route !== 'chat') {
       clearControlPendingRequest()
     }
-    announce(response.reply.content, response.agent?.route === 'control' ? 'guarded' : 'speaking')
+    announce(
+      response.reply.content,
+      response.agent && response.agent.route !== 'chat' ? 'guarded' : 'speaking'
+    )
   } catch (error) {
     announce(error instanceof Error ? error.message : '消息发送失败', 'guarded')
   } finally {
@@ -2405,6 +2452,7 @@ onBeforeUnmount(() => {
       :oauth-notice="oauthNotice"
       :codex-status="codexStatus"
       :current-provider-label="activeProviderLabel"
+      :vision-channel-status="snapshot.visionChannelStatus"
       :actions="snapshot.allowedActions"
       :permission-level="snapshot.permissionLevel"
       :ai-constraints="snapshot.aiConstraints"

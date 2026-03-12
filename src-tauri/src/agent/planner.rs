@@ -3,43 +3,9 @@ use serde_json::Value;
 use crate::{
     ai::provider,
     app_state::{DesktopAction, ProviderConfig},
-    control::registry,
 };
 
-use super::{
-    prompt,
-    types::{is_agent_tool_allowed, AgentPlan, AgentRoute},
-};
-
-pub async fn plan_with_model(
-    provider_config: &ProviderConfig,
-    api_key: Option<String>,
-    oauth_access_token: Option<String>,
-    codex_command: Option<String>,
-    codex_home: Option<String>,
-    permission_level: u8,
-    allowed_actions: &[DesktopAction],
-    user_input: &str,
-) -> Result<AgentPlan, String> {
-    let allowed_tools = registry::tool_definitions()
-        .into_iter()
-        .filter(|tool| is_agent_tool_allowed(&tool.name))
-        .collect::<Vec<_>>();
-    let prompt = prompt::build_planner_prompt(&allowed_tools);
-
-    plan_with_model_input(
-        provider_config,
-        api_key,
-        oauth_access_token,
-        codex_command,
-        codex_home,
-        permission_level,
-        allowed_actions,
-        &prompt,
-        user_input,
-    )
-    .await
-}
+use super::types::{AgentPlan, AgentRoute};
 
 pub async fn plan_with_model_input(
     provider_config: &ProviderConfig,

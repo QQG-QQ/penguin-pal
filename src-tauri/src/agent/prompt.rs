@@ -51,7 +51,7 @@ pub fn build_screen_planner_prompt(tools: &[ControlToolDefinition]) -> String {
         14. consistency=vision_only：只允许只读或低风险动作，不要规划高风险点击。\n\
         15. consistency=soft_conflict：只允许只读或低风险动作；如果请求必须依赖更激进操作，输出 route=chat。\n\
         16. consistency=hard_conflict：直接输出 route=chat，不要生成任何高风险动作计划。\n\
-        17. 如果视觉 provider 不支持或视觉分析失败，我会在 screen context 里显式告诉你；不要假装看到了图片内容。\n\
+        17. 如果视觉副通道不支持、超时或分析失败，我会在 screen context 里显式告诉你；不要假装看到了图片内容。\n\
         18. 如果 screen context 显示当前界面信息不足，不要盲目规划点击或输入；优先输出 route=chat 或只规划更保守的窗口级动作。\n\
         19. 如果当前活动窗口已经提供了足够的 UIA 线索，优先利用这些线索决定最小步骤。",
         build_planner_prompt(tools)

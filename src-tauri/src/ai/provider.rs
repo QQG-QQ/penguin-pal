@@ -1,7 +1,10 @@
 use crate::{
     agent::vision_types::{VisionProviderStatus, VisionProviderStatusKind},
     ai::guardrails,
-    app_state::{AuthMode, ChatMessage, DesktopAction, ProviderConfig, ProviderKind},
+    app_state::{
+        AuthMode, ChatMessage, DesktopAction, ProviderConfig, ProviderKind, VisionChannelConfig,
+        VisionChannelKind,
+    },
     codex_runtime::apply_private_env,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -198,55 +201,56 @@ pub async fn plan_control_request(
     }
 }
 
-pub fn vision_support_status(provider: &ProviderConfig) -> VisionProviderStatus {
-    if !provider.allow_network {
+pub fn vision_support_status(
+    vision_channel: &VisionChannelConfig,
+    api_key: Option<&str>,
+) -> VisionProviderStatus {
+    if !vision_channel.enabled || matches!(vision_channel.kind, VisionChannelKind::Disabled) {
+        return VisionProviderStatus {
+            kind: VisionProviderStatusKind::Unsupported,
+            message: "视觉副通道未启用。".to_string(),
+        };
+    }
+
+    if !vision_channel.allow_network {
         return VisionProviderStatus {
             kind: VisionProviderStatusKind::DisabledOffline,
             message: "当前处于离线安全模式，已阻止视觉分析。".to_string(),
         };
     }
 
-    match provider.kind {
-        ProviderKind::Mock => VisionProviderStatus {
+    match vision_channel.kind {
+        VisionChannelKind::Disabled => VisionProviderStatus {
             kind: VisionProviderStatusKind::Unsupported,
-            message: "Mock provider 不支持视觉分析。".to_string(),
+            message: "视觉副通道未启用。".to_string(),
         },
-        ProviderKind::CodexCli => VisionProviderStatus {
-            kind: VisionProviderStatusKind::Unsupported,
-            message: "Codex CLI 当前未接入图像分析链路。".to_string(),
-        },
-        ProviderKind::OpenAi => VisionProviderStatus {
-            kind: VisionProviderStatusKind::Supported,
-            message: "当前 provider 支持通过图像输入做视觉分析。".to_string(),
-        },
-        ProviderKind::Anthropic => {
-            if matches!(provider.auth_mode, AuthMode::OAuth) {
-                VisionProviderStatus {
+        VisionChannelKind::OpenAi => {
+            if api_key.map(|value| value.trim().is_empty()).unwrap_or(true) {
+                return VisionProviderStatus {
                     kind: VisionProviderStatusKind::Unsupported,
-                    message: "Anthropic 当前视觉分析仅支持 API Key。".to_string(),
-                }
-            } else {
-                VisionProviderStatus {
-                    kind: VisionProviderStatusKind::Supported,
-                    message: "当前 provider 支持通过图像输入做视觉分析。".to_string(),
-                }
+                    message: "视觉副通道缺少 OpenAI API Key。".to_string(),
+                };
+            }
+
+            VisionProviderStatus {
+                kind: VisionProviderStatusKind::Supported,
+                message: "视觉副通道已启用 OpenAI 图像分析。".to_string(),
             }
         }
-        ProviderKind::OpenAiCompatible => VisionProviderStatus {
+        VisionChannelKind::OpenAiCompatible => VisionProviderStatus {
             kind: VisionProviderStatusKind::Unknown,
-            message: "OpenAI-Compatible 网关是否支持图像输入取决于具体上游实现，将按最佳努力尝试。".to_string(),
+            message: "OpenAI-Compatible 视觉副通道是否支持图像输入取决于具体上游实现，将按最佳努力尝试。".to_string(),
         },
     }
 }
 
 pub async fn analyze_window_image(
-    provider: &ProviderConfig,
+    vision_channel: &VisionChannelConfig,
     api_key: Option<String>,
-    oauth_access_token: Option<String>,
     image_path: &Path,
     vision_prompt: &str,
 ) -> Result<String, String> {
-    let support = vision_support_status(provider);
+    let support = vision_support_status(vision_channel, api_key.as_deref());
     if !matches!(
         support.kind,
         VisionProviderStatusKind::Supported | VisionProviderStatusKind::Unknown
@@ -254,52 +258,37 @@ pub async fn analyze_window_image(
         return Err(support.message);
     }
 
-    match provider.kind {
-        ProviderKind::OpenAi => {
-            let credential =
-                credential_for_openai(provider, api_key, oauth_access_token, "OpenAI")?;
+    match vision_channel.kind {
+        VisionChannelKind::OpenAi => {
+            let credential = required_key(api_key, "视觉副通道 OpenAI")?;
             call_openai_like_vision(
-                provider,
+                vision_channel,
                 Some(credential.as_str()),
                 vision_prompt,
                 image_path,
                 "https://api.openai.com/v1",
-                "OpenAI",
+                "Vision(OpenAI)",
             )
             .await
         }
-        ProviderKind::Anthropic => {
-            let key = required_key(api_key, "Anthropic")?;
-            call_anthropic_vision(provider, &key, vision_prompt, image_path).await
-        }
-        ProviderKind::OpenAiCompatible => {
-            let base_url = provider
+        VisionChannelKind::OpenAiCompatible => {
+            let base_url = vision_channel
                 .base_url
                 .clone()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "http://127.0.0.1:11434/v1".to_string());
-            let credential = match provider.auth_mode {
-                AuthMode::ApiKey => api_key
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-                    .map(str::to_string),
-                AuthMode::OAuth => Some(required_oauth_token(
-                    oauth_access_token,
-                    "OpenAI-Compatible",
-                )?),
-            };
 
             call_openai_like_vision(
-                provider,
-                credential.as_deref(),
+                vision_channel,
+                api_key.as_deref(),
                 vision_prompt,
                 image_path,
                 &base_url,
-                "OpenAI-Compatible",
+                "Vision(OpenAI-Compatible)",
             )
             .await
         }
-        ProviderKind::Mock | ProviderKind::CodexCli => Err(support.message),
+        VisionChannelKind::Disabled => Err(support.message),
     }
 }
 
@@ -533,7 +522,7 @@ async fn call_openai_like_prompt(
 }
 
 async fn call_openai_like_vision(
-    provider: &ProviderConfig,
+    vision_channel: &VisionChannelConfig,
     credential: Option<&str>,
     vision_prompt: &str,
     image_path: &Path,
@@ -541,10 +530,15 @@ async fn call_openai_like_vision(
     label: &str,
 ) -> Result<String, String> {
     let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_millis(
+            vision_channel.timeout_ms.max(1000),
+        ))
+        .build()
+        .map_err(|error| error.to_string())?;
     let image_url = build_image_data_url(image_path)?;
     let payload = json!({
-        "model": provider.model,
+        "model": vision_channel.model,
         "temperature": 0.0,
         "messages": [{
             "role": "user",
@@ -560,7 +554,10 @@ async fn call_openai_like_vision(
         request = request.bearer_auth(token);
     }
 
-    let response = request.send().await.map_err(|error| error.to_string())?;
+    let response = request
+        .send()
+        .await
+        .map_err(|error| normalize_vision_request_error(error, label))?;
     let status = response.status();
     let body = response.text().await.map_err(|error| error.to_string())?;
 
@@ -668,69 +665,6 @@ async fn call_anthropic_prompt(
         .ok_or_else(|| "Anthropic 规划返回内容为空或格式不兼容".to_string())
 }
 
-async fn call_anthropic_vision(
-    provider: &ProviderConfig,
-    api_key: &str,
-    vision_prompt: &str,
-    image_path: &Path,
-) -> Result<String, String> {
-    let endpoint = provider
-        .base_url
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
-    let client = Client::new();
-    let image_base64 = read_image_base64(image_path)?;
-    let media_type = image_media_type(image_path);
-    let payload = json!({
-        "model": provider.model,
-        "max_tokens": 700,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": image_base64
-                    }
-                },
-                {
-                    "type": "text",
-                    "text": vision_prompt
-                }
-            ]
-        }],
-    });
-
-    let response = client
-        .post(endpoint)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-
-    let status = response.status();
-    let body = response.text().await.map_err(|error| error.to_string())?;
-
-    if !status.is_success() {
-        return Err(format!("Anthropic 视觉分析请求失败({status}): {body}"));
-    }
-
-    let value: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
-    value
-        .get("content")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .and_then(|item| item.get("text"))
-        .and_then(Value::as_str)
-        .map(|text| text.to_string())
-        .ok_or_else(|| "Anthropic 视觉分析返回内容为空或格式不兼容".to_string())
-}
-
 fn build_openai_messages(system_prompt: &str, history: &[ChatMessage]) -> Vec<Value> {
     let mut messages = Vec::new();
 
@@ -822,12 +756,6 @@ fn build_image_data_url(image_path: &Path) -> Result<String, String> {
     ))
 }
 
-fn read_image_base64(image_path: &Path) -> Result<String, String> {
-    let bytes = fs::read(image_path)
-        .map_err(|error| format!("读取活动窗口截图失败：{error}"))?;
-    Ok(STANDARD.encode(bytes))
-}
-
 fn image_media_type(image_path: &Path) -> &'static str {
     match image_path
         .extension()
@@ -839,4 +767,11 @@ fn image_media_type(image_path: &Path) -> &'static str {
         Some("webp") => "image/webp",
         _ => "image/png",
     }
+}
+
+fn normalize_vision_request_error(error: reqwest::Error, label: &str) -> String {
+    if error.is_timeout() {
+        return format!("{label} 视觉分析请求超时。");
+    }
+    error.to_string()
 }

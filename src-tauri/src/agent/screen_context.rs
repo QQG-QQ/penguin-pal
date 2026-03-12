@@ -3,7 +3,7 @@ use serde_json::Value;
 use tauri::AppHandle;
 
 use crate::{
-    app_state::ProviderConfig,
+    app_state::VisionChannelConfig,
     control::windows::{uia_context, windowing},
 };
 
@@ -71,9 +71,8 @@ pub struct ScreenContext {
 
 pub async fn describe_current_screen(
     app: &AppHandle,
-    provider_config: &ProviderConfig,
-    api_key: Option<String>,
-    oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
 ) -> ScreenContext {
     let mut warnings = Vec::new();
     let active_window_from_list = match windowing::list_windows(app) {
@@ -116,9 +115,8 @@ pub async fn describe_current_screen(
     let vision_prompt = prompt::build_visual_analysis_prompt(&active_window.title);
     let vision_context = vision_analyzer::analyze_active_window(
         app,
-        provider_config,
-        api_key,
-        oauth_access_token,
+        vision_channel,
+        vision_api_key,
         &active_window.title,
         active_window.class_name.as_deref(),
         &vision_prompt,
@@ -380,6 +378,7 @@ fn vision_status_label(kind: &VisionProviderStatusKind) -> &'static str {
         VisionProviderStatusKind::Supported => "supported",
         VisionProviderStatusKind::Unknown => "unknown",
         VisionProviderStatusKind::Unsupported => "unsupported",
+        VisionProviderStatusKind::Timeout => "timeout",
         VisionProviderStatusKind::DisabledOffline => "disabled_offline",
         VisionProviderStatusKind::AnalysisFailed => "analysis_failed",
     }

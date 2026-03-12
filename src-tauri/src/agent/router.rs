@@ -1,7 +1,7 @@
 use tauri::AppHandle;
 
 use crate::{
-    app_state::{DesktopAction, ProviderConfig},
+    app_state::{DesktopAction, ProviderConfig, VisionChannelConfig},
     control::types::ToolInvokeResponse,
 };
 
@@ -27,6 +27,8 @@ pub async fn maybe_handle_control_message(
     provider_config: &ProviderConfig,
     api_key: Option<String>,
     oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
     codex_command: Option<String>,
     codex_home: Option<String>,
     permission_level: u8,
@@ -44,9 +46,8 @@ pub async fn maybe_handle_control_message(
     let plan = if looks_control {
         let screen_context = screen_context::describe_current_screen(
             app,
-            provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
+            vision_channel,
+            vision_api_key,
         )
         .await;
         let plan_result = screen_planner::plan_from_screen_context(

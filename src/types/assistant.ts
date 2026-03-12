@@ -4,6 +4,14 @@ export type AssistantWindowView = 'pet' | 'settings' | 'bubble'
 export type ProviderKind = 'mock' | 'codexCli' | 'openAi' | 'anthropic' | 'openAiCompatible'
 export type ProviderAuthMode = 'apiKey' | 'oauth'
 export type OAuthStatus = 'signedOut' | 'pending' | 'authorized' | 'error'
+export type VisionChannelKind = 'disabled' | 'openAi' | 'openAiCompatible'
+export type VisionProviderStatusKind =
+  | 'supported'
+  | 'unknown'
+  | 'unsupported'
+  | 'timeout'
+  | 'disabledOffline'
+  | 'analysisFailed'
 
 export interface ChatMessage {
   id: string
@@ -88,10 +96,31 @@ export interface ProviderConfig {
   oauth: OAuthState
 }
 
+export interface VisionProviderStatus {
+  kind: VisionProviderStatusKind
+  message: string
+}
+
+export interface VisionChannelConfig {
+  enabled: boolean
+  kind: VisionChannelKind
+  model: string
+  baseUrl: string | null
+  allowNetwork: boolean
+  apiKeyLoaded: boolean
+  timeoutMs: number
+  maxImageBytes: number
+  maxImageWidth: number
+  maxImageHeight: number
+  lastError: string | null
+}
+
 export interface AssistantSnapshot {
   mode: PetMode
   messages: ChatMessage[]
   provider: ProviderConfig
+  visionChannel: VisionChannelConfig
+  visionChannelStatus: VisionProviderStatus
   permissionLevel: number
   allowedActions: DesktopAction[]
   auditTrail: AuditEntry[]
@@ -117,9 +146,24 @@ export interface ProviderConfigInput {
   apiKey?: string | null
   clearApiKey?: boolean
   clearOAuthToken?: boolean
+  visionChannel: VisionChannelConfigInput
 }
 
-export type AgentRoute = 'chat' | 'control'
+export interface VisionChannelConfigInput {
+  enabled: boolean
+  kind: VisionChannelKind
+  model: string
+  baseUrl: string | null
+  allowNetwork: boolean
+  timeoutMs: number
+  maxImageBytes: number
+  maxImageWidth: number
+  maxImageHeight: number
+  apiKey?: string | null
+  clearApiKey?: boolean
+}
+
+export type AgentRoute = 'chat' | 'control' | 'test'
 export type AgentTaskStatus = 'running' | 'waitingConfirmation' | 'completed' | 'failed' | 'cancelled'
 
 export interface AgentTaskProgress {

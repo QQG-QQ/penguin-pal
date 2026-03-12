@@ -8,7 +8,9 @@ import type {
   DesktopAction,
   ProviderConfigInput,
   ProviderKind,
-  ReplyHistoryEntry
+  ReplyHistoryEntry,
+  VisionChannelKind,
+  VisionProviderStatus
 } from '../types/assistant'
 
 const props = defineProps<{
@@ -20,6 +22,7 @@ const props = defineProps<{
   oauthNotice: string
   codexStatus: CodexCliStatus
   currentProviderLabel: string
+  visionChannelStatus: VisionProviderStatus
   actions: DesktopAction[]
   permissionLevel: number
   aiConstraints: AiConstraintProfile
@@ -47,6 +50,12 @@ const providerOptions: Array<{ label: string; value: ProviderKind }> = [
   { label: 'Anthropic', value: 'anthropic' },
   { label: 'OpenAI-Compatible', value: 'openAiCompatible' },
   { label: 'Mock', value: 'mock' }
+]
+
+const visionProviderOptions: Array<{ label: string; value: VisionChannelKind }> = [
+  { label: '禁用', value: 'disabled' },
+  { label: 'OpenAI', value: 'openAi' },
+  { label: 'OpenAI-Compatible', value: 'openAiCompatible' }
 ]
 
 const presetOptions = presetModelCatalog
@@ -115,6 +124,11 @@ const clearApiKey = () => {
   localDraft.value.clearApiKey = true
 }
 
+const clearVisionApiKey = () => {
+  localDraft.value.visionChannel.apiKey = ''
+  localDraft.value.visionChannel.clearApiKey = true
+}
+
 const save = () => {
   if (isCodexProvider.value || localDraft.value.kind === 'mock') {
     localDraft.value.apiKey = ''
@@ -123,6 +137,20 @@ const save = () => {
 
   if (localDraft.value.apiKey?.trim()) {
     localDraft.value.clearApiKey = false
+  }
+
+  if (
+    localDraft.value.visionChannel.kind === 'disabled' ||
+    !localDraft.value.visionChannel.enabled
+  ) {
+    localDraft.value.visionChannel.enabled = false
+    localDraft.value.visionChannel.baseUrl = null
+  } else if (localDraft.value.visionChannel.kind === 'openAi') {
+    localDraft.value.visionChannel.baseUrl = null
+  }
+
+  if (localDraft.value.visionChannel.apiKey?.trim()) {
+    localDraft.value.visionChannel.clearApiKey = false
   }
 
   emit('save', cloneDraft(localDraft.value))
@@ -289,6 +317,120 @@ const formatHistoryTime = (timestamp: number) =>
           placeholder="定义桌宠的人设和安全边界"
         />
       </label>
+
+      <section class="oauth-shell full-row">
+        <div class="oauth-header">
+          <div>
+            <strong>视觉副通道</strong>
+            <p>主聊天与规划继续走当前 Provider，活动窗口截图会单独送到支持图像输入的副通道做结构化视觉摘要。</p>
+          </div>
+          <span class="oauth-status">状态：{{ visionChannelStatus.kind }}</span>
+        </div>
+
+        <div class="toggle-grid full-row">
+          <label class="toggle">
+            <input v-model="localDraft.visionChannel.enabled" type="checkbox" />
+            启用视觉副通道
+          </label>
+        </div>
+
+        <div class="oauth-grid">
+          <label class="field">
+            <span>视觉 Provider</span>
+            <select v-model="localDraft.visionChannel.kind">
+              <option
+                v-for="option in visionProviderOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>视觉 Model</span>
+            <input
+              v-model="localDraft.visionChannel.model"
+              type="text"
+              placeholder="例如 gpt-4.1-mini"
+            />
+          </label>
+
+          <label
+            v-if="localDraft.visionChannel.kind === 'openAiCompatible'"
+            class="field full-row"
+          >
+            <span>视觉 Base URL</span>
+            <input
+              v-model="localDraft.visionChannel.baseUrl"
+              type="text"
+              placeholder="例如 https://api.openai.com/v1 或兼容网关地址"
+            />
+          </label>
+
+          <label
+            v-if="localDraft.visionChannel.kind !== 'disabled'"
+            class="field full-row"
+          >
+            <span>视觉 API Key</span>
+            <input
+              v-model="localDraft.visionChannel.apiKey"
+              type="password"
+              placeholder="仅用于视觉副通道，不影响 Codex 主链"
+            />
+          </label>
+
+          <div
+            v-if="localDraft.visionChannel.kind !== 'disabled'"
+            class="field inline-actions full-row compact-actions"
+          >
+            <button type="button" class="ghost-button" @click="clearVisionApiKey">
+              清空视觉副通道密钥
+            </button>
+          </div>
+
+          <label class="field">
+            <span>超时（ms）</span>
+            <input v-model.number="localDraft.visionChannel.timeoutMs" type="number" min="1000" />
+          </label>
+
+          <label class="field">
+            <span>最大图片字节</span>
+            <input
+              v-model.number="localDraft.visionChannel.maxImageBytes"
+              type="number"
+              min="65536"
+            />
+          </label>
+
+          <label class="field">
+            <span>最大图片宽度</span>
+            <input
+              v-model.number="localDraft.visionChannel.maxImageWidth"
+              type="number"
+              min="320"
+            />
+          </label>
+
+          <label class="field">
+            <span>最大图片高度</span>
+            <input
+              v-model.number="localDraft.visionChannel.maxImageHeight"
+              type="number"
+              min="240"
+            />
+          </label>
+        </div>
+
+        <div class="oauth-meta full-row">
+          <p>视觉状态：{{ visionChannelStatus.message }}</p>
+          <p>当前视觉副通道密钥：{{ localDraft.visionChannel.apiKey?.trim() ? '本次已输入' : '未在当前表单中输入' }}</p>
+          <p v-if="localDraft.visionChannel.kind === 'disabled' || !localDraft.visionChannel.enabled">
+            当前不会做真正图像分析，只会保留 UIA 和必要时的截图工件。
+          </p>
+        </div>
+      </section>
 
       <label class="field full-row">
         <span>权限等级</span>

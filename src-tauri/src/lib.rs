@@ -7,6 +7,8 @@ mod audio;
 mod desktop;
 mod history;
 mod security;
+mod test_agent;
+mod testing;
 mod tray;
 mod window;
 
@@ -26,6 +28,7 @@ use crate::{
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
+    testing::TestingState,
 };
 
 fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
@@ -152,11 +155,17 @@ fn get_control_service_status(app: AppHandle) -> Result<ControlServiceStatus, St
 
 #[tauri::command]
 fn confirm_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
+    if let Some(response) = test_agent::router::confirm_control_pending(&app, &pending_id)? {
+        return Ok(response);
+    }
     agent_router::confirm_control_pending(&app, &pending_id)
 }
 
 #[tauri::command]
 fn cancel_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
+    if let Some(response) = test_agent::router::cancel_control_pending(&app, &pending_id)? {
+        return Ok(response);
+    }
     agent_router::cancel_control_pending(&app, &pending_id)
 }
 
@@ -341,6 +350,22 @@ fn save_provider_config(
     runtime.provider.oauth.redirect_url = normalize_optional(input.oauth_redirect_url)
         .or_else(|| Some(DEFAULT_OAUTH_REDIRECT_URL.to_string()));
     runtime.provider.oauth.scopes = parse_scopes(&input.oauth_scopes);
+    runtime.vision_channel.enabled = input.vision_channel.enabled;
+    runtime.vision_channel.kind = input.vision_channel.kind;
+    runtime.vision_channel.model = if input.vision_channel.model.trim().is_empty() {
+        input.vision_channel.kind.default_model().to_string()
+    } else {
+        input.vision_channel.model.trim().to_string()
+    };
+    runtime.vision_channel.base_url = normalize_optional(input.vision_channel.base_url);
+    runtime.vision_channel.allow_network = input.vision_channel.allow_network;
+    runtime.vision_channel.timeout_ms = input.vision_channel.timeout_ms.clamp(1_000, 60_000);
+    runtime.vision_channel.max_image_bytes =
+        input.vision_channel.max_image_bytes.clamp(64 * 1024, 10 * 1024 * 1024);
+    runtime.vision_channel.max_image_width = input.vision_channel.max_image_width.clamp(320, 4096);
+    runtime.vision_channel.max_image_height =
+        input.vision_channel.max_image_height.clamp(240, 4096);
+    runtime.vision_channel.last_error = None;
 
     if input.clear_api_key.unwrap_or(false) {
         runtime.api_key = None;
@@ -354,6 +379,25 @@ fn save_provider_config(
     {
         runtime.api_key = Some(api_key.to_string());
     }
+
+    if input.vision_channel.clear_api_key.unwrap_or(false) {
+        runtime.vision_api_key = None;
+    }
+
+    if let Some(api_key) = input
+        .vision_channel
+        .api_key
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        runtime.vision_api_key = Some(api_key.to_string());
+    }
+
+    runtime.vision_channel_status = app_state::current_vision_channel_status(
+        &runtime.vision_channel,
+        runtime.vision_api_key.as_ref(),
+    );
 
     let oauth_identity_changed = previous_provider_kind != runtime.provider.kind
         || previous_auth_mode != runtime.provider.auth_mode
@@ -398,6 +442,11 @@ fn save_provider_config(
     );
 
     save(&app, &runtime)?;
+    if let Some(agent_state) = app.try_state::<AgentTaskState>() {
+        if let Ok(mut cache) = agent_state.vision_cache() {
+            *cache = None;
+        }
+    }
     Ok(snapshot_from_runtime(&runtime))
 }
 
@@ -733,6 +782,8 @@ async fn send_chat_message(
         provider_config,
         api_key,
         oauth_access_token,
+        vision_channel,
+        vision_api_key,
         codex_command,
         codex_home,
         history_window,
@@ -751,6 +802,8 @@ async fn send_chat_message(
             runtime.provider.clone(),
             runtime.api_key.clone(),
             runtime.oauth_access_token.clone(),
+            runtime.vision_channel.clone(),
+            runtime.vision_api_key.clone(),
             codex_runtime
                 .as_ref()
                 .and_then(|item| item.command.as_ref())
@@ -765,11 +818,21 @@ async fn send_chat_message(
     };
 
     let (reply_text, provider_label, outcome, detail, agent_meta) =
-        match agent_router::maybe_handle_control_message(
+        match test_agent::router::maybe_handle_test_message(&app, trimmed).await {
+            Ok(Some(result)) => (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+            ),
+            Ok(None) => match agent_router::maybe_handle_control_message(
             &app,
             &provider_config,
             api_key.clone(),
             oauth_access_token.clone(),
+            &vision_channel,
+            vision_api_key,
             codex_command.clone(),
             codex_home.clone(),
             permission_level,
@@ -820,6 +883,14 @@ async fn send_chat_message(
                     None,
                 ),
             },
+            Err(error) => (
+                provider::fallback_reply(&error),
+                "Safety fallback".to_string(),
+                "fallback".to_string(),
+                error,
+                None,
+            ),
+        },
             Err(error) => (
                 provider::fallback_reply(&error),
                 "Safety fallback".to_string(),
@@ -1087,6 +1158,7 @@ pub fn run() {
             app.manage(Mutex::new(runtime));
             app.manage(ControlServiceState::new());
             app.manage(AgentTaskState::new());
+            app.manage(TestingState::new());
             let _ = history::prepare_storage(&app.handle());
 
             let control_service_status = match control::http::start(app.handle().clone()) {

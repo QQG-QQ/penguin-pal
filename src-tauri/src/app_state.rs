@@ -7,7 +7,10 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
-use crate::agent::types::AgentMessageMeta;
+use crate::agent::{
+    types::AgentMessageMeta,
+    vision_types::{VisionProviderStatus, VisionProviderStatusKind},
+};
 
 pub const HISTORY_LIMIT: usize = 24;
 pub const AUDIT_LIMIT: usize = 12;
@@ -69,6 +72,38 @@ impl Default for ProviderKind {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum VisionChannelKind {
+    Disabled,
+    OpenAi,
+    OpenAiCompatible,
+}
+
+impl VisionChannelKind {
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            Self::Disabled => "gpt-4.1-mini",
+            Self::OpenAi => "gpt-4.1-mini",
+            Self::OpenAiCompatible => "gpt-4.1-mini",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Disabled => "未启用",
+            Self::OpenAi => "OpenAI",
+            Self::OpenAiCompatible => "OpenAI-Compatible",
+        }
+    }
+}
+
+impl Default for VisionChannelKind {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuthMode {
     #[serde(rename = "apiKey")]
     ApiKey,
@@ -103,6 +138,10 @@ pub fn default_system_prompt() -> String {
     只有涉及权限、隐私、电脑控制或受限能力时，才用一句话提醒限制，再给出可执行建议。\
     用户问你是什么模型或如何运行时，简短说明当前接入模型与运行方式。"
         .to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn migrate_system_prompt(prompt: &str) -> String {
@@ -187,6 +226,41 @@ impl Default for ProviderConfig {
             api_key_loaded: false,
             auth_mode: AuthMode::ApiKey,
             oauth: OAuthState::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisionChannelConfig {
+    pub enabled: bool,
+    pub kind: VisionChannelKind,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub allow_network: bool,
+    pub api_key_loaded: bool,
+    pub timeout_ms: u64,
+    pub max_image_bytes: u64,
+    pub max_image_width: u32,
+    pub max_image_height: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl Default for VisionChannelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kind: VisionChannelKind::Disabled,
+            model: VisionChannelKind::OpenAi.default_model().to_string(),
+            base_url: None,
+            allow_network: true,
+            api_key_loaded: false,
+            timeout_ms: 12000,
+            max_image_bytes: 3 * 1024 * 1024,
+            max_image_width: 1600,
+            max_image_height: 1200,
+            last_error: None,
         }
     }
 }
@@ -304,6 +378,8 @@ pub struct AssistantSnapshot {
     pub mode: PetMode,
     pub messages: Vec<ChatMessage>,
     pub provider: ProviderConfig,
+    pub vision_channel: VisionChannelConfig,
+    pub vision_channel_status: VisionProviderStatus,
     pub permission_level: u8,
     pub allowed_actions: Vec<DesktopAction>,
     pub audit_trail: Vec<AuditEntry>,
@@ -338,6 +414,50 @@ pub struct ProviderConfigInput {
     pub clear_api_key: Option<bool>,
     #[serde(default)]
     pub clear_oauth_token: Option<bool>,
+    #[serde(default)]
+    pub vision_channel: VisionChannelConfigInput,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisionChannelConfigInput {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub kind: VisionChannelKind,
+    pub model: String,
+    pub base_url: Option<String>,
+    #[serde(default = "default_true")]
+    pub allow_network: bool,
+    #[serde(default = "default_vision_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_vision_max_image_bytes")]
+    pub max_image_bytes: u64,
+    #[serde(default = "default_vision_max_image_width")]
+    pub max_image_width: u32,
+    #[serde(default = "default_vision_max_image_height")]
+    pub max_image_height: u32,
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub clear_api_key: Option<bool>,
+}
+
+impl Default for VisionChannelConfigInput {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kind: VisionChannelKind::Disabled,
+            model: VisionChannelKind::OpenAi.default_model().to_string(),
+            base_url: None,
+            allow_network: true,
+            timeout_ms: default_vision_timeout_ms(),
+            max_image_bytes: default_vision_max_image_bytes(),
+            max_image_width: default_vision_max_image_width(),
+            max_image_height: default_vision_max_image_height(),
+            api_key: None,
+            clear_api_key: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -382,9 +502,12 @@ pub struct RuntimeState {
     pub mode: PetMode,
     pub messages: Vec<ChatMessage>,
     pub provider: ProviderConfig,
+    pub vision_channel: VisionChannelConfig,
+    pub vision_channel_status: VisionProviderStatus,
     pub permission_level: u8,
     pub audit_trail: Vec<AuditEntry>,
     pub api_key: Option<String>,
+    pub vision_api_key: Option<String>,
     pub oauth_access_token: Option<String>,
     pub oauth_refresh_token: Option<String>,
     pub oauth_access_expires_at: Option<u64>,
@@ -402,6 +525,8 @@ impl Default for RuntimeState {
                 "欢迎回来。我已经切到严格白名单模式，先把桌宠 UI、语音入口和安全边界搭好了，再接真实 AI API。",
             )],
             provider: ProviderConfig::default(),
+            vision_channel: VisionChannelConfig::default(),
+            vision_channel_status: current_vision_channel_status(&VisionChannelConfig::default(), None),
             permission_level: 2,
             audit_trail: vec![AuditEntry {
                 id: format!("audit-{}", now_millis()),
@@ -412,6 +537,7 @@ impl Default for RuntimeState {
                 risk_level: 0,
             }],
             api_key: None,
+            vision_api_key: None,
             oauth_access_token: None,
             oauth_refresh_token: None,
             oauth_access_expires_at: None,
@@ -431,6 +557,7 @@ impl RuntimeState {
         ai_constraints: AiConstraintProfile,
     ) -> AssistantSnapshot {
         let mut provider = self.provider.clone();
+        let mut vision_channel = self.vision_channel.clone();
         provider.api_key_loaded = self
             .api_key
             .as_ref()
@@ -460,11 +587,17 @@ impl RuntimeState {
         } else {
             OAuthStatus::SignedOut
         };
+        vision_channel.api_key_loaded = self
+            .vision_api_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty());
 
         AssistantSnapshot {
             mode: self.mode,
             messages: self.messages.clone(),
             provider,
+            vision_channel,
+            vision_channel_status: self.vision_channel_status.clone(),
             permission_level: self.permission_level,
             allowed_actions,
             audit_trail: self.audit_trail.clone(),
@@ -480,8 +613,68 @@ struct PersistedState {
     mode: PetMode,
     messages: Vec<ChatMessage>,
     provider: ProviderConfig,
+    #[serde(default)]
+    vision_channel: VisionChannelConfig,
     permission_level: u8,
     audit_trail: Vec<AuditEntry>,
+}
+
+fn default_vision_timeout_ms() -> u64 {
+    12_000
+}
+
+fn default_vision_max_image_bytes() -> u64 {
+    3 * 1024 * 1024
+}
+
+fn default_vision_max_image_width() -> u32 {
+    1600
+}
+
+fn default_vision_max_image_height() -> u32 {
+    1200
+}
+
+pub fn current_vision_channel_status(
+    config: &VisionChannelConfig,
+    api_key: Option<&String>,
+) -> VisionProviderStatus {
+    if !config.enabled || matches!(config.kind, VisionChannelKind::Disabled) {
+        return VisionProviderStatus {
+            kind: VisionProviderStatusKind::Unsupported,
+            message: "视觉副通道未启用。".to_string(),
+        };
+    }
+
+    if !config.allow_network {
+        return VisionProviderStatus {
+            kind: VisionProviderStatusKind::DisabledOffline,
+            message: "视觉副通道已禁用网络访问。".to_string(),
+        };
+    }
+
+    if matches!(config.kind, VisionChannelKind::OpenAi)
+        && api_key
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return VisionProviderStatus {
+            kind: VisionProviderStatusKind::Unsupported,
+            message: "视觉副通道缺少 OpenAI API Key。".to_string(),
+        };
+    }
+
+    if let Some(error) = config.last_error.as_ref().filter(|value| !value.trim().is_empty()) {
+        return VisionProviderStatus {
+            kind: VisionProviderStatusKind::AnalysisFailed,
+            message: error.clone(),
+        };
+    }
+
+    VisionProviderStatus {
+        kind: VisionProviderStatusKind::Supported,
+        message: format!("视觉副通道已启用：{}。", config.kind.label()),
+    }
 }
 
 pub fn now_millis() -> u64 {
@@ -514,9 +707,15 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         mode: persisted.mode,
         messages: persisted.messages,
         provider: persisted.provider,
+        vision_channel: persisted.vision_channel,
+        vision_channel_status: current_vision_channel_status(
+            &persisted.vision_channel,
+            None,
+        ),
         permission_level: 2,
         audit_trail: persisted.audit_trail,
         api_key: None,
+        vision_api_key: None,
         oauth_access_token: None,
         oauth_refresh_token: None,
         oauth_access_expires_at: None,
@@ -545,6 +744,10 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
     runtime.provider.oauth.status = OAuthStatus::SignedOut;
     runtime.provider.allow_network = true;
     runtime.provider.system_prompt = migrate_system_prompt(&runtime.provider.system_prompt);
+    runtime.vision_channel.api_key_loaded = false;
+    runtime.vision_channel.last_error = None;
+    runtime.vision_channel_status =
+        current_vision_channel_status(&runtime.vision_channel, runtime.vision_api_key.as_ref());
 
     Ok(runtime)
 }
@@ -552,6 +755,7 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
 pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
     let path = state_path(app)?;
     let mut provider = runtime.provider.clone();
+    let mut vision_channel = runtime.vision_channel.clone();
     provider.api_key_loaded = false;
     provider.oauth.access_token_loaded = false;
     provider.oauth.account_hint = None;
@@ -560,6 +764,7 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
     provider.oauth.started_at = None;
     provider.oauth.expires_at = None;
     provider.oauth.status = OAuthStatus::SignedOut;
+    vision_channel.api_key_loaded = false;
 
     let messages = if runtime.provider.retain_history {
         runtime.messages.clone()
@@ -573,6 +778,7 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
         mode: PetMode::Idle,
         messages,
         provider,
+        vision_channel,
         permission_level: runtime.permission_level.min(2),
         audit_trail: runtime.audit_trail.clone(),
     };

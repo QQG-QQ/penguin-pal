@@ -44,7 +44,7 @@ pub async fn plan_from_screen_context(
     } else {
         let planner_prompt = prompt::build_screen_planner_prompt(&allowed_tools);
         let planner_input = format!(
-            "用户原始请求：\n{}\n\n当前 screen context：\n{}\n\n你必须先参考 screen context 再规划。如果上下文不足，优先输出 route=chat，而不是盲目操作。",
+            "用户原始请求：\n{}\n\n当前 screen context：\n{}\n\n其中 vision summary 来自独立视觉副通道，而不是主聊天 Provider。你必须先参考 screen context 再规划。如果上下文不足，优先输出 route=chat，而不是盲目操作。",
             user_input.trim(),
             render_screen_context_for_prompt(context)
         );
