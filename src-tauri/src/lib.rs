@@ -21,8 +21,9 @@ use crate::{
     ai::{guardrails, memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
-        AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult, PetMode,
-        ProviderConfigInput, RuntimeState, DEFAULT_OAUTH_REDIRECT_URL,
+        AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, DesktopAction, OAuthFlowResult,
+        PetMode, ProviderConfig, ProviderConfigInput, RuntimeState,
+        DEFAULT_OAUTH_REDIRECT_URL,
     },
     codex_runtime::{apply_private_env, private_auth_path, resolve_for_app},
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
