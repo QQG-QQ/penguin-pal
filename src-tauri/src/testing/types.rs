@@ -254,6 +254,7 @@ pub struct TestHistoryIndex {
 pub struct TestRunState {
     pub report: TestRunReport,
     pub selected_cases: Vec<TestCase>,
+    pub shared_vars: serde_json::Map<String, Value>,
     pub current_case_index: usize,
     pub waiting_pending_id: Option<String>,
     pub waiting_case_index: Option<usize>,

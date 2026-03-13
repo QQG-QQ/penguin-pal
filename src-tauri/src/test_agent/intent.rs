@@ -6,23 +6,21 @@ pub fn looks_like_test_request(input: &str) -> bool {
         return false;
     }
 
-    [
-        "测试",
-        "验证",
-        "测一下",
-        "smoke",
-        "回归",
-        "重测",
-        "failed",
-        "安全相关",
-        "全部功能",
-        "全量",
-        "浏览器适配器",
-        "记事本",
-        "剪贴板",
-    ]
-        .iter()
-        .any(|token| trimmed.contains(token))
+    parse_test_request(trimmed).is_some()
+        || starts_with_any(
+            trimmed,
+            &[
+                "测试",
+                "验证",
+                "测一下",
+                "跑一轮",
+                "回归",
+                "重测",
+                "只测",
+            ],
+        )
+        || trimmed.eq_ignore_ascii_case("smoke test")
+        || trimmed.eq_ignore_ascii_case("rerun failed")
 }
 
 pub fn parse_test_request(input: &str) -> Option<TestRunRequest> {
@@ -201,4 +199,8 @@ fn request(
 
 fn contains_any(input: &str, tokens: &[&str]) -> bool {
     tokens.iter().any(|token| input.contains(token))
+}
+
+fn starts_with_any(input: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| input.starts_with(prefix))
 }

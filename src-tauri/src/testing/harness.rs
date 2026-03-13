@@ -89,6 +89,7 @@ pub async fn execute_request(
     let mut state = TestRunState {
         report,
         selected_cases,
+        shared_vars: Map::new(),
         current_case_index: 0,
         waiting_pending_id: None,
         waiting_case_index: None,
@@ -171,7 +172,10 @@ async fn continue_run(
     state: &mut TestRunState,
     resumed_case: Option<TestCase>,
 ) -> Result<HarnessExecutionResult, String> {
-    let mut case_context = CaseContext::default();
+    let mut case_context = CaseContext {
+        vars: state.shared_vars.clone(),
+        ..CaseContext::default()
+    };
 
     if let Some(case) = resumed_case {
         execute_case(app, state, &case, &mut case_context, true).await?;
@@ -179,8 +183,12 @@ async fn continue_run(
 
     while state.current_case_index < state.selected_cases.len() {
         let case = state.selected_cases[state.current_case_index].clone();
+        let mut case_context = CaseContext {
+            vars: state.shared_vars.clone(),
+            ..CaseContext::default()
+        };
         if let Some(result) =
-            execute_case(app, state, &case, &mut CaseContext::default(), false).await?
+            execute_case(app, state, &case, &mut case_context, false).await?
         {
             return Ok(result);
         }
@@ -251,6 +259,7 @@ async fn execute_case(
                 case_context.last_result = payload;
             }
             Ok(StepOutcome::Pending { pending_request }) => {
+                merge_shared_vars(state, case_context);
                 case_result.status = TestCaseStatus::WaitingConfirmation;
                 case_result.step_results.push(super::types::TestStepResult {
                     index: index + 1,
@@ -273,6 +282,7 @@ async fn execute_case(
                 )));
             }
             Err((stage, reason)) => {
+                merge_shared_vars(state, case_context);
                 case_result.status = TestCaseStatus::Failed;
                 case_result.finished_at = crate::app_state::now_millis();
                 case_result.failure_reason = Some(reason.clone());
@@ -345,6 +355,7 @@ async fn execute_case(
         }
     }
 
+    merge_shared_vars(state, case_context);
     case_result.status = TestCaseStatus::Passed;
     case_result.finished_at = crate::app_state::now_millis();
     upsert_case_result(state, case_result);
@@ -379,10 +390,14 @@ async fn rerun_failed_cases(app: &AppHandle, state: &mut TestRunState) -> Result
 
     for (case, failure) in failed_cases {
         let probes = retry::supplementary_probes(&case, &failure);
-        let mut probe_context = CaseContext::default();
+        let mut probe_context = CaseContext {
+            vars: state.shared_vars.clone(),
+            ..CaseContext::default()
+        };
         for probe in &probes {
             let _ = execute_step(app, &mut probe_context, probe).await;
         }
+        merge_shared_vars(state, &probe_context);
 
         if let Some(existing) = state
             .report
@@ -397,7 +412,11 @@ async fn rerun_failed_cases(app: &AppHandle, state: &mut TestRunState) -> Result
 
         if let Some(position) = state.selected_cases.iter().position(|item| item.id == case.id) {
             state.current_case_index = position;
-            let _ = execute_case(app, state, &case, &mut CaseContext::default(), false).await?;
+            let mut case_context = CaseContext {
+                vars: state.shared_vars.clone(),
+                ..CaseContext::default()
+            };
+            let _ = execute_case(app, state, &case, &mut case_context, false).await?;
         }
     }
 
@@ -624,6 +643,12 @@ fn resolve_args(value: &Value, vars: &Map<String, Value>) -> Result<Value, Strin
             Ok(Value::Object(next))
         }
         other => Ok(other.clone()),
+    }
+}
+
+fn merge_shared_vars(state: &mut TestRunState, case_context: &CaseContext) {
+    for (key, value) in &case_context.vars {
+        state.shared_vars.insert(key.clone(), value.clone());
     }
 }
 
