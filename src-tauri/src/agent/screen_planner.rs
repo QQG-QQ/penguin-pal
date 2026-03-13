@@ -1,6 +1,10 @@
 use crate::{
     app_state::{DesktopAction, ProviderConfig},
-    control::{registry, types::ControlRiskLevel},
+    control::{
+        registry,
+        types::ControlRiskLevel,
+        windows::adapters::browser::{self, BrowserPlanOutcome},
+    },
 };
 
 use super::{
@@ -39,7 +43,12 @@ pub async fn plan_from_screen_context(
         .into_iter()
         .filter(|tool| super::types::is_agent_tool_allowed(&tool.name))
         .collect::<Vec<_>>();
-    let plan = if let Some(plan) = intent::parse_simple_control_plan(user_input) {
+    let plan = if let Some(outcome) = browser::try_build_browser_plan(user_input, context) {
+        match outcome {
+            BrowserPlanOutcome::Plan(plan) => plan,
+            BrowserPlanOutcome::Reject(reason) => return Err(reason),
+        }
+    } else if let Some(plan) = intent::parse_simple_control_plan(user_input) {
         plan
     } else {
         let planner_prompt = prompt::build_screen_planner_prompt(&allowed_tools);

@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::control::windows::adapters::{browser, notepad, wechat};
+use crate::control::windows::adapters::{notepad, wechat};
 
 use super::types::{AgentPlan, AgentRoute, AgentToolStep};
 
@@ -44,7 +44,6 @@ pub fn parse_simple_control_plan(input: &str) -> Option<AgentPlan> {
         .or_else(|| parse_open_notepad_and_type(trimmed))
         .or_else(|| parse_paste_clipboard(trimmed))
         .or_else(|| parse_list_and_focus(trimmed))
-        .or_else(|| parse_focus_browser_and_hotkey(trimmed))
         .or_else(|| parse_single_step_control(trimmed))
 }
 
@@ -183,15 +182,6 @@ fn parse_list_and_focus(input: &str) -> Option<AgentPlan> {
             ),
         ],
     ))
-}
-
-fn parse_focus_browser_and_hotkey(input: &str) -> Option<AgentPlan> {
-    let lowered = input.to_lowercase();
-    if !lowered.contains("浏览器") || !contains_any(&lowered, &["ctrl+l", "ctrl + l", "ctrl l", "control+l", "control + l"]) {
-        return None;
-    }
-
-    Some(browser::build_focus_and_ctrl_l_plan())
 }
 
 fn contains_any(input: &str, tokens: &[&str]) -> bool {

@@ -45,8 +45,8 @@ pub fn tool_definitions() -> Vec<ControlToolDefinition> {
             args: vec![ControlToolArgSpec {
                 name: "name".to_string(),
                 required: true,
-                summary: "应用别名，例如 notepad / calculator / explorer / settings。".to_string(),
-                example: Some(json!("notepad")),
+                summary: "应用别名，例如 browser / notepad / calculator / explorer / settings。".to_string(),
+                example: Some(json!("browser")),
             }],
         },
         ControlToolDefinition {

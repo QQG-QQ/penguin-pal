@@ -17,6 +17,11 @@ fn normalize_alias(value: &str) -> String {
 pub fn open_app(app: &AppHandle, name: &str) -> ControlResult<Value> {
     let normalized = normalize_alias(name);
     let (label, mut command): (&str, Command) = match normalized.as_str() {
+        "browser" => {
+            let mut cmd = Command::new("cmd.exe");
+            cmd.args(["/C", "start", "", "about:blank"]);
+            ("browser", cmd)
+        }
         "notepad" | "editor" => ("notepad", Command::new("notepad.exe")),
         "calculator" | "calc" => ("calculator", Command::new("calc.exe")),
         "explorer" | "files" => ("explorer", Command::new("explorer.exe")),
@@ -28,7 +33,7 @@ pub fn open_app(app: &AppHandle, name: &str) -> ControlResult<Value> {
         }
         _ => {
             return Err(ControlError::invalid_argument(
-                "当前只允许打开 allowlist 内应用：notepad、calculator、explorer、paint、settings。",
+                "当前只允许打开 allowlist 内应用：browser、notepad、calculator、explorer、paint、settings。",
             ))
         }
     };

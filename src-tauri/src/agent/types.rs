@@ -93,6 +93,7 @@ pub const AGENT_ALLOWED_TOOLS: &[&str] = &[
     "read_clipboard",
     "type_text",
     "send_hotkey",
+    "scroll_at",
     "click_at",
 ];
 

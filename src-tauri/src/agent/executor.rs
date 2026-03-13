@@ -416,7 +416,22 @@ fn resolve_step_args(task: &AgentTaskRun, step: &AgentToolStep) -> Result<Value,
 
     if let Some(category) = map.get("windowCategory").and_then(Value::as_str) {
         if category == "browser" {
-            candidates.extend(["Chrome", "Edge", "Firefox", "浏览器"].into_iter().map(str::to_string));
+            candidates.extend(
+                [
+                    "Chrome",
+                    "Google Chrome",
+                    "Edge",
+                    "Microsoft Edge",
+                    "Firefox",
+                    "Brave",
+                    "Opera",
+                    "Vivaldi",
+                    "Chromium",
+                    "浏览器",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            );
         }
     }
 
