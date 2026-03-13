@@ -23,8 +23,7 @@ use super::{
     retry,
     types::{
         FailureItem, TestAssertion, TestCase, TestCaseResult, TestCaseStatus, TestFailureStage,
-        TestRunReport, TestRunRequest, TestRunState, TestRunStatus, TestRunSummary, TestSelection,
-        TestStep,
+        TestRunReport, TestRunRequest, TestRunState, TestRunStatus, TestRunSummary, TestStep,
     },
 };
 
@@ -294,10 +293,29 @@ async fn execute_case(
     }
 
     for (index, assertion) in case.assertions.iter().enumerate() {
+        let resolved_params = match resolve_args(&assertion.params, &case_context.vars) {
+            Ok(params) => params,
+            Err(reason) => {
+                case_result.status = TestCaseStatus::Failed;
+                case_result.finished_at = crate::app_state::now_millis();
+                case_result.failure_reason = Some(reason.clone());
+                case_result.failure_stage = Some(TestFailureStage::Assertion);
+                upsert_case_result(state, case_result.clone());
+                state.report.failure_items.push(FailureItem {
+                    case_id: case.id.clone(),
+                    case_title: case.title.clone(),
+                    failure_stage: TestFailureStage::Assertion,
+                    step_index: case.steps.len() + index + 1,
+                    step_name: assertion.summary.clone(),
+                    reason,
+                    rerunnable: true,
+                });
+                return Ok(None);
+            }
+        };
         let resolved_assertion = TestAssertion {
             kind: assertion.kind.clone(),
-            params: resolve_args(&assertion.params, &case_context.vars)
-                .map_err(|error| (TestFailureStage::Assertion, error))?,
+            params: resolved_params,
             summary: assertion.summary.clone(),
         };
         if let Err((stage, reason)) = assertions::evaluate(
