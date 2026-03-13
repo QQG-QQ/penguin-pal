@@ -34,13 +34,15 @@ pub async fn maybe_handle_control_message(
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
+    force_route: bool,
 ) -> Result<Option<AgentHandleResult>, String> {
     let trimmed = user_input.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
 
-    let looks_control = intent::parse_simple_control_plan(trimmed).is_some()
+    let looks_control = force_route
+        || intent::parse_simple_control_plan(trimmed).is_some()
         || intent::looks_like_control_request(trimmed);
 
     let plan = if looks_control {

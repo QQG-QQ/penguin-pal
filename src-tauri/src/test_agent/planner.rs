@@ -39,10 +39,10 @@ pub async fn plan_test_request(
     )
     .await?;
 
-    parse_planned_request(&raw)
+    parse_planned_request(&raw)?.ok_or_else(|| "没有匹配到可执行测试。".to_string())
 }
 
-fn parse_planned_request(raw: &str) -> Result<TestRunRequest, String> {
+pub fn parse_planned_request(raw: &str) -> Result<Option<TestRunRequest>, String> {
     let payload = extract_json(raw)
         .ok_or_else(|| format!("测试规划模型没有返回可解析 JSON：{}", raw.trim()))?;
     let plan: PlannedTestRequest = serde_json::from_str(&payload)
@@ -50,7 +50,15 @@ fn parse_planned_request(raw: &str) -> Result<TestRunRequest, String> {
     validate_plan(plan)
 }
 
-fn validate_plan(mut plan: PlannedTestRequest) -> Result<TestRunRequest, String> {
+fn validate_plan(mut plan: PlannedTestRequest) -> Result<Option<TestRunRequest>, String> {
+    if matches!(plan.route, crate::agent::types::AgentRoute::Chat) {
+        return Ok(None);
+    }
+
+    if !matches!(plan.route, crate::agent::types::AgentRoute::Test) {
+        return Err("测试规划器只接受 chat 或 test 路由。".to_string());
+    }
+
     if plan.title.trim().is_empty() {
         plan.title = "受控智能测试".to_string();
     }
@@ -69,10 +77,10 @@ fn validate_plan(mut plan: PlannedTestRequest) -> Result<TestRunRequest, String>
     }
 
     if plan.selection.is_none() && plan.dynamic_cases.is_empty() {
-        return Err("没有匹配到可执行测试。".to_string());
+        return Ok(None);
     }
 
-    Ok(plan.into_run_request())
+    Ok(Some(plan.into_run_request()))
 }
 
 fn validate_dynamic_case(case: &TestCase) -> Result<(), String> {

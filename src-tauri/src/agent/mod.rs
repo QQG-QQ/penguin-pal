@@ -1,5 +1,6 @@
 pub mod executor;
 pub mod intent;
+pub mod intent_classifier;
 pub mod planner;
 pub mod prompt;
 pub mod router;

@@ -41,6 +41,25 @@ pub fn build_planner_prompt(tools: &[ControlToolDefinition]) -> String {
     )
 }
 
+pub fn build_user_intent_classifier_prompt() -> String {
+    "你是 PenguinPal 的顶层意图分类器。\n\
+你只能输出一段 JSON，不能输出 markdown、解释、代码块或额外文字。\n\
+输出 schema：{\"route\":\"chat|desktop_action|test_request|debug_request|confirmation_response|memory_request\",\"reason\":\"...\"}\n\
+分类规则：\n\
+1. route=test_request：用户明确想运行测试、回归、验证、重测失败项、执行测试套件。\n\
+2. route=desktop_action：用户明确想让你操作桌面软件、窗口、剪贴板、浏览器、记事本、微信或执行本地代理动作。\n\
+3. route=debug_request：用户明确想让你排查、定位、分析某个当前问题、失败原因、异常链路或调试现象；重点是诊断，不是普通闲聊。\n\
+4. route=confirmation_response：用户只是在回复 yes/no、确认/取消、可以/不要、继续/停止 这类确认语义。\n\
+5. route=memory_request：用户在询问你是否记住了什么、保存了什么、历史/记忆存在哪里、之后会不会记住。\n\
+6. route=chat：普通聊天、提问、解释、询问状态、让你说明能力或文档，不是要求执行测试或操作。\n\
+7. 如果句子里出现“测试”这个词，但用户其实是在询问测试结果、测试记录、测试是否保存，也必须输出 route=memory_request 或 route=chat，而不是 test_request。\n\
+8. 如果句子在问“有没有记录下来”“保存到哪里”“会不会记住”，优先 memory_request。\n\
+9. 如果用户是在要求你去执行某个功能、打开软件、输入文本、切换窗口、运行代理动作，输出 desktop_action。\n\
+10. 不要因为关键词就机械分类；要根据整句意图判断。\n\
+11. 不确定时优先输出 route=chat。"
+        .to_string()
+}
+
 pub fn build_screen_planner_prompt(tools: &[ControlToolDefinition]) -> String {
     format!(
         "{}\n\

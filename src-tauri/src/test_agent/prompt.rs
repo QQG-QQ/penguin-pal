@@ -13,6 +13,7 @@ pub fn build_test_agent_prompt(cases: &[TestCase]) -> String {
         你只能输出一段 JSON，不能输出 markdown、解释、代码块或额外文字。\
         JSON schema：\
         {{\
+          \"route\":\"chat|test\",\
           \"title\":\"...\",\
           \"selection\":{{\"suite\":\"...|null\",\"feature\":\"...|null\",\"tag\":\"...|null\",\"caseIds\":[...],\"rerunFailedOnly\":false}}|null,\
           \"dynamicCases\":[{{\
@@ -32,6 +33,7 @@ pub fn build_test_agent_prompt(cases: &[TestCase]) -> String {
           \"allowSupplementaryRerun\":true|false\
         }}\
         规则：\
+        0. 如果用户并不是在要求执行测试，而是在询问测试结果、记录保存位置、测试策略或普通聊天，输出 {{\"route\":\"chat\",\"title\":\"\",\"selection\":null,\"dynamicCases\":[],\"maxCases\":8,\"allowSupplementaryRerun\":false}}。\
         1. 优先选择已有注册表 case；只有在已有 case 明显不贴切时，才生成 dynamicCases。\
         2. dynamicCases 最多 2 个；每个 case 最多 4 步；不允许 0 步。\
         3. 允许的 step 工具只有：list_windows, focus_window, open_app, capture_active_window, read_clipboard, type_text, send_hotkey, scroll_at, click_at, find_element, click_element, get_element_text, set_element_value, wait_for_element。\

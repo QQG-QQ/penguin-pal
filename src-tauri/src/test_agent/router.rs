@@ -28,13 +28,14 @@ pub async fn maybe_handle_test_message(
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
+    force_route: bool,
 ) -> Result<Option<TestAgentHandleResult>, String> {
     let trimmed = user_input.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
 
-    if !intent::looks_like_test_request(trimmed) {
+    if !force_route && !intent::looks_like_test_request(trimmed) {
         return Ok(None);
     }
 
@@ -55,6 +56,9 @@ pub async fn maybe_handle_test_message(
         {
             Ok(request) => request,
             Err(error) => {
+                if !force_route {
+                    return Ok(None);
+                }
                 return Ok(Some(TestAgentHandleResult {
                     reply_text: format!(
                         "这句更像测试请求，但当前没有匹配到合规的受控测试计划。\n\n原因：{}",

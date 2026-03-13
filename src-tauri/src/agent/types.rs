@@ -12,6 +12,17 @@ pub enum AgentRoute {
     Test,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TopLevelIntent {
+    Chat,
+    DesktopAction,
+    TestRequest,
+    DebugRequest,
+    ConfirmationResponse,
+    MemoryRequest,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolStep {

@@ -17,7 +17,7 @@ use std::{process::Command, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    agent::{router as agent_router, AgentTaskState},
+    agent::{intent_classifier, router as agent_router, AgentTaskState},
     ai::{guardrails, memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
@@ -140,6 +140,53 @@ fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
         runtime_path: command_label,
         source: runtime.source.to_string(),
         message,
+    }
+}
+
+async fn provider_response(
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    history_window: &[ChatMessage],
+) -> (String, String, String, String, Option<agent::types::AgentMessageMeta>) {
+    match provider::respond(
+        provider_config,
+        api_key,
+        oauth_access_token,
+        codex_command,
+        codex_home,
+        permission_level,
+        allowed_actions,
+        history_window,
+    )
+    .await
+    {
+        Ok((reply, label)) => (
+            reply,
+            label,
+            "ok".to_string(),
+            format!(
+                "provider={} auth={} model={}",
+                provider_config.kind.label(),
+                match provider_config.auth_mode {
+                    AuthMode::ApiKey => "apiKey",
+                    AuthMode::OAuth => "oauth",
+                },
+                provider_config.model
+            ),
+            None,
+        ),
+        Err(error) => (
+            provider::fallback_reply(&error),
+            "Safety fallback".to_string(),
+            "fallback".to_string(),
+            error,
+            None,
+        ),
     }
 }
 
@@ -817,8 +864,22 @@ async fn send_chat_message(
         )
     };
 
-    let (reply_text, provider_label, outcome, detail, agent_meta) =
-        match test_agent::router::maybe_handle_test_message(
+    let classified_route = intent_classifier::classify_user_intent(
+        &provider_config,
+        api_key.clone(),
+        oauth_access_token.clone(),
+        codex_command.clone(),
+        codex_home.clone(),
+        permission_level,
+        &allowed_actions,
+        trimmed,
+    )
+    .await
+    .ok()
+    .map(|decision| decision.route);
+
+    let (reply_text, provider_label, outcome, detail, agent_meta) = match classified_route {
+        Some(agent::types::TopLevelIntent::TestRequest) => match test_agent::router::maybe_handle_test_message(
             &app,
             &provider_config,
             api_key.clone(),
@@ -828,27 +889,7 @@ async fn send_chat_message(
             permission_level,
             &allowed_actions,
             trimmed,
-        )
-        .await {
-            Ok(Some(result)) => (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-            ),
-            Ok(None) => match agent_router::maybe_handle_control_message(
-            &app,
-            &provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
-            &vision_channel,
-            vision_api_key,
-            codex_command.clone(),
-            codex_home.clone(),
-            permission_level,
-            &allowed_actions,
-            trimmed,
+            true,
         )
         .await
         {
@@ -859,7 +900,69 @@ async fn send_chat_message(
                 result.detail,
                 Some(result.meta),
             ),
-            Ok(None) => match provider::respond(
+            Ok(None) => provider_response(
+                &provider_config,
+                api_key,
+                oauth_access_token,
+                codex_command,
+                codex_home,
+                permission_level,
+                &allowed_actions,
+                &history_window,
+            )
+            .await,
+            Err(error) => (
+                provider::fallback_reply(&error),
+                "Safety fallback".to_string(),
+                "fallback".to_string(),
+                error,
+                None,
+            ),
+        },
+        Some(agent::types::TopLevelIntent::DesktopAction) => match agent_router::maybe_handle_control_message(
+            &app,
+            &provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            &vision_channel,
+            vision_api_key.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            permission_level,
+            &allowed_actions,
+            trimmed,
+            true,
+        )
+        .await
+        {
+            Ok(Some(result)) => (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+            ),
+            Ok(None) => provider_response(
+                &provider_config,
+                api_key,
+                oauth_access_token,
+                codex_command,
+                codex_home,
+                permission_level,
+                &allowed_actions,
+                &history_window,
+            )
+            .await,
+            Err(error) => (
+                provider::fallback_reply(&error),
+                "Safety fallback".to_string(),
+                "fallback".to_string(),
+                error,
+                None,
+            ),
+        },
+        Some(agent::types::TopLevelIntent::Chat) | Some(agent::types::TopLevelIntent::DebugRequest) => {
+            provider_response(
                 &provider_config,
                 api_key,
                 oauth_access_token,
@@ -870,22 +973,77 @@ async fn send_chat_message(
                 &history_window,
             )
             .await
+        }
+        Some(agent::types::TopLevelIntent::MemoryRequest) => (
+            "当前还没有启用真正的持久化记忆系统，但会保存本地历史数据：输入历史、今日回复历史、测试历史和回归记录。后续会在此基础上再扩成正式记忆层。".to_string(),
+            "Memory Info".to_string(),
+            "memory_info".to_string(),
+            "top_level_intent=memory_request".to_string(),
+            None,
+        ),
+        Some(agent::types::TopLevelIntent::ConfirmationResponse) => (
+            "如果界面上当前没有待确认条，说明这次没有等待你确认的动作。真正的高风险动作仍然只会在确认面板或 /confirm /cancel 流程里继续执行。".to_string(),
+            "Confirmation Info".to_string(),
+            "confirmation_info".to_string(),
+            "top_level_intent=confirmation_response".to_string(),
+            None,
+        ),
+        None => match test_agent::router::maybe_handle_test_message(
+            &app,
+            &provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            permission_level,
+            &allowed_actions,
+            trimmed,
+            false,
+        )
+        .await {
+            Ok(Some(result)) => (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+            ),
+            Ok(None) => match agent_router::maybe_handle_control_message(
+                &app,
+                &provider_config,
+                api_key.clone(),
+                oauth_access_token.clone(),
+                &vision_channel,
+                vision_api_key,
+                codex_command.clone(),
+                codex_home.clone(),
+                permission_level,
+                &allowed_actions,
+                trimmed,
+                false,
+            )
+            .await
             {
-                Ok((reply, label)) => (
-                    reply,
-                    label,
-                    "ok".to_string(),
-                    format!(
-                        "provider={} auth={} model={}",
-                        provider_config.kind.label(),
-                        match provider_config.auth_mode {
-                            AuthMode::ApiKey => "apiKey",
-                            AuthMode::OAuth => "oauth",
-                        },
-                        provider_config.model
-                    ),
-                    None,
+                Ok(Some(result)) => (
+                    result.reply_text,
+                    result.provider_label,
+                    result.outcome,
+                    result.detail,
+                    Some(result.meta),
                 ),
+                Ok(None) => {
+                    provider_response(
+                        &provider_config,
+                        api_key,
+                        oauth_access_token,
+                        codex_command,
+                        codex_home,
+                        permission_level,
+                        &allowed_actions,
+                        &history_window,
+                    )
+                    .await
+                }
                 Err(error) => (
                     provider::fallback_reply(&error),
                     "Safety fallback".to_string(),
@@ -902,14 +1060,7 @@ async fn send_chat_message(
                 None,
             ),
         },
-            Err(error) => (
-                provider::fallback_reply(&error),
-                "Safety fallback".to_string(),
-                "fallback".to_string(),
-                error,
-                None,
-            ),
-        };
+    };
 
     let reply_message = ChatMessage::assistant(reply_text);
 

@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-use crate::testing::types::{TestCase, TestRunRequest, TestSelection, TestStep};
+use crate::{
+    agent::types::AgentRoute,
+    testing::types::{TestCase, TestRunRequest, TestSelection, TestStep},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannedTestRequest {
+    #[serde(default = "default_test_route")]
+    pub route: AgentRoute,
     pub title: String,
     #[serde(default)]
     pub selection: Option<TestSelection>,
@@ -26,6 +31,10 @@ impl PlannedTestRequest {
             allow_supplementary_rerun: self.allow_supplementary_rerun,
         }
     }
+}
+
+pub fn default_test_route() -> AgentRoute {
+    AgentRoute::Test
 }
 
 pub const EXPLORATORY_ALLOWED_TOOLS: &[&str] = &[
