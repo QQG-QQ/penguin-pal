@@ -6,7 +6,21 @@ pub fn looks_like_test_request(input: &str) -> bool {
         return false;
     }
 
-    ["测试", "测一下", "smoke", "回归", "重测", "failed", "安全相关"]
+    [
+        "测试",
+        "验证",
+        "测一下",
+        "smoke",
+        "回归",
+        "重测",
+        "failed",
+        "安全相关",
+        "全部功能",
+        "全量",
+        "浏览器适配器",
+        "记事本",
+        "剪贴板",
+    ]
         .iter()
         .any(|token| trimmed.contains(token))
 }
@@ -28,6 +42,22 @@ pub fn parse_test_request(input: &str) -> Option<TestRunRequest> {
                 rerun_failed_only: false,
             },
             true,
+            8,
+        ));
+    }
+
+    if contains_any(trimmed, &["测试全部功能", "回归全部功能", "跑一轮全量回归", "跑一轮全部功能测试"]) {
+        return Some(request(
+            "全部功能回归",
+            TestSelection {
+                suite: None,
+                feature: None,
+                tag: None,
+                case_ids: vec![],
+                rerun_failed_only: false,
+            },
+            true,
+            32,
         ));
     }
 
@@ -42,6 +72,7 @@ pub fn parse_test_request(input: &str) -> Option<TestRunRequest> {
                 rerun_failed_only: false,
             },
             true,
+            8,
         ));
     }
 
@@ -56,6 +87,52 @@ pub fn parse_test_request(input: &str) -> Option<TestRunRequest> {
                 rerun_failed_only: false,
             },
             true,
+            8,
+        ));
+    }
+
+    if contains_any(trimmed, &["回归浏览器适配器", "测试浏览器适配器", "测试浏览器功能"]) {
+        return Some(request(
+            "浏览器适配器回归",
+            TestSelection {
+                suite: Some("browser.adapter".to_string()),
+                feature: None,
+                tag: None,
+                case_ids: vec![],
+                rerun_failed_only: false,
+            },
+            true,
+            16,
+        ));
+    }
+
+    if contains_any(trimmed, &["测试记事本输入", "测试记事本适配器", "回归记事本适配器"]) {
+        return Some(request(
+            "记事本适配器回归",
+            TestSelection {
+                suite: Some("notepad.adapter".to_string()),
+                feature: None,
+                tag: None,
+                case_ids: vec![],
+                rerun_failed_only: false,
+            },
+            true,
+            12,
+        ));
+    }
+
+    if contains_any(trimmed, &["测试剪贴板读取", "测试剪贴板", "回归剪贴板"]) {
+        return Some(request(
+            "剪贴板能力回归",
+            TestSelection {
+                suite: Some("clipboard.core".to_string()),
+                feature: None,
+                tag: None,
+                case_ids: vec![],
+                rerun_failed_only: false,
+            },
+            false,
+            8,
         ));
     }
 
@@ -70,6 +147,7 @@ pub fn parse_test_request(input: &str) -> Option<TestRunRequest> {
                 rerun_failed_only: true,
             },
             false,
+            32,
         ));
     }
 
@@ -84,6 +162,7 @@ pub fn parse_test_request(input: &str) -> Option<TestRunRequest> {
                 rerun_failed_only: false,
             },
             false,
+            16,
         ));
     }
 
@@ -98,17 +177,24 @@ pub fn parse_test_request(input: &str) -> Option<TestRunRequest> {
                 rerun_failed_only: false,
             },
             false,
+            8,
         ));
     }
 
     None
 }
 
-fn request(title: &str, selection: TestSelection, allow_supplementary_rerun: bool) -> TestRunRequest {
+fn request(
+    title: &str,
+    selection: TestSelection,
+    allow_supplementary_rerun: bool,
+    max_cases: usize,
+) -> TestRunRequest {
     TestRunRequest {
         title: title.to_string(),
         selection,
-        max_cases: 8,
+        dynamic_cases: vec![],
+        max_cases,
         allow_supplementary_rerun,
     }
 }

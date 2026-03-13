@@ -1,9 +1,10 @@
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::types::{TestAssertion, TestFailureStage};
 
 #[derive(Debug, Clone)]
 pub struct AssertionContext {
+    pub vars: Map<String, Value>,
     pub screen_context: Option<Value>,
     pub last_result: Option<Value>,
 }
@@ -32,6 +33,27 @@ pub fn evaluate(
                 Ok(())
             } else {
                 Err((TestFailureStage::Assertion, "窗口列表为空。".to_string()))
+            }
+        }
+        "var_present" => {
+            let var_name = assertion
+                .params
+                .get("var")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if var_name.is_empty() {
+                return Err((
+                    TestFailureStage::Assertion,
+                    "var_present 缺少 var 参数。".to_string(),
+                ));
+            }
+            if context.vars.contains_key(var_name) {
+                Ok(())
+            } else {
+                Err((
+                    TestFailureStage::Assertion,
+                    format!("缺少动态变量：{var_name}。"),
+                ))
             }
         }
         "screen_context_available" => {
@@ -120,9 +142,119 @@ pub fn evaluate(
                 ))
             }
         }
+        "screen_context_active_title_contains_any" => {
+            let Some(screen_context) = &context.screen_context else {
+                return Err((
+                    TestFailureStage::Assertion,
+                    "没有采集到 screen context。".to_string(),
+                ));
+            };
+            let title = screen_context
+                .get("activeWindow")
+                .and_then(|value| value.get("title"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let tokens = assertion
+                .params
+                .get("tokens")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let matched = tokens.iter().filter_map(Value::as_str).any(|token| {
+                let token = token.trim();
+                !token.is_empty() && title.contains(token)
+            });
+            if matched {
+                Ok(())
+            } else {
+                Err((
+                    TestFailureStage::Assertion,
+                    format!("当前活动窗口标题“{title}”未包含任何目标 token。"),
+                ))
+            }
+        }
+        "last_result_field_contains" => {
+            let field = assertion
+                .params
+                .get("field")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let contains = assertion
+                .params
+                .get("contains")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if field.is_empty() || contains.is_empty() {
+                return Err((
+                    TestFailureStage::Assertion,
+                    "last_result_field_contains 缺少 field/contains 参数。".to_string(),
+                ));
+            }
+            let Some(last_result) = &context.last_result else {
+                return Err((
+                    TestFailureStage::Assertion,
+                    "没有可用于断言的 last_result。".to_string(),
+                ));
+            };
+            let value = resolve_path(last_result, field)
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if value.contains(contains) {
+                Ok(())
+            } else {
+                Err((
+                    TestFailureStage::Assertion,
+                    format!("字段 {field} 不包含预期内容：{contains}。"),
+                ))
+            }
+        }
+        "last_result_field_non_empty" => {
+            let field = assertion
+                .params
+                .get("field")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if field.is_empty() {
+                return Err((
+                    TestFailureStage::Assertion,
+                    "last_result_field_non_empty 缺少 field 参数。".to_string(),
+                ));
+            }
+            let Some(last_result) = &context.last_result else {
+                return Err((
+                    TestFailureStage::Assertion,
+                    "没有可用于断言的 last_result。".to_string(),
+                ));
+            };
+            let value = resolve_path(last_result, field)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !value.is_empty() {
+                Ok(())
+            } else {
+                Err((
+                    TestFailureStage::Assertion,
+                    format!("字段 {field} 为空。"),
+                ))
+            }
+        }
         other => Err((
             TestFailureStage::Assertion,
             format!("未知测试断言：{other}"),
         )),
     }
+}
+
+fn resolve_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    if path.trim().is_empty() {
+        return Some(value);
+    }
+
+    let mut current = value;
+    for segment in path.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
 }

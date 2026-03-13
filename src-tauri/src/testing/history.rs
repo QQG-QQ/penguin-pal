@@ -8,7 +8,8 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 use super::types::{
-    RecentFailureSummary, TestHistoryIndex, TestRunIndexEntry, TestRunReport, TestRunStatus,
+    RecentFailureSummary, TestCase, TestHistoryIndex, TestRunIndexEntry, TestRunReport,
+    TestRunStatus,
 };
 
 const TEST_HISTORY_ROOT: &str = "test-history";
@@ -101,17 +102,24 @@ pub fn persist_report(app: &AppHandle, report: &TestRunReport) -> Result<(), Str
     write_json(&index_path(app)?, &index)
 }
 
-pub fn load_last_failed_case_ids(app: &AppHandle) -> Result<Vec<String>, String> {
+pub fn load_last_failed_selection(app: &AppHandle) -> Result<(Vec<String>, Vec<TestCase>), String> {
     let Some(report) = read_json::<TestRunReport>(&latest_path(app)?)? else {
-        return Ok(vec![]);
+        return Ok((vec![], vec![]));
     };
-    let mut ids = Vec::new();
+
+    let mut builtin_ids = Vec::new();
+    let mut dynamic_cases = Vec::new();
     for item in report.failure_items {
-        if !ids.iter().any(|existing| existing == &item.case_id) {
-            ids.push(item.case_id);
+        if let Some(case) = report.dynamic_cases.iter().find(|case| case.id == item.case_id) {
+            if !dynamic_cases.iter().any(|existing: &TestCase| existing.id == case.id) {
+                dynamic_cases.push(case.clone());
+            }
+        } else if !builtin_ids.iter().any(|existing| existing == &item.case_id) {
+            builtin_ids.push(item.case_id);
         }
     }
-    Ok(ids)
+
+    Ok((builtin_ids, dynamic_cases))
 }
 
 pub fn recent_failed_summary(app: &AppHandle) -> Result<Vec<String>, String> {

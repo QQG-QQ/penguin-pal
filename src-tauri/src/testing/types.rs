@@ -74,6 +74,10 @@ pub enum TestStep {
         args: Value,
         summary: String,
     },
+    SeedClipboardText {
+        text: String,
+        summary: String,
+    },
     CaptureScreenContext {
         summary: String,
     },
@@ -129,6 +133,8 @@ pub struct TestSelection {
 pub struct TestRunRequest {
     pub title: String,
     pub selection: TestSelection,
+    #[serde(default)]
+    pub dynamic_cases: Vec<TestCase>,
     pub max_cases: usize,
     pub allow_supplementary_rerun: bool,
 }
@@ -200,6 +206,8 @@ pub struct TestRunReport {
     pub run_id: String,
     pub title: String,
     pub selector: TestSelection,
+    #[serde(default)]
+    pub dynamic_cases: Vec<TestCase>,
     pub started_at: u64,
     #[serde(default)]
     pub finished_at: Option<u64>,

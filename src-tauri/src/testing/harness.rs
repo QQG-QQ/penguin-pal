@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{sync::Mutex, time::Duration};
 
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State};
@@ -12,6 +12,7 @@ use crate::{
     control::{
         router as control_router,
         types::{ControlPendingRequest, ToolInvokeRequest, ToolInvokeResponse},
+        windows::common::run_powershell_json,
     },
 };
 
@@ -21,8 +22,9 @@ use super::{
     registry,
     retry,
     types::{
-        FailureItem, TestCase, TestCaseResult, TestCaseStatus, TestFailureStage, TestRunReport,
-        TestRunRequest, TestRunState, TestRunStatus, TestRunSummary, TestSelection, TestStep,
+        FailureItem, TestAssertion, TestCase, TestCaseResult, TestCaseStatus, TestFailureStage,
+        TestRunReport, TestRunRequest, TestRunState, TestRunStatus, TestRunSummary, TestSelection,
+        TestStep,
     },
 };
 
@@ -52,7 +54,7 @@ pub async fn execute_request(
         ));
     }
 
-    let mut selected_cases = resolve_selected_cases(app, &request.selection)?;
+    let mut selected_cases = resolve_selected_cases(app, &request)?;
     if request.max_cases > 0 && selected_cases.len() > request.max_cases {
         selected_cases.truncate(request.max_cases);
     }
@@ -68,6 +70,7 @@ pub async fn execute_request(
         run_id: format!("test-run-{now}"),
         title: request.title.clone(),
         selector: request.selection.clone(),
+        dynamic_cases: request.dynamic_cases.clone(),
         started_at: now,
         finished_at: None,
         status: TestRunStatus::Running,
@@ -291,9 +294,16 @@ async fn execute_case(
     }
 
     for (index, assertion) in case.assertions.iter().enumerate() {
+        let resolved_assertion = TestAssertion {
+            kind: assertion.kind.clone(),
+            params: resolve_args(&assertion.params, &case_context.vars)
+                .map_err(|error| (TestFailureStage::Assertion, error))?,
+            summary: assertion.summary.clone(),
+        };
         if let Err((stage, reason)) = assertions::evaluate(
-            assertion,
+            &resolved_assertion,
             &AssertionContext {
+                vars: case_context.vars.clone(),
                 screen_context: case_context.screen_context.clone(),
                 last_result: case_context.last_result.clone(),
             },
@@ -423,11 +433,20 @@ async fn execute_step(
                     .unwrap_or_else(|| format!("{} 已执行。", tool)),
             })
         }
+        TestStep::SeedClipboardText { text, .. } => {
+            let payload = seed_clipboard_text(app, text)
+                .map_err(|error| (TestFailureStage::StepExecute, error))?;
+            Ok(StepOutcome::Done {
+                payload: Some(payload),
+                detail: format!("已写入测试剪贴板文本（{} 字符）。", text.chars().count()),
+            })
+        }
         TestStep::CaptureScreenContext { .. } => {
             let screen_context = capture_screen_context(app)
                 .await
                 .map_err(|error| (TestFailureStage::StepExecute, error))?;
             case_context.screen_context = Some(screen_context.clone());
+            refresh_dynamic_vars_from_screen_context(case_context, &screen_context);
             Ok(StepOutcome::Done {
                 payload: Some(screen_context),
                 detail: "已采集当前 screen context。".to_string(),
@@ -506,10 +525,49 @@ fn refresh_dynamic_vars(case_context: &mut CaseContext, tool: &str, payload: Opt
             .vars
             .insert("browserWindow".to_string(), Value::String(title));
     }
+    if let Some(title) = find_window_title(&windows, &["notepad", "记事本"]) {
+        case_context
+            .vars
+            .insert("notepadWindow".to_string(), Value::String(title));
+    }
     if let Some(title) = find_window_title(&windows, &["微信"]) {
         case_context
             .vars
             .insert("wechatWindow".to_string(), Value::String(title));
+    }
+}
+
+fn refresh_dynamic_vars_from_screen_context(case_context: &mut CaseContext, screen_context: &Value) {
+    let Some(active_window) = screen_context.get("activeWindow") else {
+        return;
+    };
+
+    if let Some(title) = active_window.get("title").and_then(Value::as_str) {
+        let title = title.trim();
+        if !title.is_empty() {
+            case_context
+                .vars
+                .insert("activeWindowTitle".to_string(), Value::String(title.to_string()));
+        }
+    }
+
+    let width = active_window
+        .get("bounds")
+        .and_then(|value| value.get("width"))
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let height = active_window
+        .get("bounds")
+        .and_then(|value| value.get("height"))
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    if let Some((x, y)) = safe_center_for_active_window(width, height) {
+        case_context
+            .vars
+            .insert("activeWindowSafeCenterX".to_string(), Value::Number(x.into()));
+        case_context
+            .vars
+            .insert("activeWindowSafeCenterY".to_string(), Value::Number(y.into()));
     }
 }
 
@@ -551,19 +609,67 @@ fn resolve_args(value: &Value, vars: &Map<String, Value>) -> Result<Value, Strin
     }
 }
 
-fn resolve_selected_cases(app: &AppHandle, selection: &TestSelection) -> Result<Vec<TestCase>, String> {
-    if selection.rerun_failed_only {
-        let case_ids = history::load_last_failed_case_ids(app)?;
-        if case_ids.is_empty() {
-            return Ok(vec![]);
+fn resolve_selected_cases(app: &AppHandle, request: &TestRunRequest) -> Result<Vec<TestCase>, String> {
+    let selection = &request.selection;
+    let mut cases = if selection.rerun_failed_only {
+        let (case_ids, failed_dynamic_cases) = history::load_last_failed_selection(app)?;
+        if case_ids.is_empty() && failed_dynamic_cases.is_empty() {
+            vec![]
+        } else {
+            let mut selection = selection.clone();
+            selection.case_ids = case_ids;
+            selection.rerun_failed_only = false;
+            let mut cases = registry::select_cases(&selection);
+            for dynamic_case in failed_dynamic_cases {
+                if !cases.iter().any(|existing| existing.id == dynamic_case.id) {
+                    cases.push(dynamic_case);
+                }
+            }
+            cases
         }
-        let mut selection = selection.clone();
-        selection.case_ids = case_ids;
-        selection.rerun_failed_only = false;
-        return Ok(registry::select_cases(&selection));
+    } else {
+        registry::select_cases(selection)
+    };
+
+    for dynamic_case in &request.dynamic_cases {
+        if !cases.iter().any(|existing| existing.id == dynamic_case.id) {
+            cases.push(dynamic_case.clone());
+        }
     }
 
-    Ok(registry::select_cases(selection))
+    Ok(cases)
+}
+
+fn seed_clipboard_text(app: &AppHandle, text: &str) -> Result<Value, String> {
+    let args = json!({ "text": text });
+    run_powershell_json(
+        app,
+        "test_seed_clipboard",
+        r#"
+$ErrorActionPreference = 'Stop'
+$payload = $env:PENGUINPAL_CONTROL_ARGS | ConvertFrom-Json
+$text = [string]$payload.text
+Set-Clipboard -Value $text
+[pscustomobject]@{ text = $text; length = $text.Length } | ConvertTo-Json -Compress -Depth 3
+"#,
+        Some(&args),
+        Duration::from_secs(3),
+    )
+    .map_err(|error| error.payload().message)
+}
+
+fn safe_center_for_active_window(width: i64, height: i64) -> Option<(i64, i64)> {
+    if width < 200 || height < 200 {
+        return None;
+    }
+
+    let min_x = 120_i64.min(width / 2);
+    let max_x = (width - 120).max(min_x);
+    let min_y = 160_i64.min(height / 2);
+    let max_y = (height - 100).max(min_y);
+    let x = (width / 2).clamp(min_x, max_x);
+    let y = ((height * 2) / 3).clamp(min_y, max_y);
+    Some((x, y))
 }
 
 fn finalize_report(
@@ -632,6 +738,7 @@ fn blocked_report(request: TestRunRequest, reason: String) -> HarnessExecutionRe
         run_id: format!("test-run-{}", crate::app_state::now_millis()),
         title: request.title,
         selector: request.selection,
+        dynamic_cases: request.dynamic_cases,
         started_at: crate::app_state::now_millis(),
         finished_at: Some(crate::app_state::now_millis()),
         status: TestRunStatus::Blocked,
@@ -795,6 +902,7 @@ fn to_tool_response(result: HarnessExecutionResult) -> ToolInvokeResponse {
 fn step_summary(step: &TestStep) -> String {
     match step {
         TestStep::ControlInvoke { summary, .. } => summary.clone(),
+        TestStep::SeedClipboardText { summary, .. } => summary.clone(),
         TestStep::CaptureScreenContext { summary } => summary.clone(),
     }
 }
@@ -802,6 +910,7 @@ fn step_summary(step: &TestStep) -> String {
 fn step_tool(step: &TestStep) -> Option<String> {
     match step {
         TestStep::ControlInvoke { tool, .. } => Some(tool.clone()),
+        TestStep::SeedClipboardText { .. } => Some("seed_clipboard_text".to_string()),
         TestStep::CaptureScreenContext { .. } => None,
     }
 }

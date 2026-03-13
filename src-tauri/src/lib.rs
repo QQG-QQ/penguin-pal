@@ -818,7 +818,18 @@ async fn send_chat_message(
     };
 
     let (reply_text, provider_label, outcome, detail, agent_meta) =
-        match test_agent::router::maybe_handle_test_message(&app, trimmed).await {
+        match test_agent::router::maybe_handle_test_message(
+            &app,
+            &provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            permission_level,
+            &allowed_actions,
+            trimmed,
+        )
+        .await {
             Ok(Some(result)) => (
                 result.reply_text,
                 result.provider_label,

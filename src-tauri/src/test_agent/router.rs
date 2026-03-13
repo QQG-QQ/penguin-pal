@@ -2,11 +2,12 @@ use tauri::AppHandle;
 
 use crate::{
     agent::types::{AgentMessageMeta, AgentRoute},
+    app_state::{DesktopAction, ProviderConfig},
     control::types::ToolInvokeResponse,
     testing::harness,
 };
 
-use super::intent;
+use super::{intent, planner};
 
 #[derive(Debug, Clone)]
 pub struct TestAgentHandleResult {
@@ -19,6 +20,13 @@ pub struct TestAgentHandleResult {
 
 pub async fn maybe_handle_test_message(
     app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
     user_input: &str,
 ) -> Result<Option<TestAgentHandleResult>, String> {
     let trimmed = user_input.trim();
@@ -30,19 +38,40 @@ pub async fn maybe_handle_test_message(
         return Ok(None);
     }
 
-    let Some(request) = intent::parse_test_request(trimmed) else {
-        return Ok(Some(TestAgentHandleResult {
-            reply_text: "这句更像测试请求，但当前没有匹配到受控测试套件。请换成例如“跑一轮 smoke test”或“测试微信草稿输入”。".to_string(),
-            provider_label: "Test Agent".to_string(),
-            outcome: "test_selection_blocked".to_string(),
-            detail: "没有匹配到测试套件".to_string(),
-            meta: AgentMessageMeta {
-                route: AgentRoute::Test,
-                planned_tools: vec![],
-                pending_request: None,
-                task: None,
-            },
-        }));
+    let request = if let Some(request) = intent::parse_test_request(trimmed) {
+        request
+    } else {
+        match planner::plan_test_request(
+            provider_config,
+            api_key,
+            oauth_access_token,
+            codex_command,
+            codex_home,
+            permission_level,
+            allowed_actions,
+            trimmed,
+        )
+        .await
+        {
+            Ok(request) => request,
+            Err(error) => {
+                return Ok(Some(TestAgentHandleResult {
+                    reply_text: format!(
+                        "这句更像测试请求，但当前没有匹配到合规的受控测试计划。\n\n原因：{}",
+                        error
+                    ),
+                    provider_label: "Test Agent".to_string(),
+                    outcome: "test_selection_blocked".to_string(),
+                    detail: error,
+                    meta: AgentMessageMeta {
+                        route: AgentRoute::Test,
+                        planned_tools: vec![],
+                        pending_request: None,
+                        task: None,
+                    },
+                }));
+            }
+        }
     };
 
     let result = harness::execute_request(app, request).await?;
