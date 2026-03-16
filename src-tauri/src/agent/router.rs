@@ -283,7 +283,7 @@ pub async fn confirm_control_pending(app: &AppHandle, pending_id: &str) -> Resul
         }
     }
 
-    executor::confirm_pending(app, pending_id)
+    control_router::confirm(app, pending_id).map_err(|error| error.to_string())
 }
 
 pub async fn cancel_control_pending(app: &AppHandle, pending_id: &str) -> Result<ToolInvokeResponse, String> {
@@ -293,7 +293,7 @@ pub async fn cancel_control_pending(app: &AppHandle, pending_id: &str) -> Result
         }
     }
 
-    executor::cancel_pending(app, pending_id)
+    control_router::cancel(app, pending_id).map_err(|error| error.to_string())
 }
 
 async fn continue_desktop_loop(
