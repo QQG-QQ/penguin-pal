@@ -7,7 +7,6 @@ use crate::{
     control::registry as control_registry,
     control::{router as control_router, types::ToolInvokeResponse},
     history,
-    test_agent,
     testing,
 };
 
@@ -124,7 +123,7 @@ pub async fn maybe_handle_test_message(
         return Ok(None);
     }
 
-    let looks_test = force_route || test_agent::intent::looks_like_test_request(trimmed);
+    let looks_test = force_route || looks_like_test_request(trimmed);
     if !looks_test {
         return Ok(None);
     }
@@ -316,20 +315,8 @@ pub async fn handle_confirmation_response(
 
     let pending_id = pending[0].id.clone();
     let response = match intent {
-        ConfirmationIntent::Confirm => {
-            if let Some(response) = test_agent::router::confirm_control_pending(app, &pending_id).await? {
-                response
-            } else {
-                confirm_control_pending(app, &pending_id).await?
-            }
-        }
-        ConfirmationIntent::Cancel => {
-            if let Some(response) = test_agent::router::cancel_control_pending(app, &pending_id).await? {
-                response
-            } else {
-                cancel_control_pending(app, &pending_id).await?
-            }
-        }
+        ConfirmationIntent::Confirm => confirm_control_pending(app, &pending_id).await?,
+        ConfirmationIntent::Cancel => cancel_control_pending(app, &pending_id).await?,
     };
 
     Ok(tool_response_to_handle(
@@ -1437,4 +1424,24 @@ fn is_retryable_risk(
     requires_confirmation: bool,
 ) -> bool {
     !requires_confirmation && !matches!(risk, crate::control::types::ControlRiskLevel::WriteHigh)
+}
+
+fn looks_like_test_request(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    [
+        "测试",
+        "验证",
+        "测一下",
+        "帮我测",
+        "回归",
+        "重测",
+        "retest",
+        "smoke",
+    ]
+    .iter()
+    .any(|token| trimmed.contains(token))
 }

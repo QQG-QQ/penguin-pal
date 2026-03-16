@@ -68,6 +68,115 @@ pub fn tool_definitions() -> Vec<ControlToolDefinition> {
             args: vec![],
         },
         ControlToolDefinition {
+            name: "list_directory".to_string(),
+            title: "列出目录".to_string(),
+            summary: "读取目录内容并返回文件/目录列表。".to_string(),
+            minimum_permission_level: 0,
+            risk_level: ControlRiskLevel::ReadOnly,
+            requires_confirmation: false,
+            args: vec![file_path_arg("path", "目标目录路径。", json!("C:\\\\Users\\\\Admin\\\\Desktop"))],
+        },
+        ControlToolDefinition {
+            name: "read_file_text".to_string(),
+            title: "读取文本文件".to_string(),
+            summary: "读取 UTF-8 文本文件内容，大小上限 256KB。".to_string(),
+            minimum_permission_level: 0,
+            risk_level: ControlRiskLevel::ReadOnly,
+            requires_confirmation: false,
+            args: vec![file_path_arg("path", "目标文本文件路径。", json!("C:\\\\Users\\\\Admin\\\\Desktop\\\\notes.txt"))],
+        },
+        ControlToolDefinition {
+            name: "write_file_text".to_string(),
+            title: "写入文本文件".to_string(),
+            summary: "创建或写入 UTF-8 文本文件；覆盖现有文件时会进入确认。".to_string(),
+            minimum_permission_level: 0,
+            risk_level: ControlRiskLevel::WriteLow,
+            requires_confirmation: false,
+            args: vec![
+                file_path_arg("path", "目标文本文件路径。", json!("C:\\\\Users\\\\Admin\\\\Desktop\\\\notes.txt")),
+                ControlToolArgSpec {
+                    name: "content".to_string(),
+                    required: true,
+                    summary: "要写入的文本内容。".to_string(),
+                    example: Some(json!("hello from penguin")),
+                },
+                ControlToolArgSpec {
+                    name: "overwrite".to_string(),
+                    required: false,
+                    summary: "是否覆盖已存在文件，默认 false；true 时进入确认。".to_string(),
+                    example: Some(json!(true)),
+                },
+                ControlToolArgSpec {
+                    name: "ensureParent".to_string(),
+                    required: false,
+                    summary: "父目录不存在时是否自动创建，默认 false。".to_string(),
+                    example: Some(json!(true)),
+                },
+            ],
+        },
+        ControlToolDefinition {
+            name: "create_directory".to_string(),
+            title: "创建目录".to_string(),
+            summary: "创建目录；默认递归创建中间层级。".to_string(),
+            minimum_permission_level: 0,
+            risk_level: ControlRiskLevel::WriteLow,
+            requires_confirmation: false,
+            args: vec![
+                file_path_arg("path", "目标目录路径。", json!("C:\\\\Users\\\\Admin\\\\Desktop\\\\penguin-output")),
+                ControlToolArgSpec {
+                    name: "recursive".to_string(),
+                    required: false,
+                    summary: "是否递归创建，默认 true。".to_string(),
+                    example: Some(json!(true)),
+                },
+            ],
+        },
+        ControlToolDefinition {
+            name: "move_path".to_string(),
+            title: "移动或重命名路径".to_string(),
+            summary: "移动文件或目录；覆盖目标文件时会进入确认。".to_string(),
+            minimum_permission_level: 0,
+            risk_level: ControlRiskLevel::WriteLow,
+            requires_confirmation: false,
+            args: vec![
+                ControlToolArgSpec {
+                    name: "fromPath".to_string(),
+                    required: true,
+                    summary: "源路径。".to_string(),
+                    example: Some(json!("C:\\\\Users\\\\Admin\\\\Desktop\\\\notes.txt")),
+                },
+                ControlToolArgSpec {
+                    name: "toPath".to_string(),
+                    required: true,
+                    summary: "目标路径。".to_string(),
+                    example: Some(json!("C:\\\\Users\\\\Admin\\\\Desktop\\\\notes-renamed.txt")),
+                },
+                ControlToolArgSpec {
+                    name: "overwrite".to_string(),
+                    required: false,
+                    summary: "目标已存在时是否覆盖，默认 false；true 时进入确认。".to_string(),
+                    example: Some(json!(true)),
+                },
+            ],
+        },
+        ControlToolDefinition {
+            name: "delete_path".to_string(),
+            title: "删除路径".to_string(),
+            summary: "删除文件或目录；始终需要确认。".to_string(),
+            minimum_permission_level: 0,
+            risk_level: ControlRiskLevel::WriteHigh,
+            requires_confirmation: true,
+            args: vec![
+                file_path_arg("path", "要删除的文件或目录路径。", json!("C:\\\\Users\\\\Admin\\\\Desktop\\\\notes.txt")),
+                ControlToolArgSpec {
+                    name: "recursive".to_string(),
+                    required: false,
+                    summary: "删除目录时是否递归删除，默认 false。".to_string(),
+                    example: Some(json!(false)),
+                },
+            ],
+        },
+        ControlToolDefinition {
             name: "type_text".to_string(),
             title: "输入文本".to_string(),
             summary: "向当前活动窗口输入纯文本，不附带回车。".to_string(),
@@ -242,4 +351,13 @@ fn selector_args() -> Vec<ControlToolArgSpec> {
             "controlType": "Button"
         })),
     }]
+}
+
+fn file_path_arg(name: &str, summary: &str, example: serde_json::Value) -> ControlToolArgSpec {
+    ControlToolArgSpec {
+        name: name.to_string(),
+        required: true,
+        summary: summary.to_string(),
+        example: Some(example),
+    }
 }

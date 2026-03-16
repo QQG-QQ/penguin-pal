@@ -11,6 +11,7 @@ use crate::{
 
 use super::{
     errors::{ControlError, ControlResult},
+    files,
     pending,
     policy,
     registry,
@@ -137,6 +138,10 @@ fn get_required_i64(map: &Map<String, Value>, key: &str, label: &str) -> Control
         .ok_or_else(|| ControlError::invalid_argument(format!("{label} 必须是整数")))
 }
 
+fn get_optional_bool(map: &Map<String, Value>, key: &str, default: bool) -> bool {
+    map.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
+
 fn canonicalize_request(request: ToolInvokeRequest) -> ToolInvokeRequest {
     match request.tool.as_str() {
         "click_element_or_coords" => {
@@ -169,6 +174,50 @@ fn normalize_args(tool: &str, args: Value) -> ControlResult<Value> {
     let map = args_as_object(args)?;
     match tool {
         "list_windows" | "capture_active_window" | "read_clipboard" => Ok(json!({})),
+        "list_directory" | "read_file_text" => {
+            let path = get_required_string(&map, "path", "path", 400)?;
+            Ok(json!({ "path": path }))
+        }
+        "write_file_text" => {
+            let path = get_required_string(&map, "path", "path", 400)?;
+            let content = map
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ControlError::invalid_argument("content 不能为空"))?
+                .to_string();
+            if content.chars().count() > 20_000 {
+                return Err(ControlError::invalid_argument("content 长度不能超过 20000。"));
+            }
+            Ok(json!({
+                "path": path,
+                "content": content,
+                "overwrite": get_optional_bool(&map, "overwrite", false),
+                "ensureParent": get_optional_bool(&map, "ensureParent", false),
+            }))
+        }
+        "create_directory" => {
+            let path = get_required_string(&map, "path", "path", 400)?;
+            Ok(json!({
+                "path": path,
+                "recursive": get_optional_bool(&map, "recursive", true),
+            }))
+        }
+        "move_path" => {
+            let from_path = get_required_string(&map, "fromPath", "fromPath", 400)?;
+            let to_path = get_required_string(&map, "toPath", "toPath", 400)?;
+            Ok(json!({
+                "fromPath": from_path,
+                "toPath": to_path,
+                "overwrite": get_optional_bool(&map, "overwrite", false),
+            }))
+        }
+        "delete_path" => {
+            let path = get_required_string(&map, "path", "path", 400)?;
+            Ok(json!({
+                "path": path,
+                "recursive": get_optional_bool(&map, "recursive", false),
+            }))
+        }
         "focus_window" => {
             let title = get_required_string(&map, "title", "窗口标题", 120)?;
             let match_mode =
@@ -303,6 +352,24 @@ fn pending_prompt(tool: &str, args: &Value) -> String {
                 .map(|text| text.chars().count())
                 .unwrap_or_default()
         ),
+        "write_file_text" => format!(
+            "即将{}文本文件：{}。",
+            if args.get("overwrite").and_then(Value::as_bool).unwrap_or(false) {
+                "覆盖写入"
+            } else {
+                "写入"
+            },
+            args.get("path").and_then(Value::as_str).unwrap_or_default()
+        ),
+        "move_path" => format!(
+            "即将移动路径：{} -> {}。",
+            args.get("fromPath").and_then(Value::as_str).unwrap_or_default(),
+            args.get("toPath").and_then(Value::as_str).unwrap_or_default()
+        ),
+        "delete_path" => format!(
+            "即将删除路径：{}。",
+            args.get("path").and_then(Value::as_str).unwrap_or_default()
+        ),
         _ => "即将执行高风险控制动作。".to_string(),
     }
 }
@@ -328,6 +395,25 @@ fn pending_preview(tool: &str, args: &Value) -> Value {
         "click_element" => json!({
             "selector": args.get("selector").cloned().unwrap_or_else(|| json!({})),
         }),
+        "write_file_text" => {
+            let content = args.get("content").and_then(Value::as_str).unwrap_or_default();
+            let preview: String = content.chars().take(120).collect();
+            json!({
+                "path": args.get("path").cloned().unwrap_or(Value::Null),
+                "contentLength": content.chars().count(),
+                "contentPreview": preview,
+                "overwrite": args.get("overwrite").cloned().unwrap_or(Value::Bool(false)),
+            })
+        }
+        "move_path" => json!({
+            "fromPath": args.get("fromPath").cloned().unwrap_or(Value::Null),
+            "toPath": args.get("toPath").cloned().unwrap_or(Value::Null),
+            "overwrite": args.get("overwrite").cloned().unwrap_or(Value::Bool(false)),
+        }),
+        "delete_path" => json!({
+            "path": args.get("path").cloned().unwrap_or(Value::Null),
+            "recursive": args.get("recursive").cloned().unwrap_or(Value::Bool(false)),
+        }),
         _ => pending::default_preview("控制动作"),
     }
 }
@@ -348,6 +434,37 @@ fn execute_tool(app: &AppHandle, tool: &str, args: &Value) -> ControlResult<Valu
         ),
         "capture_active_window" => windows::capture::capture_active_window(app),
         "read_clipboard" => windows::clipboard::read_clipboard(app),
+        "list_directory" => files::list_directory(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+        ),
+        "read_file_text" => files::read_file_text(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+        ),
+        "write_file_text" => files::write_file_text(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+            args.get("content").and_then(Value::as_str).unwrap_or_default(),
+            args.get("overwrite").and_then(Value::as_bool).unwrap_or(false),
+            args.get("ensureParent").and_then(Value::as_bool).unwrap_or(false),
+        ),
+        "create_directory" => files::create_directory(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+            args.get("recursive").and_then(Value::as_bool).unwrap_or(true),
+        ),
+        "move_path" => files::move_path(
+            app,
+            args.get("fromPath").and_then(Value::as_str).unwrap_or_default(),
+            args.get("toPath").and_then(Value::as_str).unwrap_or_default(),
+            args.get("overwrite").and_then(Value::as_bool).unwrap_or(false),
+        ),
+        "delete_path" => files::delete_path(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+            args.get("recursive").and_then(Value::as_bool).unwrap_or(false),
+        ),
         "type_text" => windows::input::type_text(
             app,
             args.get("text").and_then(Value::as_str).unwrap_or_default(),
@@ -449,6 +566,7 @@ pub fn invoke(app: &AppHandle, request: ToolInvokeRequest) -> ControlResult<Tool
     let request = canonicalize_request(request);
     let definition = policy::resolve_tool(&request.tool)?;
     let normalized_args = normalize_args(&definition.name, request.args)?;
+    let effective_definition = effective_tool_definition(&definition, &normalized_args);
 
     {
         let runtime_state: tauri::State<'_, Mutex<RuntimeState>> = app.state();
@@ -456,14 +574,14 @@ pub fn invoke(app: &AppHandle, request: ToolInvokeRequest) -> ControlResult<Tool
             .lock()
             .map_err(|_| ControlError::internal("助手状态锁定失败"))?;
         expire_runtime_state(&mut runtime);
-        policy::validate_tool_access(&definition, runtime.permission_level)?;
+        policy::validate_tool_access(&effective_definition, runtime.permission_level)?;
     }
 
-    if definition.requires_confirmation {
-        let prompt = pending_prompt(&definition.name, &normalized_args);
-        let preview = pending_preview(&definition.name, &normalized_args);
+    if effective_definition.requires_confirmation {
+        let prompt = pending_prompt(&effective_definition.name, &normalized_args);
+        let preview = pending_preview(&effective_definition.name, &normalized_args);
         let pending_request =
-            pending::build_pending_request(&definition, normalized_args, prompt, preview);
+            pending::build_pending_request(&effective_definition, normalized_args, prompt, preview);
         let _ = logging::append_log(
             app,
             "control_pending",
@@ -493,8 +611,8 @@ pub fn invoke(app: &AppHandle, request: ToolInvokeRequest) -> ControlResult<Tool
             );
         }
 
-        let detail = format!("tool={} pending_id={}", definition.name, pending_request.id);
-        let _ = logging::append_log(app, &definition.name, "pending", detail.clone());
+        let detail = format!("tool={} pending_id={}", effective_definition.name, pending_request.id);
+        let _ = logging::append_log(app, &effective_definition.name, "pending", detail.clone());
         audit_tool(app, "pending_requested", "pending", &detail, 2)?;
 
         return Ok(result_pending(
@@ -503,29 +621,29 @@ pub fn invoke(app: &AppHandle, request: ToolInvokeRequest) -> ControlResult<Tool
         ));
     }
 
-    let execution = execute_tool(app, &definition.name, &normalized_args);
+    let execution = execute_tool(app, &effective_definition.name, &normalized_args);
     match execution {
         Ok(result) => {
-            let message = format!("{} 已执行。", definition.title);
-            let _ = logging::append_log(app, &definition.name, "ok", &message);
+            let message = format!("{} 已执行。", effective_definition.title);
+            let _ = logging::append_log(app, &effective_definition.name, "ok", &message);
             audit_tool(
                 app,
-                &definition.name,
+                &effective_definition.name,
                 "ok",
                 &message,
-                if definition.requires_confirmation { 2 } else { 1 },
+                if effective_definition.requires_confirmation { 2 } else { 1 },
             )?;
             Ok(result_ok(result, Some(message)))
         }
         Err(error) => {
             let payload = error.payload();
-            let _ = logging::append_log(app, &definition.name, &payload.code, &payload.message);
+            let _ = logging::append_log(app, &effective_definition.name, &payload.code, &payload.message);
             audit_tool(
                 app,
-                &definition.name,
+                &effective_definition.name,
                 &payload.code,
                 &payload.message,
-                if definition.requires_confirmation { 2 } else { 1 },
+                if effective_definition.requires_confirmation { 2 } else { 1 },
             )?;
             Err(error)
         }
@@ -649,4 +767,27 @@ pub fn cancel(app: &AppHandle, pending_id: &str) -> ControlResult<ToolInvokeResp
         }),
         Some("控制请求已取消。".to_string()),
     ))
+}
+
+fn effective_tool_definition(
+    definition: &super::types::ControlToolDefinition,
+    args: &Value,
+) -> super::types::ControlToolDefinition {
+    let mut effective = definition.clone();
+    match definition.name.as_str() {
+        "write_file_text" => {
+            if args.get("overwrite").and_then(Value::as_bool).unwrap_or(false) {
+                effective.requires_confirmation = true;
+                effective.risk_level = super::types::ControlRiskLevel::WriteHigh;
+            }
+        }
+        "move_path" => {
+            if args.get("overwrite").and_then(Value::as_bool).unwrap_or(false) {
+                effective.requires_confirmation = true;
+                effective.risk_level = super::types::ControlRiskLevel::WriteHigh;
+            }
+        }
+        _ => {}
+    }
+    effective
 }

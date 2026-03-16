@@ -191,6 +191,64 @@ fn render_success(step: &AgentToolStep, result: &Value) -> String {
                 "已读取剪贴板文本。".to_string()
             }
         }
+        "list_directory" => format!(
+            "已读取目录：{}，共 {} 项。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标目录"),
+            result
+                .as_object()
+                .and_then(|map| map.get("entryCount"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ),
+        "read_file_text" => format!(
+            "已读取文件：{}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标文件")
+        ),
+        "write_file_text" => format!(
+            "已写入文件：{}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标文件")
+        ),
+        "create_directory" => format!(
+            "已确保目录存在：{}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标目录")
+        ),
+        "move_path" => format!(
+            "已移动路径：{} -> {}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("fromPath"))
+                .and_then(Value::as_str)
+                .unwrap_or("源路径"),
+            result
+                .as_object()
+                .and_then(|map| map.get("toPath"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标路径")
+        ),
+        "delete_path" => format!(
+            "已删除路径：{}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标路径")
+        ),
         "type_text" => format!(
             "已输入 {} 个字符。",
             result
@@ -256,6 +314,12 @@ fn step_label(step: &AgentToolStep) -> String {
             "focus_window" => "切换窗口".to_string(),
             "open_app" => "打开应用".to_string(),
             "read_clipboard" => "读取剪贴板".to_string(),
+            "list_directory" => "列出目录".to_string(),
+            "read_file_text" => "读取文件".to_string(),
+            "write_file_text" => "写入文件".to_string(),
+            "create_directory" => "创建目录".to_string(),
+            "move_path" => "移动路径".to_string(),
+            "delete_path" => "删除路径".to_string(),
             "type_text" => "输入文本".to_string(),
             "send_hotkey" => "发送快捷键".to_string(),
             "click_at" => "点击坐标".to_string(),

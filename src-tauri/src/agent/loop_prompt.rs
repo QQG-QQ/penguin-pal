@@ -64,11 +64,12 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
 6. 如果只是需要和用户说一句话，不执行工具，输出 respond_to_user。\n\
 7. 如果任务已经完成，输出 finish_task，并附带结构化 summary。\n\
 8. request_confirmation 只用于你判断这一步可能需要确认的情况，但底层真正是否确认仍由本地安全层决定。\n\
-9. 不能规划 shell、下载并运行、安装器、注册表写入、文件删除、隐私外发。\n\
-10. 不要自动发送消息，不要自动做不可逆提交。\n\
-11. 尽量使用最小下一步，并参考最近执行结果，避免重复同一步。\n\
-12. 当 stepBudget 已耗尽时，输出 fail_task。\n\
-13. 不确定时宁可 fail_task，也不要瞎猜。\
+9. 可以使用文件工具处理本地文件与目录，但覆盖写入、覆盖移动、删除路径等高风险文件动作会由底层自动拦到确认；不要试图绕过。\n\
+10. 不能规划 shell、下载并运行、安装器、注册表写入、隐私外发。\n\
+11. 不要自动发送消息，不要自动做不可逆提交。\n\
+12. 尽量使用最小下一步，并参考最近执行结果，避免重复同一步。\n\
+13. 当 stepBudget 已耗尽时，输出 fail_task。\n\
+14. 不确定时宁可 fail_task，也不要瞎猜。\
 ",
         schema = VISION_SCHEMA_VERSION,
         refs = refs

@@ -1,4 +1,5 @@
 pub mod errors;
+pub mod files;
 pub mod http;
 pub mod logging;
 pub mod pending;

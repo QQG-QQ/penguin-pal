@@ -227,6 +227,100 @@ pub fn merge_tool_result_entities(
                 );
             }
         }
+        "list_directory" => {
+            if let Some(path) = result.get("path").and_then(Value::as_str) {
+                upsert_entity(
+                    context,
+                    DiscoveredEntity {
+                        id: format!("file:{}", sanitize_id(path)),
+                        label: path.to_string(),
+                        payload_type: EntityPayloadType::FileRef,
+                        payload: DiscoveredEntityPayload::FileRef {
+                            path: path.to_string(),
+                        },
+                        created_at_step: step,
+                        last_seen_step: step,
+                        source: DiscoveredEntitySource::ToolResult,
+                        confidence: 0.85,
+                    },
+                );
+            }
+            if let Some(items) = result.get("items").and_then(Value::as_array) {
+                for item in items.iter().take(20) {
+                    if let Some(path) = item.get("path").and_then(Value::as_str) {
+                        upsert_entity(
+                            context,
+                            DiscoveredEntity {
+                                id: format!("file:{}", sanitize_id(path)),
+                                label: item
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(path)
+                                    .to_string(),
+                                payload_type: EntityPayloadType::FileRef,
+                                payload: DiscoveredEntityPayload::FileRef {
+                                    path: path.to_string(),
+                                },
+                                created_at_step: step,
+                                last_seen_step: step,
+                                source: DiscoveredEntitySource::ToolResult,
+                                confidence: 0.75,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        "read_file_text" | "write_file_text" | "create_directory" | "move_path" => {
+            if tool == "move_path" {
+                if let Some(from_path) = result.get("fromPath").and_then(Value::as_str) {
+                    remove_file_entity(context, from_path);
+                }
+            }
+            if let Some(path) = result
+                .get("path")
+                .and_then(Value::as_str)
+                .or_else(|| result.get("toPath").and_then(Value::as_str))
+            {
+                upsert_entity(
+                    context,
+                    DiscoveredEntity {
+                        id: format!("file:{}", sanitize_id(path)),
+                        label: path.to_string(),
+                        payload_type: EntityPayloadType::FileRef,
+                        payload: DiscoveredEntityPayload::FileRef {
+                            path: path.to_string(),
+                        },
+                        created_at_step: step,
+                        last_seen_step: step,
+                        source: DiscoveredEntitySource::ToolResult,
+                        confidence: 0.9,
+                    },
+                );
+            }
+            if let Some(text) = result.get("text").and_then(Value::as_str) {
+                upsert_entity(
+                    context,
+                    DiscoveredEntity {
+                        id: format!("text:file_step:{step}"),
+                        label: format!("file_text_step_{step}"),
+                        payload_type: EntityPayloadType::TextValue,
+                        payload: DiscoveredEntityPayload::TextValue {
+                            text: text.to_string(),
+                        },
+                        created_at_step: step,
+                        last_seen_step: step,
+                        source: DiscoveredEntitySource::ToolResult,
+                        confidence: 0.8,
+                    },
+                );
+            }
+        }
+        "delete_path" => {
+            if let Some(path) = result.get("path").and_then(Value::as_str) {
+                remove_file_entity(context, path);
+            }
+        }
         "find_element" => {
             let label = result
                 .get("name")
@@ -350,6 +444,11 @@ fn upsert_entity(context: &mut RuntimeContext, mut next: DiscoveredEntity) {
     } else {
         context.discovered_entities.push(next);
     }
+}
+
+fn remove_file_entity(context: &mut RuntimeContext, path: &str) {
+    let entity_id = format!("file:{}", sanitize_id(path));
+    context.discovered_entities.retain(|item| item.id != entity_id);
 }
 
 fn sanitize_id(input: &str) -> String {
