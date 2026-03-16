@@ -358,17 +358,17 @@ async fn call_codex_cli(
     allowed_actions: &[DesktopAction],
     history: &[ChatMessage],
 ) -> Result<(String, String), String> {
-    let user_prompt = history
-        .iter()
-        .rev()
-        .find(|message| message.role == "user")
-        .map(|message| message.content.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "当前没有可发送给 Codex CLI 的用户消息。".to_string())?;
+    // 检查是否有用户消息
+    if !history.iter().any(|m| m.role == "user" && !m.content.trim().is_empty()) {
+        return Err("当前没有可发送给 Codex CLI 的用户消息。".to_string());
+    }
 
     let system_prompt = guardrails::compose_system_prompt(provider, permission_level, allowed_actions);
+
+    // 构建包含完整对话历史的 prompt
+    let conversation = build_codex_conversation(history);
     let prompt = format!(
-        "{system_prompt}\n\n用户输入：\n{user_prompt}\n\n请直接输出最终答复，不要输出命令行日志。"
+        "{system_prompt}\n\n## 对话历史\n{conversation}\n\n请基于上述对话历史，直接输出对最后一条用户消息的答复。不要输出命令行日志。"
     );
 
     let command = codex_command
@@ -384,6 +384,19 @@ async fn call_codex_cli(
         .map_err(|error| format!("等待 Codex CLI 响应失败：{error}"))??;
 
     Ok((reply, "Codex CLI".to_string()))
+}
+
+/// 构建 Codex CLI 的对话历史文本
+fn build_codex_conversation(history: &[ChatMessage]) -> String {
+    history
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .map(|m| {
+            let role_label = if m.role == "user" { "用户" } else { "助手" };
+            format!("{role_label}：{}", m.content.trim())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn credential_for_openai(
