@@ -880,11 +880,13 @@ async fn send_chat_message(
     .map(|decision| decision.route);
 
     let (reply_text, provider_label, outcome, detail, agent_meta) = match classified_route {
-        Some(agent::types::TopLevelIntent::TestRequest) => match test_agent::router::maybe_handle_test_message(
+        Some(agent::types::TopLevelIntent::TestRequest) => match agent_router::maybe_handle_test_message(
             &app,
             &provider_config,
             api_key.clone(),
             oauth_access_token.clone(),
+            &vision_channel,
+            vision_api_key.clone(),
             codex_command.clone(),
             codex_home.clone(),
             permission_level,
@@ -901,24 +903,46 @@ async fn send_chat_message(
                 result.detail,
                 Some(result.meta),
             ),
-            Ok(None) => provider_response(
+            Ok(None) | Err(_) => match test_agent::router::maybe_handle_test_message(
+                &app,
                 &provider_config,
-                api_key,
-                oauth_access_token,
-                codex_command,
-                codex_home,
+                api_key.clone(),
+                oauth_access_token.clone(),
+                codex_command.clone(),
+                codex_home.clone(),
                 permission_level,
                 &allowed_actions,
-                &history_window,
+                trimmed,
+                true,
             )
-            .await,
-            Err(error) => (
-                provider::fallback_reply(&error),
-                "Safety fallback".to_string(),
-                "fallback".to_string(),
-                error,
-                None,
-            ),
+            .await
+            {
+                Ok(Some(result)) => (
+                    result.reply_text,
+                    result.provider_label,
+                    result.outcome,
+                    result.detail,
+                    Some(result.meta),
+                ),
+                Ok(None) => provider_response(
+                    &provider_config,
+                    api_key,
+                    oauth_access_token,
+                    codex_command,
+                    codex_home,
+                    permission_level,
+                    &allowed_actions,
+                    &history_window,
+                )
+                .await,
+                Err(error) => (
+                    provider::fallback_reply(&error),
+                    "Safety fallback".to_string(),
+                    "fallback".to_string(),
+                    error,
+                    None,
+                ),
+            },
         },
         Some(agent::types::TopLevelIntent::DesktopAction) => match agent_router::maybe_handle_control_message(
             &app,

@@ -4,6 +4,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::{
     app_state::{now_millis, DesktopAction, ProviderConfig, RuntimeState, VisionChannelConfig},
+    control::registry as control_registry,
     control::{router as control_router, types::ToolInvokeResponse},
     history,
     test_agent,
@@ -14,17 +15,24 @@ use super::{
     executor::{self, LoopToolExecution},
     intent,
     loop_planner,
+    runtime_binding,
+    runtime_context,
     screen_context,
     screen_planner,
     task_store,
+    test_assertions,
+    test_loop_planner,
     types::{
-        AgentLoopTaskStatus, AgentMessageMeta, AgentNextAction, AgentRoute, AgentTaskProgress,
-        AgentTaskRun, AgentTaskStatus, TopLevelIntent,
+        AgentLoopSummary, AgentLoopTaskStatus, AgentMessageMeta, AgentNextAction, AgentRoute,
+        AgentTaskProgress, AgentTaskRun, AgentTaskStatus, FailureReasonCode, FailureStage,
+        RetryTarget, TopLevelIntent,
     },
 };
 
 const DEFAULT_LOOP_STEP_BUDGET: usize = 6;
 const DEFAULT_LOOP_RETRY_BUDGET: usize = 1;
+const TEST_LOOP_STEP_BUDGET: usize = 8;
+const TEST_LOOP_RETRY_BUDGET: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct AgentHandleResult {
@@ -97,6 +105,60 @@ pub async fn maybe_handle_control_message(
     Ok(Some(result))
 }
 
+pub async fn maybe_handle_test_message(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    force_route: bool,
+) -> Result<Option<AgentHandleResult>, String> {
+    let trimmed = user_input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let looks_test = force_route || test_agent::intent::looks_like_test_request(trimmed);
+    if !looks_test {
+        return Ok(None);
+    }
+
+    if task_store::has_active_task(app)? {
+        return Ok(Some(blocked_result(
+            "当前还有一个未完成的任务，请先确认或取消。".to_string(),
+        )));
+    }
+
+    let mut task = AgentTaskRun::new_loop(
+        TopLevelIntent::TestRequest,
+        trimmed,
+        TEST_LOOP_STEP_BUDGET,
+        TEST_LOOP_RETRY_BUDGET,
+    );
+    let result = continue_test_loop(
+        app,
+        provider_config,
+        api_key,
+        oauth_access_token,
+        vision_channel,
+        vision_api_key,
+        codex_command,
+        codex_home,
+        permission_level,
+        allowed_actions,
+        trimmed,
+        &mut task,
+    )
+    .await?;
+    Ok(Some(result))
+}
+
 pub async fn handle_debug_request(
     app: &AppHandle,
     vision_channel: &VisionChannelConfig,
@@ -151,6 +213,7 @@ pub async fn handle_debug_request(
             planned_tools: vec![],
             pending_request: None,
             task: task_progress,
+            summary: None,
         },
     })
 }
@@ -189,6 +252,7 @@ pub fn handle_memory_request(app: &AppHandle) -> Result<AgentHandleResult, Strin
             planned_tools: vec![],
             pending_request: None,
             task: None,
+            summary: None,
         },
     })
 }
@@ -208,6 +272,7 @@ pub async fn handle_confirmation_response(
                 planned_tools: vec![],
                 pending_request: None,
                 task: None,
+                summary: None,
             },
         });
     };
@@ -225,6 +290,7 @@ pub async fn handle_confirmation_response(
                 planned_tools: vec![],
                 pending_request: None,
                 task: None,
+                summary: None,
             },
         });
     }
@@ -243,6 +309,7 @@ pub async fn handle_confirmation_response(
                 planned_tools: vec![],
                 pending_request: None,
                 task: None,
+                summary: None,
             },
         });
     }
@@ -312,8 +379,7 @@ async fn continue_desktop_loop(
 ) -> Result<AgentHandleResult, String> {
     while task.step_budget > 0 {
         task.task_status = AgentLoopTaskStatus::Planning;
-        let screen = screen_context::describe_current_screen(app, vision_channel, vision_api_key.clone()).await;
-        task.last_observation = serde_json::to_value(&screen).ok();
+        runtime_context::refresh_runtime_context(app, task, vision_channel, vision_api_key.clone()).await;
         task.updated_at = now_millis();
 
         let decision = match loop_planner::plan_next_action(
@@ -326,7 +392,7 @@ async fn continue_desktop_loop(
             allowed_actions,
             user_input,
             task,
-            &screen,
+            &screen_context::describe_current_screen(app, vision_channel, vision_api_key.clone()).await,
         )
         .await
         {
@@ -341,7 +407,7 @@ async fn continue_desktop_loop(
                     permission_level,
                     allowed_actions,
                     user_input,
-                    &screen,
+                    &screen_context::describe_current_screen(app, vision_channel, vision_api_key.clone()).await,
                 )
                 .await
                 .and_then(|plan| loop_planner::decision_from_plan(&task.goal, plan));
@@ -351,7 +417,11 @@ async fn continue_desktop_loop(
                     Err(fallback_error) => {
                         task.task_status = AgentLoopTaskStatus::Failed;
                         task.failure_reason = Some(fallback_error.clone());
+                        task.failure_reason_code = FailureReasonCode::PlannerFailed;
+                        task.failure_stage = Some(FailureStage::Planning);
                         return Ok(fail_result(
+                            AgentRoute::Control,
+                            "Desktop Agent",
                             task,
                             format!(
                                 "桌面 agent 没能基于当前上下文生成下一步动作。\n主路径：{primary_error}\nfallback：{fallback_error}"
@@ -373,14 +443,32 @@ async fn continue_desktop_loop(
                     task,
                 ));
             }
-            AgentNextAction::FinishTask { message } => {
+            AgentNextAction::FinishTask { message, summary } => {
                 task.task_status = AgentLoopTaskStatus::Completed;
-                return Ok(complete_result(task, message));
+                task.final_summary = Some(summary.clone());
+                return Ok(complete_result(AgentRoute::Control, "Desktop Agent", task, message, summary));
             }
-            AgentNextAction::FailTask { message } => {
+            AgentNextAction::FailTask { message, summary } => {
                 task.task_status = AgentLoopTaskStatus::Failed;
                 task.failure_reason = Some(message.clone());
-                return Ok(fail_result(task, message));
+                task.failure_reason_code = summary.failure_reason_code.clone();
+                task.failure_stage = summary.failure_stage.clone();
+                task.final_summary = Some(summary.clone());
+                return Ok(fail_result(AgentRoute::Control, "Desktop Agent", task, message));
+            }
+            AgentNextAction::ObserveContext { .. }
+            | AgentNextAction::AssertCondition { .. }
+            | AgentNextAction::RetryStep { .. } => {
+                task.task_status = AgentLoopTaskStatus::Failed;
+                task.failure_reason = Some("desktop_action loop 收到了测试专用动作。".to_string());
+                task.failure_reason_code = FailureReasonCode::InvalidAction;
+                task.failure_stage = Some(FailureStage::Planning);
+                return Ok(fail_result(
+                    AgentRoute::Control,
+                    "Desktop Agent",
+                    task,
+                    "desktop_action loop 收到了测试专用动作，已停止。".to_string(),
+                ));
             }
             AgentNextAction::RequestConfirmation {
                 tool,
@@ -405,14 +493,28 @@ async fn continue_desktop_loop(
                         task.completed_notes.push(message);
                     }
                     task_store::replace_active_task(app, Some(task.clone()))?;
-                    return Ok(pending_result(task, pending_request, note));
+                    return Ok(pending_result(
+                        task,
+                        pending_request,
+                        note,
+                        AgentRoute::Control,
+                        "Desktop Agent",
+                    ));
                 }
                 LoopToolExecution::Failure { reason } => {
-                    if let Some(result) = maybe_retry_or_fail(task, &tool, &reason, &action_args) {
+                    if let Some(result) = maybe_retry_or_fail(
+                        task,
+                        &tool,
+                        &reason,
+                        &action_args,
+                        AgentRoute::Control,
+                        "Desktop Agent",
+                    ) {
                         return Ok(result);
                     }
                 }
-            }}
+            }
+            }
             AgentNextAction::ExecuteTool {
                 tool,
                 summary,
@@ -429,23 +531,274 @@ async fn continue_desktop_loop(
                     pending_request,
                 } => {
                     task_store::replace_active_task(app, Some(task.clone()))?;
-                    return Ok(pending_result(task, pending_request, note));
+                    return Ok(pending_result(
+                        task,
+                        pending_request,
+                        note,
+                        AgentRoute::Control,
+                        "Desktop Agent",
+                    ));
                 }
                 LoopToolExecution::Failure { reason } => {
-                    if let Some(result) = maybe_retry_or_fail(task, &tool, &reason, &action_args) {
+                    if let Some(result) = maybe_retry_or_fail(
+                        task,
+                        &tool,
+                        &reason,
+                        &action_args,
+                        AgentRoute::Control,
+                        "Desktop Agent",
+                    ) {
                         return Ok(result);
                     }
                 }
-            }}
+            }
+            }
         }
     }
 
     task.task_status = AgentLoopTaskStatus::Failed;
     task.failure_reason = Some("当前桌面任务已经耗尽 step budget。".to_string());
+    task.failure_reason_code = FailureReasonCode::StepBudgetExceeded;
+    task.failure_stage = Some(FailureStage::Planning);
     Ok(fail_result(
+        AgentRoute::Control,
+        "Desktop Agent",
         task,
         "当前桌面任务已经耗尽 step budget，已停止继续规划。".to_string(),
     ))
+}
+
+async fn continue_test_loop(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    task: &mut AgentTaskRun,
+) -> Result<AgentHandleResult, String> {
+    while task.step_budget > 0 {
+        task.task_status = AgentLoopTaskStatus::Planning;
+        let context = runtime_context::refresh_runtime_context(app, task, vision_channel, vision_api_key.clone()).await;
+        task.updated_at = now_millis();
+
+        let decision = match test_loop_planner::plan_next_test_action(
+            provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            permission_level,
+            allowed_actions,
+            user_input,
+            &context,
+        )
+        .await
+        {
+            Ok(decision) => decision,
+            Err(error) => {
+                task.task_status = AgentLoopTaskStatus::Failed;
+                task.failure_reason = Some(error.clone());
+                task.failure_reason_code = FailureReasonCode::PlannerFailed;
+                task.failure_stage = Some(FailureStage::Planning);
+                return Ok(fail_result(
+                    AgentRoute::Test,
+                    "Test Agent",
+                    task,
+                    format!("测试 agent 没能生成下一步动作：{error}"),
+                ));
+            }
+        };
+
+        match decision.next {
+            AgentNextAction::RespondToUser { message } => {
+                task.task_status = AgentLoopTaskStatus::Completed;
+                return Ok(simple_result(
+                    AgentRoute::Test,
+                    "Test Agent",
+                    "test_response",
+                    message,
+                    task,
+                ));
+            }
+            AgentNextAction::ObserveContext { summary } => {
+                task.task_status = AgentLoopTaskStatus::Observing;
+                task.used_probe = true;
+                task.step_budget = task.step_budget.saturating_sub(1);
+                task.completed_notes.push(summary.clone());
+                task.recent_steps.push(super::types::AgentStepRecord {
+                    summary,
+                    tool: None,
+                    args: None,
+                    outcome: "success".to_string(),
+                    detail: Some("已刷新 runtime context。".to_string()),
+                });
+                runtime_context::append_runtime_observation(
+                    task,
+                    "observe_context",
+                    summary,
+                    task.runtime_context
+                        .as_ref()
+                        .and_then(|context| serde_json::to_value(context).ok()),
+                );
+            }
+            AgentNextAction::ExecuteTool { tool, summary, args } => {
+                let action_args = args.clone();
+                match execute_tool_step(app, task, &tool, args, Some(summary.clone()))? {
+                    LoopToolExecution::Success => {
+                        task.step_budget = task.step_budget.saturating_sub(1);
+                        task.task_status = AgentLoopTaskStatus::Observing;
+                    }
+                    LoopToolExecution::Pending { note, pending_request } => {
+                        task_store::replace_active_task(app, Some(task.clone()))?;
+                        return Ok(pending_result(task, pending_request, note, AgentRoute::Test, "Test Agent"));
+                    }
+                    LoopToolExecution::Failure { reason } => {
+                    if let Some(result) = maybe_retry_or_fail(
+                        task,
+                        &tool,
+                        &reason,
+                        &action_args,
+                        AgentRoute::Test,
+                        "Test Agent",
+                    ) {
+                        return Ok(result);
+                    }
+                }
+                }
+            }
+            AgentNextAction::RequestConfirmation {
+                tool,
+                summary,
+                args,
+                message,
+            } => {
+                let action_args = args.clone();
+                match execute_tool_step(app, task, &tool, args, summary.clone())? {
+                    LoopToolExecution::Success => {
+                        task.step_budget = task.step_budget.saturating_sub(1);
+                        task.task_status = AgentLoopTaskStatus::Observing;
+                        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
+                            task.completed_notes.push(message);
+                        }
+                    }
+                    LoopToolExecution::Pending { note, pending_request } => {
+                        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
+                            task.completed_notes.push(message);
+                        }
+                        task_store::replace_active_task(app, Some(task.clone()))?;
+                        return Ok(pending_result(task, pending_request, note, AgentRoute::Test, "Test Agent"));
+                    }
+                    LoopToolExecution::Failure { reason } => {
+                    if let Some(result) = maybe_retry_or_fail(
+                        task,
+                        &tool,
+                        &reason,
+                        &action_args,
+                        AgentRoute::Test,
+                        "Test Agent",
+                    ) {
+                        return Ok(result);
+                    }
+                }
+                }
+            }
+            AgentNextAction::AssertCondition {
+                assertion_type,
+                summary,
+                params,
+            } => {
+                let result = test_assertions::evaluate(
+                    &assertion_type,
+                    &params,
+                    task.runtime_context
+                        .as_ref()
+                        .ok_or_else(|| "断言执行时缺少 runtime context。".to_string())?,
+                    task.pending_action_id.is_some(),
+                );
+                task.last_tool_result = serde_json::to_value(&result).ok();
+                runtime_context::append_runtime_observation(
+                    task,
+                    "assert_condition",
+                    summary.clone(),
+                    task.last_tool_result.clone(),
+                );
+                task.recent_steps.push(super::types::AgentStepRecord {
+                    summary: summary.clone(),
+                    tool: None,
+                    args: Some(params.clone()),
+                    outcome: if result.passed { "success" } else { "failure" }.to_string(),
+                    detail: Some(
+                        serde_json::to_string(&result)
+                            .unwrap_or_else(|_| "assertion_result".to_string()),
+                    ),
+                });
+                if result.passed {
+                    task.step_budget = task.step_budget.saturating_sub(1);
+                    task.task_status = AgentLoopTaskStatus::Observing;
+                    task.completed_notes.push(format!("断言通过：{summary}"));
+                } else {
+                    task.failure_reason = Some(format!("断言失败：{summary}"));
+                    task.failure_reason_code = result.failure_reason_code.clone();
+                    task.failure_stage = Some(FailureStage::Assertion);
+                    if task.retry_budget > 0 {
+                        task.retry_budget -= 1;
+                        task.used_retry = true;
+                        task.task_status = AgentLoopTaskStatus::Retrying;
+                        task.completed_notes.push(format!("断言失败，允许一次补测：{summary}"));
+                    } else {
+                        task.task_status = AgentLoopTaskStatus::Failed;
+                        return Ok(fail_result(
+                            AgentRoute::Test,
+                            "Test Agent",
+                            task,
+                            format!("断言失败：{summary}"),
+                        ));
+                    }
+                }
+            }
+            AgentNextAction::RetryStep { target, summary } => {
+                match perform_retry_step(app, task, target, summary)? {
+                    LoopContinuation::Continue => {}
+                    LoopContinuation::Return(result) => return Ok(result),
+                }
+            }
+            AgentNextAction::FinishTask { message, summary } => {
+                task.task_status = AgentLoopTaskStatus::Completed;
+                task.final_summary = Some(summary.clone());
+                return Ok(complete_result(AgentRoute::Test, "Test Agent", task, message, summary));
+            }
+            AgentNextAction::FailTask { message, summary } => {
+                task.task_status = AgentLoopTaskStatus::Failed;
+                task.failure_reason = Some(message.clone());
+                task.failure_reason_code = summary.failure_reason_code.clone();
+                task.failure_stage = summary.failure_stage.clone();
+                task.final_summary = Some(summary.clone());
+                return Ok(fail_result(AgentRoute::Test, "Test Agent", task, message));
+            }
+        }
+    }
+
+    task.task_status = AgentLoopTaskStatus::Failed;
+    task.failure_reason = Some("当前测试任务已经耗尽 step budget。".to_string());
+    task.failure_reason_code = FailureReasonCode::StepBudgetExceeded;
+    task.failure_stage = Some(FailureStage::Planning);
+    Ok(fail_result(
+        AgentRoute::Test,
+        "Test Agent",
+        task,
+        "当前测试任务已经耗尽 step budget，已停止继续规划。".to_string(),
+    ))
+}
+
+enum LoopContinuation {
+    Continue,
+    Return(AgentHandleResult),
 }
 
 fn execute_tool_step(
@@ -455,14 +808,34 @@ fn execute_tool_step(
     args: Value,
     summary: Option<String>,
 ) -> Result<LoopToolExecution, String> {
-    if task.task_status != AgentLoopTaskStatus::Retrying && would_repeat_failed_action(task, tool, &args) {
+    let materialized_args = if let Some(context) = task.runtime_context.as_ref() {
+        runtime_binding::materialize_tool_args(context, tool, &args)?
+    } else {
+        args
+    };
+    if task.task_status != AgentLoopTaskStatus::Retrying
+        && would_repeat_failed_action(task, tool, &materialized_args)
+    {
         return Ok(LoopToolExecution::Failure {
             reason: format!("上一轮已经对 {tool} 执行过相同失败动作，已停止重复尝试。"),
         });
     }
 
     task.task_status = AgentLoopTaskStatus::Executing;
-    executor::execute_loop_tool(app, task, tool, args, summary)
+    if let Some(definition) = control_registry::find_tool_definition(tool) {
+        if is_retryable_risk(&definition.risk_level, definition.requires_confirmation) {
+            task.last_retryable_tool = Some(tool.to_string());
+            task.last_retryable_args = Some(materialized_args.clone());
+            task.last_retryable_summary = summary.clone();
+            task.last_retryable_risk = Some(definition.risk_level);
+        } else {
+            task.last_retryable_tool = None;
+            task.last_retryable_args = None;
+            task.last_retryable_summary = None;
+            task.last_retryable_risk = None;
+        }
+    }
+    executor::execute_loop_tool(app, task, tool, materialized_args, summary)
 }
 
 fn maybe_retry_or_fail(
@@ -470,17 +843,120 @@ fn maybe_retry_or_fail(
     tool: &str,
     reason: &str,
     _args: &Value,
+    route: AgentRoute,
+    provider_label: &str,
 ) -> Option<AgentHandleResult> {
     task.failure_reason = Some(reason.to_string());
+    task.failure_reason_code = FailureReasonCode::ToolFailed;
+    task.failure_stage = Some(FailureStage::ExecuteTool);
     if task.retry_budget > 0 {
         task.retry_budget -= 1;
+        task.used_retry = true;
         task.task_status = AgentLoopTaskStatus::Retrying;
         task.completed_notes
             .push(format!("步骤 {} 失败，准备基于最新观测重试一次。", tool));
         None
     } else {
         task.task_status = AgentLoopTaskStatus::Failed;
-        Some(fail_result(task, reason.to_string()))
+        Some(fail_result(route, provider_label, task, reason.to_string()))
+    }
+}
+
+fn perform_retry_step(
+    app: &AppHandle,
+    task: &mut AgentTaskRun,
+    target: RetryTarget,
+    summary: String,
+) -> Result<LoopContinuation, String> {
+    if task.retry_budget == 0 {
+        task.task_status = AgentLoopTaskStatus::Failed;
+        task.failure_reason = Some("重试预算已耗尽。".to_string());
+        task.failure_reason_code = FailureReasonCode::RetryExhausted;
+        task.failure_stage = Some(FailureStage::Retry);
+        return Ok(LoopContinuation::Return(fail_result(
+            AgentRoute::Test,
+            "Test Agent",
+            task,
+            "当前测试任务已经耗尽 retry budget。".to_string(),
+        )));
+    }
+
+    match target {
+        RetryTarget::ObserveContext => {
+            task.retry_budget -= 1;
+            task.used_retry = true;
+            task.used_probe = true;
+            task.task_status = AgentLoopTaskStatus::Observing;
+            task.recent_steps.push(super::types::AgentStepRecord {
+                summary: summary.clone(),
+                tool: None,
+                args: None,
+                outcome: "success".to_string(),
+                detail: Some("已执行一次 observe_context 重试。".to_string()),
+            });
+            runtime_context::append_runtime_observation(
+                task,
+                "retry_step",
+                summary,
+                task.runtime_context
+                    .as_ref()
+                    .and_then(|context| serde_json::to_value(context).ok()),
+            );
+            Ok(LoopContinuation::Continue)
+        }
+        RetryTarget::LastTool => {
+            let Some(tool) = task.last_retryable_tool.clone() else {
+                task.task_status = AgentLoopTaskStatus::Failed;
+                task.failure_reason = Some("当前没有可重试的低风险动作。".to_string());
+                task.failure_reason_code = FailureReasonCode::RetryExhausted;
+                task.failure_stage = Some(FailureStage::Retry);
+                return Ok(LoopContinuation::Return(fail_result(
+                    AgentRoute::Test,
+                    "Test Agent",
+                    task,
+                    "当前没有可重试的低风险动作。".to_string(),
+                )));
+            };
+            let args = task
+                .last_retryable_args
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let step_summary = task
+                .last_retryable_summary
+                .clone()
+                .unwrap_or_else(|| summary.clone());
+            task.retry_budget -= 1;
+            task.used_retry = true;
+            match executor::execute_loop_tool(app, task, &tool, args, Some(step_summary))? {
+                LoopToolExecution::Success => {
+                    task.step_budget = task.step_budget.saturating_sub(1);
+                    task.task_status = AgentLoopTaskStatus::Observing;
+                    Ok(LoopContinuation::Continue)
+                }
+                LoopToolExecution::Pending { note, pending_request } => {
+                    task_store::replace_active_task(app, Some(task.clone()))?;
+                    Ok(LoopContinuation::Return(pending_result(
+                        task,
+                        pending_request,
+                        note,
+                        AgentRoute::Test,
+                        "Test Agent",
+                    )))
+                }
+                LoopToolExecution::Failure { reason } => {
+                    task.task_status = AgentLoopTaskStatus::Failed;
+                    task.failure_reason = Some(reason.clone());
+                    task.failure_reason_code = FailureReasonCode::RetryExhausted;
+                    task.failure_stage = Some(FailureStage::Retry);
+                    Ok(LoopContinuation::Return(fail_result(
+                        AgentRoute::Test,
+                        "Test Agent",
+                        task,
+                        reason,
+                    )))
+                }
+            }
+        }
     }
 }
 
@@ -505,6 +981,9 @@ async fn confirm_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolI
     task.completed_notes.push(note);
     task.last_tool_result = Some(confirmed_result.clone());
     task.completed_results.push(confirmed_result);
+    if let Some(tool) = task.recent_steps.last().and_then(|step| step.tool.clone()) {
+        runtime_context::append_runtime_tool_result(task, &tool, "success", task.last_tool_result.clone());
+    }
     task.step_budget = task.step_budget.saturating_sub(1);
     executor::clear_loop_pending(&mut task);
     task.task_status = AgentLoopTaskStatus::Observing;
@@ -522,7 +1001,7 @@ async fn confirm_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolI
         allowed_actions,
     ) = runtime_inputs_for_agent(app)?;
 
-    let result = continue_desktop_loop(
+    let result = continue_loop_for_task(
         app,
         &provider_config,
         api_key,
@@ -675,6 +1154,7 @@ fn blocked_result(reason: String) -> AgentHandleResult {
             planned_tools: vec![],
             pending_request: None,
             task: None,
+            summary: None,
         },
     }
 }
@@ -700,22 +1180,33 @@ fn simple_result(
                 task.pending_action_summary.clone(),
                 task.failure_reason.clone(),
             )),
+            summary: task.final_summary.clone(),
         },
     }
 }
 
-fn complete_result(task: &AgentTaskRun, message: String) -> AgentHandleResult {
+fn complete_result(
+    route: AgentRoute,
+    provider_label: &str,
+    task: &AgentTaskRun,
+    message: String,
+    summary: AgentLoopSummary,
+) -> AgentHandleResult {
     let mut lines = task.completed_notes.clone();
     if !message.trim().is_empty() {
         lines.push(message.clone());
     }
     AgentHandleResult {
         reply_text: lines.join("\n"),
-        provider_label: "Desktop Agent".to_string(),
-        outcome: "control_ok".to_string(),
+        provider_label: provider_label.to_string(),
+        outcome: if matches!(route, AgentRoute::Test) {
+            "test_ok".to_string()
+        } else {
+            "control_ok".to_string()
+        },
         detail: format!("task={} status=completed", task.task_id),
         meta: AgentMessageMeta {
-            route: AgentRoute::Control,
+            route,
             planned_tools: task.planned_tools(),
             pending_request: None,
             task: Some(task.progress(
@@ -723,20 +1214,34 @@ fn complete_result(task: &AgentTaskRun, message: String) -> AgentHandleResult {
                 task.pending_action_summary.clone(),
                 Some("任务已完成。".to_string()),
             )),
+            summary: Some(summary),
         },
     }
 }
 
-fn fail_result(task: &AgentTaskRun, reason: String) -> AgentHandleResult {
+fn fail_result(route: AgentRoute, provider_label: &str, task: &AgentTaskRun, reason: String) -> AgentHandleResult {
     let mut lines = task.completed_notes.clone();
     lines.push(format!("任务“{}”已停止。\n原因：{}", task.task_title, reason));
+    let summary = task.final_summary.clone().unwrap_or_else(|| AgentLoopSummary {
+        goal: task.goal.clone(),
+        steps_taken: task.recent_steps.len(),
+        final_status: AgentTaskStatus::Failed,
+        failure_stage: task.failure_stage.clone(),
+        failure_reason_code: task.failure_reason_code.clone(),
+        used_probe: task.used_probe,
+        used_retry: task.used_retry,
+    });
     AgentHandleResult {
         reply_text: lines.join("\n"),
-        provider_label: "Desktop Agent".to_string(),
-        outcome: "control_failed".to_string(),
+        provider_label: provider_label.to_string(),
+        outcome: if matches!(route, AgentRoute::Test) {
+            "test_failed".to_string()
+        } else {
+            "control_failed".to_string()
+        },
         detail: reason.clone(),
         meta: AgentMessageMeta {
-            route: AgentRoute::Control,
+            route,
             planned_tools: task.planned_tools(),
             pending_request: None,
             task: Some(task.progress(
@@ -744,6 +1249,7 @@ fn fail_result(task: &AgentTaskRun, reason: String) -> AgentHandleResult {
                 task.pending_action_summary.clone(),
                 Some(reason),
             )),
+            summary: Some(summary),
         },
     }
 }
@@ -752,24 +1258,31 @@ fn pending_result(
     task: &AgentTaskRun,
     pending_request: crate::control::types::ControlPendingRequest,
     note: String,
+    route: AgentRoute,
+    provider_label: &str,
 ) -> AgentHandleResult {
     let mut lines = task.completed_notes.clone();
     lines.push(note);
     lines.push(pending_request.prompt.clone());
     AgentHandleResult {
         reply_text: lines.join("\n"),
-        provider_label: "Desktop Agent".to_string(),
-        outcome: "control_pending".to_string(),
+        provider_label: provider_label.to_string(),
+        outcome: if matches!(route, AgentRoute::Test) {
+            "test_pending".to_string()
+        } else {
+            "control_pending".to_string()
+        },
         detail: format!(
             "task={} pending_id={}",
             task.task_id,
             pending_request.id
         ),
         meta: AgentMessageMeta {
-            route: AgentRoute::Control,
+            route,
             planned_tools: task.planned_tools(),
             pending_request: Some(pending_request),
             task: Some(task.waiting_progress()),
+            summary: task.final_summary.clone(),
         },
     }
 }
@@ -792,16 +1305,27 @@ fn tool_response_to_handle(
         .and_then(|value| value.get("task"))
         .cloned()
         .and_then(|value| serde_json::from_value::<AgentTaskProgress>(value).ok());
+    let route = result
+        .as_ref()
+        .and_then(|value| value.get("route"))
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "test" => AgentRoute::Test,
+            "control" => AgentRoute::Control,
+            _ => AgentRoute::Control,
+        })
+        .unwrap_or(AgentRoute::Control);
     AgentHandleResult {
         reply_text: message.unwrap_or_else(|| "动作已处理。".to_string()),
         provider_label: provider_label.to_string(),
         outcome: outcome.to_string(),
         detail: format!("status={status}"),
         meta: AgentMessageMeta {
-            route: AgentRoute::Control,
+            route,
             planned_tools: vec![],
             pending_request,
             task,
+            summary: None,
         },
     }
 }
@@ -814,9 +1338,11 @@ fn handle_to_tool_response(result: AgentHandleResult) -> ToolInvokeResponse {
         ..
     } = result;
     let AgentMessageMeta {
+        route,
         planned_tools,
         pending_request,
         task,
+        summary,
         ..
     } = meta;
 
@@ -829,11 +1355,73 @@ fn handle_to_tool_response(result: AgentHandleResult) -> ToolInvokeResponse {
             "success".to_string()
         },
         result: Some(json!({
+            "route": route,
             "task": task,
             "plannedTools": planned_tools,
+            "summary": summary,
         })),
         message: Some(reply_text),
         pending_request,
         error: None,
     }
+}
+
+async fn continue_loop_for_task(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    task: &mut AgentTaskRun,
+) -> Result<AgentHandleResult, String> {
+    match task.intent {
+        TopLevelIntent::DesktopAction => {
+            continue_desktop_loop(
+                app,
+                provider_config,
+                api_key,
+                oauth_access_token,
+                vision_channel,
+                vision_api_key,
+                codex_command,
+                codex_home,
+                permission_level,
+                allowed_actions,
+                user_input,
+                task,
+            )
+            .await
+        }
+        TopLevelIntent::TestRequest => {
+            continue_test_loop(
+                app,
+                provider_config,
+                api_key,
+                oauth_access_token,
+                vision_channel,
+                vision_api_key,
+                codex_command,
+                codex_home,
+                permission_level,
+                allowed_actions,
+                user_input,
+                task,
+            )
+            .await
+        }
+        _ => Err("当前 loop task 的 intent 不支持继续执行。".to_string()),
+    }
+}
+
+fn is_retryable_risk(
+    risk: &crate::control::types::ControlRiskLevel,
+    requires_confirmation: bool,
+) -> bool {
+    !requires_confirmation && !matches!(risk, crate::control::types::ControlRiskLevel::WriteHigh)
 }

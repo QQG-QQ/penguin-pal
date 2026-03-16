@@ -9,7 +9,10 @@ use crate::{
     },
 };
 
-use super::types::{is_agent_tool_allowed, AgentStepRecord, AgentTaskMode, AgentTaskRun, AgentToolStep};
+use super::{
+    runtime_context,
+    types::{is_agent_tool_allowed, AgentStepRecord, AgentTaskMode, AgentTaskRun, AgentToolStep},
+};
 
 #[derive(Debug, Clone)]
 pub enum LoopToolExecution {
@@ -65,6 +68,15 @@ pub fn execute_loop_tool(
                 outcome: "pending".to_string(),
                 detail: Some(note.clone()),
             });
+            runtime_context::append_runtime_tool_result(
+                task,
+                &step.tool,
+                "pending",
+                Some(json!({
+                    "pendingRequest": pending_request.clone(),
+                    "note": note.clone(),
+                })),
+            );
             Ok(LoopToolExecution::Pending {
                 note,
                 pending_request,
@@ -84,6 +96,7 @@ pub fn execute_loop_tool(
                 outcome: "success".to_string(),
                 detail: Some(note.clone()),
             });
+            runtime_context::append_runtime_tool_result(task, &step.tool, "success", Some(result));
             Ok(LoopToolExecution::Success)
         }
         Ok(response) => {
@@ -102,6 +115,12 @@ pub fn execute_loop_tool(
                 outcome: "failure".to_string(),
                 detail: Some(reason.clone()),
             });
+            runtime_context::append_runtime_tool_result(
+                task,
+                &step.tool,
+                "failure",
+                task.last_tool_result.clone(),
+            );
             Ok(LoopToolExecution::Failure { reason })
         }
         Err(error) => {
@@ -118,6 +137,12 @@ pub fn execute_loop_tool(
                 outcome: "failure".to_string(),
                 detail: Some(reason.clone()),
             });
+            runtime_context::append_runtime_tool_result(
+                task,
+                &step.tool,
+                "failure",
+                task.last_tool_result.clone(),
+            );
             Ok(LoopToolExecution::Failure { reason })
         }
     }

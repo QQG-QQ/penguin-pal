@@ -11,7 +11,7 @@ use super::{
     screen_context::{render_screen_context_for_prompt, ScreenContext},
     types::{
         empty_json_object, is_agent_tool_allowed, AgentLoopDecision, AgentNextAction, AgentPlan,
-        AgentRoute, AgentTaskRun, TopLevelIntent,
+        AgentRoute, AgentTaskRun, AgentTaskStatus, TopLevelIntent,
     },
 };
 
@@ -118,12 +118,27 @@ pub fn decision_from_plan(goal: &str, plan: AgentPlan) -> Result<AgentLoopDecisi
 
 fn validate_next_action(action: &AgentNextAction) -> Result<(), String> {
     match action {
-        AgentNextAction::RespondToUser { message }
-        | AgentNextAction::FinishTask { message }
-        | AgentNextAction::FailTask { message } => {
+        AgentNextAction::RespondToUser { message } => {
             if message.trim().is_empty() {
                 return Err("next action message 不能为空。".to_string());
             }
+        }
+        AgentNextAction::FinishTask { message, summary }
+        | AgentNextAction::FailTask { message, summary } => {
+            if message.trim().is_empty() {
+                return Err("next action message 不能为空。".to_string());
+            }
+            if summary.goal.trim().is_empty() {
+                return Err("finish_task/fail_task.summary.goal 不能为空。".to_string());
+            }
+            if matches!(summary.final_status, AgentTaskStatus::Running | AgentTaskStatus::WaitingConfirmation) {
+                return Err("finish_task/fail_task.summary.finalStatus 非法。".to_string());
+            }
+        }
+        AgentNextAction::ObserveContext { .. }
+        | AgentNextAction::AssertCondition { .. }
+        | AgentNextAction::RetryStep { .. } => {
+            return Err("desktop_action loop 不接受测试专用动作。".to_string());
         }
         AgentNextAction::RequestConfirmation { tool, args, .. } => {
             if !is_agent_tool_allowed(tool) {

@@ -72,6 +72,7 @@ pub async fn maybe_handle_test_message(
                         planned_tools: vec![],
                         pending_request: None,
                         task: None,
+                        summary: None,
                     },
                 }));
             }
@@ -98,6 +99,7 @@ pub async fn maybe_handle_test_message(
             planned_tools: vec!["test_harness".to_string()],
             pending_request: result.pending_request,
             task: result.task,
+            summary: None,
         },
     }))
 }

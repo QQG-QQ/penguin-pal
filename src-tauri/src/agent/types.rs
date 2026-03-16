@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::control::types::ControlPendingRequest;
+use crate::control::types::{ControlPendingRequest, ControlRiskLevel};
 use crate::app_state::now_millis;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +43,188 @@ pub enum AgentLoopTaskStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssertionType {
+    WindowExists,
+    ActiveWindowMatches,
+    TextContains,
+    ScreenContextState,
+    PendingState,
+    ConsistencyState,
+    FileExists,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureStage {
+    Planning,
+    Observation,
+    ExecuteTool,
+    Assertion,
+    Confirmation,
+    Retry,
+    Finish,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureReasonCode {
+    None,
+    PlannerFailed,
+    ContextUnavailable,
+    ToolFailed,
+    AssertionFailed,
+    ConfirmationRequired,
+    ConfirmationRejected,
+    RetryExhausted,
+    StepBudgetExceeded,
+    PolicyBlocked,
+    InvalidAction,
+    FileMissing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryTarget {
+    ObserveContext,
+    LastTool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveredEntitySource {
+    ScreenContext,
+    ToolResult,
+    Assertion,
+    UserInput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityPayloadType {
+    WindowRef,
+    ElementRef,
+    TextValue,
+    FileRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DiscoveredEntityPayload {
+    WindowRef {
+        title: String,
+        #[serde(default)]
+        class_name: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+    },
+    ElementRef {
+        #[serde(default)]
+        window_title: Option<String>,
+        #[serde(default)]
+        role: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        automation_id: Option<String>,
+        #[serde(default)]
+        class_name: Option<String>,
+    },
+    TextValue {
+        text: String,
+    },
+    FileRef {
+        path: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredEntity {
+    pub id: String,
+    pub label: String,
+    pub payload_type: EntityPayloadType,
+    pub payload: DiscoveredEntityPayload,
+    pub created_at_step: usize,
+    pub last_seen_step: usize,
+    pub source: DiscoveredEntitySource,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeObservation {
+    pub step: usize,
+    pub source: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeToolResult {
+    pub step: usize,
+    pub tool: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeContext {
+    pub raw_user_input: String,
+    pub normalized_goal: String,
+    pub task_status: AgentLoopTaskStatus,
+    #[serde(default)]
+    pub active_window: Option<Value>,
+    #[serde(default)]
+    pub window_inventory: Vec<Value>,
+    #[serde(default)]
+    pub uia_summary: Option<Value>,
+    #[serde(default)]
+    pub vision_summary: Option<Value>,
+    #[serde(default)]
+    pub clipboard: Option<String>,
+    #[serde(default)]
+    pub recent_tool_results: Vec<RuntimeToolResult>,
+    #[serde(default)]
+    pub recent_observations: Vec<RuntimeObservation>,
+    #[serde(default)]
+    pub discovered_entities: Vec<DiscoveredEntity>,
+    #[serde(default)]
+    pub consistency: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssertionResult {
+    pub assertion_type: AssertionType,
+    pub passed: bool,
+    #[serde(default)]
+    pub observed_value: Value,
+    #[serde(default)]
+    pub expected_value: Value,
+    pub failure_reason_code: FailureReasonCode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLoopSummary {
+    pub goal: String,
+    pub steps_taken: usize,
+    pub final_status: AgentTaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<FailureStage>,
+    pub failure_reason_code: FailureReasonCode,
+    pub used_probe: bool,
+    pub used_retry: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolStep {
@@ -82,6 +264,15 @@ pub enum AgentNextAction {
     RespondToUser {
         message: String,
     },
+    ObserveContext {
+        summary: String,
+    },
+    AssertCondition {
+        assertion_type: AssertionType,
+        summary: String,
+        #[serde(default = "empty_json_object")]
+        params: Value,
+    },
     RequestConfirmation {
         tool: String,
         #[serde(default)]
@@ -97,11 +288,17 @@ pub enum AgentNextAction {
         #[serde(default = "empty_json_object")]
         args: Value,
     },
+    RetryStep {
+        target: RetryTarget,
+        summary: String,
+    },
     FinishTask {
         message: String,
+        summary: AgentLoopSummary,
     },
     FailTask {
         message: String,
+        summary: AgentLoopSummary,
     },
 }
 
@@ -156,15 +353,25 @@ pub struct AgentTaskRun {
     pub pending_action_summary: Option<String>,
     pub last_observation: Option<Value>,
     pub last_tool_result: Option<Value>,
+    pub runtime_context: Option<RuntimeContext>,
     pub task_status: AgentLoopTaskStatus,
     pub recent_steps: Vec<AgentStepRecord>,
     pub failure_reason: Option<String>,
+    pub failure_reason_code: FailureReasonCode,
+    pub failure_stage: Option<FailureStage>,
+    pub used_probe: bool,
+    pub used_retry: bool,
     pub plan: AgentPlan,
     pub next_step_index: usize,
     pub waiting_step_index: Option<usize>,
     pub waiting_pending_id: Option<String>,
     pub completed_notes: Vec<String>,
     pub completed_results: Vec<Value>,
+    pub last_retryable_tool: Option<String>,
+    pub last_retryable_args: Option<Value>,
+    pub last_retryable_summary: Option<String>,
+    pub last_retryable_risk: Option<ControlRiskLevel>,
+    pub final_summary: Option<AgentLoopSummary>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -178,17 +385,25 @@ pub struct AgentMessageMeta {
     pub pending_request: Option<ControlPendingRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<AgentTaskProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<AgentLoopSummary>,
 }
 
 pub const AGENT_ALLOWED_TOOLS: &[&str] = &[
     "list_windows",
     "focus_window",
     "open_app",
+    "capture_active_window",
     "read_clipboard",
     "type_text",
     "send_hotkey",
     "scroll_at",
     "click_at",
+    "find_element",
+    "click_element",
+    "get_element_text",
+    "set_element_value",
+    "wait_for_element",
 ];
 
 pub fn is_agent_tool_allowed(name: &str) -> bool {
@@ -223,11 +438,20 @@ impl AgentTaskRun {
             pending_action_summary: None,
             last_observation: None,
             last_tool_result: None,
+            runtime_context: None,
             task_status: AgentLoopTaskStatus::Planning,
             recent_steps: vec![],
             failure_reason: None,
+            failure_reason_code: FailureReasonCode::None,
+            failure_stage: None,
+            used_probe: false,
+            used_retry: false,
             plan: AgentPlan {
-                route: AgentRoute::Control,
+                route: if matches!(intent, TopLevelIntent::TestRequest) {
+                    AgentRoute::Test
+                } else {
+                    AgentRoute::Control
+                },
                 task_title: Some(task_title.clone()),
                 stop_on_error: true,
                 steps: vec![],
@@ -237,6 +461,11 @@ impl AgentTaskRun {
             waiting_pending_id: None,
             completed_notes: vec![],
             completed_results: vec![],
+            last_retryable_tool: None,
+            last_retryable_args: None,
+            last_retryable_summary: None,
+            last_retryable_risk: None,
+            final_summary: None,
             created_at: timestamp,
             updated_at: timestamp,
         }
