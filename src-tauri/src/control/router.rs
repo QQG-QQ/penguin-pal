@@ -145,6 +145,38 @@ fn get_optional_bool(map: &Map<String, Value>, key: &str, default: bool) -> bool
     map.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
+fn parse_hotkey_keys(value: Option<&Value>) -> ControlResult<Vec<String>> {
+    let Some(value) = value else {
+        return Err(ControlError::invalid_argument("keys 必须是数组或字符串。"));
+    };
+
+    let keys = if let Some(items) = value.as_array() {
+        items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(|key| key.trim().to_uppercase())
+                    .filter(|key| !key.is_empty())
+                    .ok_or_else(|| ControlError::invalid_argument("keys 数组必须全部是非空字符串。"))
+            })
+            .collect::<ControlResult<Vec<_>>>()?
+    } else if let Some(raw) = value.as_str() {
+        raw.split(['+', ',', ' '])
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| item.to_uppercase())
+            .collect::<Vec<_>>()
+    } else {
+        return Err(ControlError::invalid_argument("keys 必须是数组或字符串。"));
+    };
+
+    if keys.is_empty() {
+        return Err(ControlError::invalid_argument("keys 不能为空。"));
+    }
+
+    Ok(keys)
+}
+
 fn canonicalize_request(request: ToolInvokeRequest) -> ToolInvokeRequest {
     match request.tool.as_str() {
         "click_element_or_coords" => {
@@ -313,13 +345,7 @@ fn normalize_args(tool: &str, args: Value) -> ControlResult<Value> {
             Ok(json!({ "text": text }))
         }
         "send_hotkey" => {
-            let keys = map
-                .get("keys")
-                .and_then(Value::as_array)
-                .ok_or_else(|| ControlError::invalid_argument("keys 必须是数组。"))?;
-            if keys.is_empty() {
-                return Err(ControlError::invalid_argument("keys 不能为空。"));
-            }
+            let keys = parse_hotkey_keys(map.get("keys"))?;
             Ok(json!({ "keys": keys }))
         }
         "click_at" => {
@@ -600,14 +626,7 @@ fn execute_tool(app: &AppHandle, tool: &str, args: &Value) -> ControlResult<Valu
             args.get("text").and_then(Value::as_str).unwrap_or_default(),
         ),
         "send_hotkey" => {
-            let keys = args
-                .get("keys")
-                .and_then(Value::as_array)
-                .ok_or_else(|| ControlError::invalid_argument("keys 必须是数组。"))?
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
+            let keys = parse_hotkey_keys(args.get("keys"))?;
             windows::input::send_hotkey(app, &keys)
         }
         "click_at" => windows::input::click_at(

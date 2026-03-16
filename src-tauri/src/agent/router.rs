@@ -997,7 +997,11 @@ fn can_auto_complete_loop_task(task: &AgentTaskRun) -> bool {
     ) {
         return false;
     }
-    !task.recent_steps.is_empty()
+    // 强化检查：必须有至少一个成功的工具执行步骤
+    // 避免只做了无关 observe_context 就被标记为 completed
+    task.recent_steps.iter().any(|step| {
+        step.outcome == "success" && step.tool.is_some()
+    })
 }
 
 fn build_auto_completion_summary(task: &AgentTaskRun) -> AgentLoopSummary {

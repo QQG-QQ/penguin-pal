@@ -9,7 +9,9 @@ pub mod runtime_binding;
 pub mod runtime_context;
 pub mod router;
 pub mod screen_context;
-pub mod screen_planner;
+// NOTE: screen_planner 已弃用，主链已迁移到 loop_planner / test_loop_planner
+// 保留文件以备回退参考，但不再导出
+// pub mod screen_planner;
 pub mod screen_reconciler;
 pub mod task_store;
 pub mod test_assertions;

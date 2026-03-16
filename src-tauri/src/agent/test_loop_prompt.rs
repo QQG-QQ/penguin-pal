@@ -65,6 +65,11 @@ pub fn build_test_next_action_prompt(tools: &[ControlToolDefinition]) -> String 
 3. 必须参考 runtime context 与 screen context，其中 vision summary schemaVersion={schema}。\n\
 4. 不再依赖固定测试变量名；如果要引用目标，优先使用有限语义引用 targetRef，可用值只有：\n\
 {refs}\n\
+   **重要**：targetRef 引用的实体来自当前 runtime context 的 discoveredEntities 列表。\n\
+   - 实体在每轮 context 刷新时可能消失或更新\n\
+   - 如果引用的实体不存在，工具执行会报错\n\
+   - 不要猜测或编造 targetRef 值，必须从 discoveredEntities 中选择\n\
+   - 如果不确定目标是否存在，优先使用显式参数或先 observe_context\n\
 5. assert_condition 只能使用列出的有限断言类型。\n\
 6. retry_step 不能升级到高风险动作；只允许重试 observe_context 或上一条低风险工具动作，而且最多一次。\n\
 7. 高风险动作不能自动升级，遇到需要确认的动作可以输出 request_confirmation，但底层是否确认由本地安全层决定。\n\

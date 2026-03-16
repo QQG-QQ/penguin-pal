@@ -10,9 +10,10 @@ use super::{
 
 pub const ALLOWED_ENTITY_REFS: &[&str] = &[
     "active_window",
-    "current_browser_window",
-    "current_notepad_window",
-    "current_wechat_window",
+    // 重命名：current_* -> latest_* 以体现动态发现的语义
+    "latest_browser_window",
+    "latest_notepad_window",
+    "latest_wechat_window",
     "latest_visible_input",
     "latest_file_ref",
     "latest_text_value",
@@ -506,7 +507,7 @@ fn resolve_entity_ref<'a>(context: &'a RuntimeContext, reference: &str) -> Optio
             .iter()
             .rev()
             .find(|entity| entity.id == reference),
-        "current_browser_window" => context.discovered_entities.iter().rev().find(|entity| {
+        "latest_browser_window" => context.discovered_entities.iter().rev().find(|entity| {
             matches!(
                 &entity.payload,
                 DiscoveredEntityPayload::WindowRef {
@@ -515,7 +516,7 @@ fn resolve_entity_ref<'a>(context: &'a RuntimeContext, reference: &str) -> Optio
                 } if kind == "browser"
             )
         }),
-        "current_notepad_window" => context.discovered_entities.iter().rev().find(|entity| {
+        "latest_notepad_window" => context.discovered_entities.iter().rev().find(|entity| {
             matches!(
                 &entity.payload,
                 DiscoveredEntityPayload::WindowRef {
@@ -524,7 +525,7 @@ fn resolve_entity_ref<'a>(context: &'a RuntimeContext, reference: &str) -> Optio
                 } if kind == "notepad"
             )
         }),
-        "current_wechat_window" => context.discovered_entities.iter().rev().find(|entity| {
+        "latest_wechat_window" => context.discovered_entities.iter().rev().find(|entity| {
             matches!(
                 &entity.payload,
                 DiscoveredEntityPayload::WindowRef {

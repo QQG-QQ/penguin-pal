@@ -401,7 +401,8 @@ fn normalize_failure_stage_value(value: Option<&Value>, kind: &str) -> Value {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|item| {
-            matches!(
+            // 显式拒绝字符串 "null"，避免 JSON 解析问题
+            *item != "null" && matches!(
                 *item,
                 "planning" | "observation" | "execute_tool" | "assertion" | "confirmation" | "retry" | "finish"
             )

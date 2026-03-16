@@ -1,6 +1,8 @@
 use serde_json::json;
 
-use crate::control::windows::adapters::{notepad, wechat};
+// NOTE: adapters (notepad, wechat) 不再被 intent.rs 直接调用
+// 主链已迁移到 unified loop，parse_simple_control_plan 只返回通用计划
+// use crate::control::windows::adapters::{notepad, wechat};
 
 use super::types::{AgentPlan, AgentRoute, AgentToolStep};
 
@@ -110,9 +112,9 @@ fn parse_single_step_control(input: &str) -> Option<AgentPlan> {
 
 fn parse_focus_and_type(input: &str) -> Option<AgentPlan> {
     let (window_title, text) = parse_window_and_inline_text(input)?;
-    if is_wechat_title(&window_title) {
-        return Some(wechat::build_focus_and_draft_plan(&text));
-    }
+    // NOTE: 不再为特定应用（微信）生成特化计划
+    // 统一使用通用的 focus_window + type_text 流程
+    // unified loop 会根据 runtime context 自行判断
 
     Some(plan(
         format!("切到 {window_title} 并输入文本"),
@@ -136,7 +138,15 @@ fn parse_open_notepad_and_type(input: &str) -> Option<AgentPlan> {
     }
 
     let text = parse_inline_text_after_connector(input)?;
-    Some(notepad::build_open_and_type_plan(&text))
+    // NOTE: 不再调用 notepad adapter 生成特化计划
+    // 使用通用的 open_app + type_text 流程
+    Some(plan(
+        "打开记事本并输入文本",
+        vec![
+            step("open_app", "打开记事本", json!({ "name": "notepad" })),
+            step("type_text", "输入文本", json!({ "text": text })),
+        ],
+    ))
 }
 
 fn parse_paste_clipboard(input: &str) -> Option<AgentPlan> {
@@ -358,7 +368,9 @@ fn parse_hotkey(input: &str) -> Option<Vec<String>> {
     None
 }
 
-fn is_wechat_title(title: &str) -> bool {
-    let lowered = title.trim().to_lowercase();
-    lowered.contains("微信") || lowered.contains("wechat")
-}
+// NOTE: is_wechat_title 不再使用，主链已迁移到 unified loop
+// 保留注释以备参考
+// fn is_wechat_title(title: &str) -> bool {
+//     let lowered = title.trim().to_lowercase();
+//     lowered.contains("微信") || lowered.contains("wechat")
+// }

@@ -60,6 +60,11 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
 3. 必须参考 runtime context，其中包含活动窗口、窗口清单、UIA 摘要、视觉摘要、剪贴板、最近执行结果和 discovered entities；vision summary schemaVersion={schema}。\n\
 4. 如果需要引用已发现的目标，优先使用有限语义引用 targetRef，可用值只有：\n\
 {refs}\n\
+   **重要**：targetRef 引用的实体来自当前 runtime context 的 discoveredEntities 列表。\n\
+   - 实体在每轮 context 刷新时可能消失或更新\n\
+   - 如果引用的实体不存在，工具执行会报错\n\
+   - 不要猜测或编造 targetRef 值，必须从 discoveredEntities 中选择\n\
+   - 如果不确定目标是否存在，优先使用显式参数而非 targetRef\n\
 5. 如果上下文不足、目标不清楚、或存在明显风险冲突，优先输出 fail_task，不要盲目操作。\n\
 6. 如果只是需要和用户说一句话，不执行工具，输出 respond_to_user。\n\
 7. 如果任务已经完成，输出 finish_task，并附带结构化 summary。\n\
