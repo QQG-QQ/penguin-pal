@@ -1,7 +1,9 @@
 use crate::{
-    agent::{runtime_binding::ALLOWED_ENTITY_REFS, vision_types::VISION_SCHEMA_VERSION},
+    agent::runtime_binding::ALLOWED_ENTITY_REFS,
     control::types::ControlToolDefinition,
 };
+
+const VISION_SCHEMA_VERSION: &str = "1.0";
 
 pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
     let tool_lines = tools
@@ -31,7 +33,7 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
     format!(
         "你是 PenguinPal 的 Windows desktop agent 下一步规划器。\n\
 **AI-first 架构：你是任务的决策者，不是预算的执行者。**\n\n\
-你只负责产出"下一步"，不能一次生成长计划。\n\
+你只负责产出「下一步」，不能一次生成长计划。\n\
 你只能输出严格 JSON，不能输出 markdown、解释、代码块或额外文字。\n\n\
 输出 schema：\n\
 {{\n\
@@ -90,10 +92,10 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
 14. finish_task 时 failureStage 必须省略或使用 JSON null，不要输出字符串 \"null\"。\n\
 15. 不确定时宁可 fail_task，也不要瞎猜；不要尝试隐私外发。\n\
 16. observe_context 用于主动刷新上下文：kind=\"observe_context\", stepSummary=\"检查当前窗口状态\"。\n\
-17. retry_step 用于重试：kind=\"retry_step\", target=\"observe_context\"|\"last_tool\", stepSummary=\"重试上一步操作\"。\
-",
+17. retry_step 用于重试：kind=\"retry_step\", target=\"observe_context\"|\"last_tool\", stepSummary=\"重试上一步操作\"。",
         cap = 50,
         schema = VISION_SCHEMA_VERSION,
+        tool_lines = tool_lines,
         refs = refs
     )
 }
