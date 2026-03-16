@@ -26,12 +26,19 @@ pub async fn plan_next_action(
     user_input: &str,
     task: &AgentTaskRun,
     context: &RuntimeContext,
+    memory_context: Option<&str>,
 ) -> Result<AgentLoopDecision, String> {
     let allowed_tools = registry::tool_definitions()
         .into_iter()
         .filter(|tool| is_agent_tool_allowed(&tool.name))
         .collect::<Vec<_>>();
     let prompt = loop_prompt::build_next_action_prompt(&allowed_tools);
+
+    let memory_section = memory_context
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("\n\n{}\n", s))
+        .unwrap_or_default();
+
     let planner_input = format!(
         "用户原始请求：\n{}\n\n\
 当前目标：\n{}\n\n\
@@ -42,7 +49,7 @@ pub async fn plan_next_action(
 - retryBudget: {}\n\
 - recentSteps: {}\n\
 - lastToolResult: {}\n\n\
-当前 runtime context：\n{}\n",
+当前 runtime context：\n{}{}\n",
         user_input.trim(),
         task.goal.trim(),
         task.intent,
@@ -55,6 +62,7 @@ pub async fn plan_next_action(
             .map(|value| value.to_string())
             .unwrap_or_else(|| "null".to_string()),
         render_runtime_context_for_prompt(context),
+        memory_section,
     );
 
     let raw = provider::plan_control_request(

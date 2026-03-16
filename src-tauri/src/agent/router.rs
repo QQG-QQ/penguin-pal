@@ -33,6 +33,92 @@ const AI_FIRST_RETRY_BUDGET: usize = 3;
 const TEST_LOOP_STEP_BUDGET: usize = 12;
 const TEST_LOOP_RETRY_BUDGET: usize = 1;
 
+/// 构建任务的 memory context (用于 prompt 注入)
+fn build_memory_context_for_task(
+    app: &AppHandle,
+    user_input: &str,
+    task: &AgentTaskRun,
+) -> Option<String> {
+    let app_data = app.path().app_data_dir().ok()?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+
+    // 从 task 中提取窗口信息用于查询
+    let window_title = task
+        .runtime_context
+        .as_ref()
+        .and_then(|ctx| ctx.active_window.as_ref())
+        .and_then(|w| w.get("title"))
+        .and_then(|v| v.as_str());
+
+    let query = crate::memory::service::build_query_from_task(
+        user_input,
+        Some("desktop_action"),
+        window_title,
+        None,
+    );
+
+    memory_service.render_for_prompt(&query).ok()
+}
+
+/// 任务完成/失败后写回记忆
+fn write_back_task_memory(app: &AppHandle, task: &AgentTaskRun) {
+    let Some(app_data) = app.path().app_data_dir().ok() else {
+        return;
+    };
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+
+    // 从 task 中提取信息构建 write-back request
+    let final_status = match task.task_status {
+        AgentLoopTaskStatus::Completed => "completed",
+        AgentLoopTaskStatus::Failed => "failed",
+        AgentLoopTaskStatus::Cancelled => "cancelled",
+        _ => "running",
+    };
+
+    let failure_reason_code = task
+        .failure_reason_code
+        .as_ref()
+        .map(|c| format!("{:?}", c));
+    let failure_stage = task.failure_stage.as_ref().map(|s| format!("{:?}", s));
+
+    let window_title = task
+        .runtime_context
+        .as_ref()
+        .and_then(|ctx| ctx.active_window.as_ref())
+        .and_then(|w| w.get("title"))
+        .and_then(|v| v.as_str());
+    let window_class = task
+        .runtime_context
+        .as_ref()
+        .and_then(|ctx| ctx.active_window.as_ref())
+        .and_then(|w| w.get("className"))
+        .and_then(|v| v.as_str());
+
+    let used_tools: Vec<String> = task
+        .recent_steps
+        .iter()
+        .filter_map(|step| step.tool.clone())
+        .collect();
+
+    let request = crate::memory::service::build_write_back_request(
+        &task.id,
+        &task.goal,
+        &format!("{:?}", task.intent),
+        final_status,
+        failure_reason_code.as_deref(),
+        failure_stage.as_deref(),
+        window_title,
+        window_class,
+        used_tools,
+        task.used_retry,
+        task.used_probe,
+        task.recent_steps.len(),
+    );
+
+    // 写回记忆 (忽略错误，不影响主流程)
+    let _ = memory_service.write_back(request);
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentHandleResult {
     pub reply_text: String,
@@ -223,20 +309,52 @@ pub fn handle_memory_request(app: &AppHandle) -> Result<AgentHandleResult, Strin
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?;
+
+    // 初始化 memory service
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+
+    // 加载各类 memory
+    let profile = memory_service.load_profile().unwrap_or_default();
+    let episodic = memory_service.store().load_episodic().unwrap_or_default();
+    let procedural = memory_service.store().load_procedural().unwrap_or_default();
+    let policy = memory_service.store().load_policy().unwrap_or_default();
+
     let input_history = history::get_input_history(app).unwrap_or_default();
     let reply_history = history::get_today_reply_history(app).unwrap_or_default();
     let recent_failures = testing::history::recent_failed_summary(app).unwrap_or_default();
 
     let mut lines = vec![
-        "当前还没有启用可写策略记忆，但本地会持久化保存若干历史数据。".to_string(),
-        format!("appData 根目录：{}", app_data.to_string_lossy()),
-        format!("输入历史条目：{}", input_history.len()),
-        format!("今日回复历史条目：{}", reply_history.len()),
-        format!("最近测试失败摘要条目：{}", recent_failures.len()),
-        "记忆请求当前只读，不会改写核心策略、权限矩阵或硬边界。".to_string(),
+        "## 持久化记忆系统 v1 状态".to_string(),
+        format!("存储路径：{}/memory/", app_data.to_string_lossy()),
+        "".to_string(),
+        "### Profile Memory (用户偏好)".to_string(),
+        format!("- 常用应用：{} 个", profile.preferred_apps.len()),
+        format!("- 常用路径：{} 个", profile.frequently_used_paths.len()),
+        format!("- 风险偏好：{}", if profile.risk_preference_low_level_only { "保守" } else { "平衡" }),
+        "".to_string(),
+        "### Episodic Memory (任务历史)".to_string(),
+        format!("- 历史条目：{} 条", episodic.entries.len()),
+        "".to_string(),
+        "### Procedural Memory (操作模式)".to_string(),
+        format!("- 已知路径：{} 条", procedural.procedures.len()),
+        "".to_string(),
+        "### Policy Memory (软建议)".to_string(),
+        format!("- 策略建议：{} 条", policy.suggestions.len()),
+        "".to_string(),
+        "### 其他历史".to_string(),
+        format!("- 输入历史：{} 条", input_history.len()),
+        format!("- 今日回复：{} 条", reply_history.len()),
+        format!("- 测试失败摘要：{} 条", recent_failures.len()),
+        "".to_string(),
+        "### 核心安全策略 (不可变)".to_string(),
     ];
+
+    // 添加核心策略摘要
+    lines.push(memory_service.get_core_policy_summary());
+
     if !recent_failures.is_empty() {
-        lines.push("最近失败摘要：".to_string());
+        lines.push("".to_string());
+        lines.push("### 最近失败摘要".to_string());
         for item in recent_failures.iter().take(3) {
             lines.push(format!("- {item}"));
         }
@@ -365,6 +483,9 @@ async fn continue_desktop_loop(
     user_input: &str,
     task: &mut AgentTaskRun,
 ) -> Result<AgentHandleResult, String> {
+    // 初始化 memory service 并构建 memory context
+    let memory_context = build_memory_context_for_task(app, user_input, task);
+
     loop {
         if task.step_budget == 0 {
             // AI-first: budget 耗尽时注入警告到 completed_notes，让 AI 最终决定
@@ -389,6 +510,7 @@ async fn continue_desktop_loop(
             user_input,
             task,
             &context,
+            memory_context.as_deref(),
         )
         .await
         {
@@ -398,6 +520,8 @@ async fn continue_desktop_loop(
                 task.failure_reason = Some(primary_error.clone());
                 task.failure_reason_code = FailureReasonCode::PlannerFailed;
                 task.failure_stage = Some(FailureStage::Planning);
+                // Write-back: 记录失败经验
+                write_back_task_memory(app, task);
                 return Ok(fail_result(
                     AgentRoute::Control,
                     "Desktop Agent",
@@ -421,6 +545,8 @@ async fn continue_desktop_loop(
             AgentNextAction::FinishTask { message, summary } => {
                 task.task_status = AgentLoopTaskStatus::Completed;
                 task.final_summary = Some(summary.clone());
+                // Write-back: 记录成功经验
+                write_back_task_memory(app, task);
                 return Ok(complete_result(AgentRoute::Control, "Desktop Agent", task, message, summary));
             }
             AgentNextAction::FailTask { message, summary } => {
@@ -429,6 +555,8 @@ async fn continue_desktop_loop(
                 task.failure_reason_code = summary.failure_reason_code.clone();
                 task.failure_stage = summary.failure_stage.clone();
                 task.final_summary = Some(summary.clone());
+                // Write-back: 记录失败经验
+                write_back_task_memory(app, task);
                 return Ok(fail_result(AgentRoute::Control, "Desktop Agent", task, message));
             }
             AgentNextAction::ObserveContext { summary } => {
@@ -1096,6 +1224,26 @@ async fn cancel_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolIn
     };
 
     let _ = control_router::cancel(app, pending_id).map_err(|error| error.to_string())?;
+
+    // Write-back: 记录确认被拒绝的经验
+    if let Some(ref pending) = task.pending_request {
+        let window_title = task
+            .runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.active_window.as_ref())
+            .and_then(|w| w.get("title"))
+            .and_then(|v| v.as_str());
+
+        if let Ok(app_data) = app.path().app_data_dir() {
+            let memory_service = crate::memory::MemoryService::new(&app_data);
+            let _ = memory_service.write_confirmation_rejected(
+                &task.goal,
+                &pending.tool,
+                window_title,
+            );
+        }
+    }
+
     executor::clear_loop_pending(&mut task);
     task.task_status = AgentLoopTaskStatus::Cancelled;
     task.failure_reason = Some("用户取消了当前待确认动作。".to_string());
@@ -1109,7 +1257,7 @@ async fn cancel_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolIn
                 Some("当前桌面任务已取消。".to_string()),
             ),
         })),
-        message: Some(format!("任务“{}”已取消。", task.task_title)),
+        message: Some(format!("任务"{}"已取消。", task.task_title)),
         pending_request: None,
         error: None,
     })

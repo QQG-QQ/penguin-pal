@@ -6,14 +6,25 @@ mod control;
 mod audio;
 mod desktop;
 mod history;
+mod memory;
 mod security;
 mod testing;
 mod tray;
 mod window;
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{process::Command, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager, State};
+
+/// Memory 维护线程停止标志
+static MEMORY_MAINTENANCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// 请求停止 memory 维护线程
+#[allow(dead_code)]
+pub fn request_memory_maintenance_shutdown() {
+    MEMORY_MAINTENANCE_SHUTDOWN.store(true, Ordering::Relaxed);
+}
 
 use crate::{
     agent::{intent_classifier, router as agent_router, AgentTaskState},
@@ -1386,6 +1397,52 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window::setup_window(&window)?;
             }
+
+            // 启动 memory 维护后台任务
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                // 启动时执行一次维护
+                if let Ok(app_data) = app_handle.path().app_data_dir() {
+                    let service = memory::MemoryService::new(&app_data);
+                    let result = service.run_maintenance();
+                    if result.total_changes() > 0 {
+                        eprintln!(
+                            "Memory maintenance: decayed={}, merged={}, pruned={}",
+                            result.decayed, result.merged, result.pruned
+                        );
+                    }
+                }
+
+                // 每小时执行一次维护（分段 sleep 以便响应 shutdown 信号）
+                const MAINTENANCE_INTERVAL_SECS: u64 = 3600;
+                const SLEEP_CHECK_INTERVAL_SECS: u64 = 60;
+
+                while !MEMORY_MAINTENANCE_SHUTDOWN.load(Ordering::Relaxed) {
+                    // 分段 sleep，每 60 秒检查一次 shutdown 信号
+                    for _ in 0..(MAINTENANCE_INTERVAL_SECS / SLEEP_CHECK_INTERVAL_SECS) {
+                        if MEMORY_MAINTENANCE_SHUTDOWN.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(SLEEP_CHECK_INTERVAL_SECS));
+                    }
+
+                    if MEMORY_MAINTENANCE_SHUTDOWN.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    if let Ok(app_data) = app_handle.path().app_data_dir() {
+                        let service = memory::MemoryService::new(&app_data);
+                        let result = service.run_maintenance();
+                        if result.total_changes() > 0 {
+                            eprintln!(
+                                "Memory maintenance: decayed={}, merged={}, pruned={}",
+                                result.decayed, result.merged, result.pruned
+                            );
+                        }
+                    }
+                }
+                eprintln!("Memory maintenance thread stopped.");
+            });
 
             Ok(())
         })
