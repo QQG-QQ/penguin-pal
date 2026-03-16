@@ -28,7 +28,7 @@ pub async fn maybe_handle_test_message(
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
-    _force_route: bool,
+    force_route: bool,
 ) -> Result<Option<TestAgentHandleResult>, String> {
     let trimmed = user_input.trim();
     if trimmed.is_empty() {

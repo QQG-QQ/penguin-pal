@@ -87,8 +87,9 @@ fn normalize_test_loop_decision(mut payload: Value) -> Result<Value, String> {
         .get("kind")
         .and_then(Value::as_str)
         .ok_or_else(|| "测试 agent loop 返回缺少 next.kind。".to_string())?;
+    let kind = kind.to_string();
 
-    match kind {
+    match kind.as_str() {
         "observe_context"
         | "execute_tool"
         | "assert_condition"
@@ -97,15 +98,15 @@ fn normalize_test_loop_decision(mut payload: Value) -> Result<Value, String> {
             if let Some(step_summary) = next.remove("stepSummary") {
                 next.entry("summary".to_string()).or_insert(step_summary);
             }
-            ensure_step_summary(next, kind);
+            ensure_step_summary(next, &kind);
             normalize_step_summary(next);
         }
         "finish_task" | "fail_task" => {
             if let Some(final_summary) = next.remove("finalSummary") {
                 next.entry("summary".to_string()).or_insert(final_summary);
             }
-            ensure_final_summary_seed(next, kind);
-            normalize_final_summary(next, &goal, kind);
+            ensure_final_summary_seed(next, &kind);
+            normalize_final_summary(next, &goal, &kind);
         }
         "respond_to_user" => {}
         _ => {}
@@ -277,22 +278,27 @@ fn normalize_final_summary(
     goal: &str,
     kind: &str,
 ) {
-    let Some(summary) = next.get_mut("summary") else {
-        return;
-    };
-
-    if summary.is_object() {
-        return;
-    }
-
     let message = next
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim()
         .to_string();
+    let current_summary = next.get("summary").cloned();
+    let Some(summary_value) = current_summary else {
+        return;
+    };
+
+    if summary_value.is_object() {
+        return;
+    }
+
     let fallback_message = if message.is_empty() {
-        summary.as_str().unwrap_or_default().trim().to_string()
+        summary_value
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
     } else {
         message
     };
@@ -308,15 +314,18 @@ fn normalize_final_summary(
     };
     let failure_reason_code = map_failure_reason_code(&fallback_message);
 
-    *summary = serde_json::json!({
-        "goal": goal,
-        "stepsTaken": 0,
-        "finalStatus": final_status,
-        "failureStage": failure_stage,
-        "failureReasonCode": failure_reason_code,
-        "usedProbe": false,
-        "usedRetry": false,
-    });
+    next.insert(
+        "summary".to_string(),
+        serde_json::json!({
+            "goal": goal,
+            "stepsTaken": 0,
+            "finalStatus": final_status,
+            "failureStage": failure_stage,
+            "failureReasonCode": failure_reason_code,
+            "usedProbe": false,
+            "usedRetry": false,
+        }),
+    );
 }
 
 fn map_failure_reason_code(message: &str) -> &'static str {
