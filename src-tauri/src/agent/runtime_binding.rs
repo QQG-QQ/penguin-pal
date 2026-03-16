@@ -48,8 +48,7 @@ pub fn merge_screen_context_entities(
             .and_then(Value::as_str)
             .map(ToString::to_string);
         let kind = browser_kind_from_title(title)
-            .or_else(|| window_kind_hint(title))
-            .map(ToString::to_string);
+            .or_else(|| window_kind_hint(title).map(ToString::to_string));
         let entity_id = format!("window:{}", sanitize_id(title));
         upsert_entity(
             context,

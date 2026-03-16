@@ -423,6 +423,11 @@ impl AgentTaskRun {
         let task_id = format!("agent-task-{}", now_millis());
         let timestamp = now_millis();
         let task_title = truncate_task_title(goal);
+        let route = if matches!(intent, TopLevelIntent::TestRequest) {
+            AgentRoute::Test
+        } else {
+            AgentRoute::Control
+        };
 
         Self {
             task_id,
@@ -447,11 +452,7 @@ impl AgentTaskRun {
             used_probe: false,
             used_retry: false,
             plan: AgentPlan {
-                route: if matches!(intent, TopLevelIntent::TestRequest) {
-                    AgentRoute::Test
-                } else {
-                    AgentRoute::Control
-                },
+                route,
                 task_title: Some(task_title.clone()),
                 stop_on_error: true,
                 steps: vec![],

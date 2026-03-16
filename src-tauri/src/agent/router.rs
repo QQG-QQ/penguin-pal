@@ -632,7 +632,7 @@ async fn continue_test_loop(
                 task.step_budget = task.step_budget.saturating_sub(1);
                 task.completed_notes.push(summary.clone());
                 task.recent_steps.push(super::types::AgentStepRecord {
-                    summary,
+                    summary: summary.clone(),
                     tool: None,
                     args: None,
                     outcome: "success".to_string(),
@@ -981,8 +981,9 @@ async fn confirm_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolI
     task.completed_notes.push(note);
     task.last_tool_result = Some(confirmed_result.clone());
     task.completed_results.push(confirmed_result);
-    if let Some(tool) = task.recent_steps.last().and_then(|step| step.tool.clone()) {
-        runtime_context::append_runtime_tool_result(task, &tool, "success", task.last_tool_result.clone());
+    let confirmed_tool = task.recent_steps.last().and_then(|step| step.tool.clone());
+    if let Some(tool) = confirmed_tool {
+        runtime_context::append_runtime_tool_result(&mut task, &tool, "success", task.last_tool_result.clone());
     }
     task.step_budget = task.step_budget.saturating_sub(1);
     executor::clear_loop_pending(&mut task);
