@@ -379,7 +379,9 @@ async fn continue_desktop_loop(
 ) -> Result<AgentHandleResult, String> {
     while task.step_budget > 0 {
         task.task_status = AgentLoopTaskStatus::Planning;
-        runtime_context::refresh_runtime_context(app, task, vision_channel, vision_api_key.clone()).await;
+        let context =
+            runtime_context::refresh_runtime_context(app, task, vision_channel, vision_api_key.clone())
+                .await;
         task.updated_at = now_millis();
 
         let decision = match loop_planner::plan_next_action(
@@ -392,25 +394,34 @@ async fn continue_desktop_loop(
             allowed_actions,
             user_input,
             task,
-            &screen_context::describe_current_screen(app, vision_channel, vision_api_key.clone()).await,
+            &context,
         )
         .await
         {
             Ok(decision) => decision,
             Err(primary_error) => {
-                let fallback = screen_planner::plan_from_screen_context(
-                    provider_config,
-                    api_key.clone(),
-                    oauth_access_token.clone(),
-                    codex_command.clone(),
-                    codex_home.clone(),
-                    permission_level,
-                    allowed_actions,
-                    user_input,
-                    &screen_context::describe_current_screen(app, vision_channel, vision_api_key.clone()).await,
-                )
-                .await
-                .and_then(|plan| loop_planner::decision_from_plan(&task.goal, plan));
+                let fallback = if intent::parse_simple_control_plan(user_input).is_some() {
+                    screen_planner::plan_from_screen_context(
+                        provider_config,
+                        api_key.clone(),
+                        oauth_access_token.clone(),
+                        codex_command.clone(),
+                        codex_home.clone(),
+                        permission_level,
+                        allowed_actions,
+                        user_input,
+                        &screen_context::describe_current_screen(
+                            app,
+                            vision_channel,
+                            vision_api_key.clone(),
+                        )
+                        .await,
+                    )
+                    .await
+                    .and_then(|plan| loop_planner::decision_from_plan(&task.goal, plan))
+                } else {
+                    Err("当前请求未启用 deterministic control fallback。".to_string())
+                };
 
                 match fallback {
                     Ok(decision) => decision,

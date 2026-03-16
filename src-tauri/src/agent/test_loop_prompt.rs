@@ -40,17 +40,17 @@ pub fn build_test_next_action_prompt(tools: &[ControlToolDefinition]) -> String 
   \"goal\":\"...\",\n\
   \"next\":{{\n\
     \"kind\":\"respond_to_user|observe_context|execute_tool|assert_condition|request_confirmation|retry_step|finish_task|fail_task\",\n\
-    \"summary\":\"...\",\n\
+    \"stepSummary\":\"...\",\n\
     \"message\":\"...\",\n\
     \"tool\":\"...\",\n\
     \"args\":{{...}},\n\
     \"assertionType\":\"window_exists|active_window_matches|text_contains|screen_context_state|pending_state|consistency_state|file_exists\",\n\
     \"params\":{{...}},\n\
     \"target\":\"observe_context|last_tool\",\n\
-    \"summary\":{{\n\
+    \"finalSummary\":{{\n\
       \"goal\":\"...\",\n\
       \"stepsTaken\":0,\n\
-      \"finalStatus\":\"running|waiting_confirmation|completed|failed|cancelled\",\n\
+      \"finalStatus\":\"completed|failed|cancelled\",\n\
       \"failureStage\":\"planning|observation|execute_tool|assertion|confirmation|retry|finish|null\",\n\
       \"failureReasonCode\":\"none|planner_failed|context_unavailable|tool_failed|assertion_failed|confirmation_required|confirmation_rejected|retry_exhausted|step_budget_exceeded|policy_blocked|invalid_action|file_missing\",\n\
       \"usedProbe\":false,\n\

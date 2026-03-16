@@ -880,70 +880,85 @@ async fn send_chat_message(
     .map(|decision| decision.route);
 
     let (reply_text, provider_label, outcome, detail, agent_meta) = match classified_route {
-        Some(agent::types::TopLevelIntent::TestRequest) => match agent_router::maybe_handle_test_message(
-            &app,
-            &provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
-            &vision_channel,
-            vision_api_key.clone(),
-            codex_command.clone(),
-            codex_home.clone(),
-            permission_level,
-            &allowed_actions,
-            trimmed,
-            true,
-        )
-        .await
-        {
-            Ok(Some(result)) => (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-            ),
-            Ok(None) | Err(_) => match test_agent::router::maybe_handle_test_message(
-                &app,
-                &provider_config,
-                api_key.clone(),
-                oauth_access_token.clone(),
-                codex_command.clone(),
-                codex_home.clone(),
-                permission_level,
-                &allowed_actions,
-                trimmed,
-                true,
-            )
-            .await
-            {
-                Ok(Some(result)) => (
-                    result.reply_text,
-                    result.provider_label,
-                    result.outcome,
-                    result.detail,
-                    Some(result.meta),
-                ),
-                Ok(None) => provider_response(
+        Some(agent::types::TopLevelIntent::TestRequest) => {
+            if test_agent::intent::prefers_harness_baseline(trimmed) {
+                match test_agent::router::maybe_handle_test_message(
+                    &app,
                     &provider_config,
-                    api_key,
-                    oauth_access_token,
-                    codex_command,
-                    codex_home,
+                    api_key.clone(),
+                    oauth_access_token.clone(),
+                    codex_command.clone(),
+                    codex_home.clone(),
                     permission_level,
                     &allowed_actions,
-                    &history_window,
+                    trimmed,
+                    true,
                 )
-                .await,
-                Err(error) => (
-                    provider::fallback_reply(&error),
-                    "Safety fallback".to_string(),
-                    "fallback".to_string(),
-                    error,
-                    None,
-                ),
-            },
-        },
+                .await
+                {
+                    Ok(Some(result)) => (
+                        result.reply_text,
+                        result.provider_label,
+                        result.outcome,
+                        result.detail,
+                        Some(result.meta),
+                    ),
+                    Ok(None) => (
+                        "这次测试请求没有匹配到可执行的 baseline helper。".to_string(),
+                        "Test Agent".to_string(),
+                        "test_baseline_unavailable".to_string(),
+                        "baseline_helper_missing".to_string(),
+                        None,
+                    ),
+                    Err(error) => (
+                        provider::fallback_reply(&error),
+                        "Safety fallback".to_string(),
+                        "fallback".to_string(),
+                        error,
+                        None,
+                    ),
+                }
+            } else {
+                match agent_router::maybe_handle_test_message(
+                    &app,
+                    &provider_config,
+                    api_key.clone(),
+                    oauth_access_token.clone(),
+                    &vision_channel,
+                    vision_api_key.clone(),
+                    codex_command.clone(),
+                    codex_home.clone(),
+                    permission_level,
+                    &allowed_actions,
+                    trimmed,
+                    true,
+                )
+                .await
+                {
+                    Ok(Some(result)) => (
+                        result.reply_text,
+                        result.provider_label,
+                        result.outcome,
+                        result.detail,
+                        Some(result.meta),
+                    ),
+                    Ok(None) => (
+                        "测试 agent 当前没有生成下一步动作，也没有进入旧 baseline helper。".to_string(),
+                        "Test Agent".to_string(),
+                        "test_loop_no_action".to_string(),
+                        "unified_test_loop_returned_none".to_string(),
+                        None,
+                    ),
+                    Err(error) => (
+                        provider::fallback_reply(&error),
+                        "Safety fallback".to_string(),
+                        "fallback".to_string(),
+                        error,
+                        None,
+                    ),
+                }
+            }
+        }
         Some(agent::types::TopLevelIntent::DesktopAction) => match agent_router::maybe_handle_control_message(
             &app,
             &provider_config,
@@ -1054,51 +1069,30 @@ async fn send_chat_message(
                 None,
             ),
         },
-        None => match test_agent::router::maybe_handle_test_message(
-            &app,
-            &provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
-            codex_command.clone(),
-            codex_home.clone(),
-            permission_level,
-            &allowed_actions,
-            trimmed,
-            false,
-        )
-        .await {
-            Ok(Some(result)) => (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-            ),
-            Ok(None) => match agent_router::maybe_handle_control_message(
-                &app,
-                &provider_config,
-                api_key.clone(),
-                oauth_access_token.clone(),
-                &vision_channel,
-                vision_api_key,
-                codex_command.clone(),
-                codex_home.clone(),
-                permission_level,
-                &allowed_actions,
-                trimmed,
-                false,
-            )
-            .await
-            {
-                Ok(Some(result)) => (
-                    result.reply_text,
-                    result.provider_label,
-                    result.outcome,
-                    result.detail,
-                    Some(result.meta),
-                ),
-                Ok(None) => {
-                    provider_response(
+        None => {
+            if test_agent::intent::prefers_harness_baseline(trimmed) {
+                match test_agent::router::maybe_handle_test_message(
+                    &app,
+                    &provider_config,
+                    api_key.clone(),
+                    oauth_access_token.clone(),
+                    codex_command.clone(),
+                    codex_home.clone(),
+                    permission_level,
+                    &allowed_actions,
+                    trimmed,
+                    false,
+                )
+                .await
+                {
+                    Ok(Some(result)) => (
+                        result.reply_text,
+                        result.provider_label,
+                        result.outcome,
+                        result.detail,
+                        Some(result.meta),
+                    ),
+                    Ok(None) => provider_response(
                         &provider_config,
                         api_key,
                         oauth_access_token,
@@ -1108,24 +1102,92 @@ async fn send_chat_message(
                         &allowed_actions,
                         &history_window,
                     )
-                    .await
+                    .await,
+                    Err(error) => (
+                        provider::fallback_reply(&error),
+                        "Safety fallback".to_string(),
+                        "fallback".to_string(),
+                        error,
+                        None,
+                    ),
                 }
-                Err(error) => (
-                    provider::fallback_reply(&error),
-                    "Safety fallback".to_string(),
-                    "fallback".to_string(),
-                    error,
-                    None,
-                ),
-            },
-            Err(error) => (
-                provider::fallback_reply(&error),
-                "Safety fallback".to_string(),
-                "fallback".to_string(),
-                error,
-                None,
-            ),
-        },
+            } else {
+                match agent_router::maybe_handle_test_message(
+                    &app,
+                    &provider_config,
+                    api_key.clone(),
+                    oauth_access_token.clone(),
+                    &vision_channel,
+                    vision_api_key.clone(),
+                    codex_command.clone(),
+                    codex_home.clone(),
+                    permission_level,
+                    &allowed_actions,
+                    trimmed,
+                    false,
+                )
+                .await {
+                    Ok(Some(result)) => (
+                        result.reply_text,
+                        result.provider_label,
+                        result.outcome,
+                        result.detail,
+                        Some(result.meta),
+                    ),
+                    Ok(None) => match agent_router::maybe_handle_control_message(
+                        &app,
+                        &provider_config,
+                        api_key.clone(),
+                        oauth_access_token.clone(),
+                        &vision_channel,
+                        vision_api_key,
+                        codex_command.clone(),
+                        codex_home.clone(),
+                        permission_level,
+                        &allowed_actions,
+                        trimmed,
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(Some(result)) => (
+                            result.reply_text,
+                            result.provider_label,
+                            result.outcome,
+                            result.detail,
+                            Some(result.meta),
+                        ),
+                        Ok(None) => {
+                            provider_response(
+                                &provider_config,
+                                api_key,
+                                oauth_access_token,
+                                codex_command,
+                                codex_home,
+                                permission_level,
+                                &allowed_actions,
+                                &history_window,
+                            )
+                            .await
+                        }
+                        Err(error) => (
+                            provider::fallback_reply(&error),
+                            "Safety fallback".to_string(),
+                            "fallback".to_string(),
+                            error,
+                            None,
+                        ),
+                    },
+                    Err(error) => (
+                        provider::fallback_reply(&error),
+                        "Safety fallback".to_string(),
+                        "fallback".to_string(),
+                        error,
+                        None,
+                    ),
+                }
+            }
+        }
     };
 
     let reply_message = ChatMessage::assistant(reply_text);

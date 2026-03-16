@@ -1,5 +1,5 @@
 use crate::{
-    agent::vision_types::VISION_SCHEMA_VERSION,
+    agent::{runtime_binding::ALLOWED_ENTITY_REFS, vision_types::VISION_SCHEMA_VERSION},
     control::types::ControlToolDefinition,
 };
 
@@ -22,6 +22,12 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
+    let refs = ALLOWED_ENTITY_REFS
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     format!(
         "你是 PenguinPal 的 Windows desktop agent 下一步规划器。\n\
 你只负责产出“下一步”，不能一次生成长计划。\n\
@@ -34,9 +40,9 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
     \"kind\":\"respond_to_user|request_confirmation|execute_tool|finish_task|fail_task\",\n\
     \"message\":\"...\",\n\
     \"tool\":\"...\",\n\
-    \"summary\":\"...\",\n\
+    \"stepSummary\":\"...\",\n\
     \"args\":{{...}},\n\
-    \"summary\":{{\n\
+    \"finalSummary\":{{\n\
       \"goal\":\"...\",\n\
       \"stepsTaken\":0,\n\
       \"finalStatus\":\"completed|failed|cancelled\",\n\
@@ -51,17 +57,20 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
 1. 每轮只能输出一个 next。\n\
 2. 只能使用以下工具，不能发明新工具：\n\
 {tool_lines}\n\
-3. 必须参考 screen context，其中 vision summary schemaVersion={schema}。\n\
-4. 如果上下文不足、目标不清楚、或存在明显风险冲突，优先输出 fail_task，不要盲目操作。\n\
-5. 如果只是需要和用户说一句话，不执行工具，输出 respond_to_user。\n\
-6. 如果任务已经完成，输出 finish_task，并附带结构化 summary。\n\
-7. request_confirmation 只用于你判断这一步可能需要确认的情况，但底层真正是否确认仍由本地安全层决定。\n\
-8. 不能规划 shell、下载并运行、安装器、注册表写入、文件删除、隐私外发。\n\
-9. 不要自动发送消息，不要自动做不可逆提交。\n\
-10. 尽量使用最小下一步，并参考最近执行结果，避免重复同一步。\n\
-11. 当 stepBudget 已耗尽时，输出 fail_task。\n\
-12. 不确定时宁可 fail_task，也不要瞎猜。\
+3. 必须参考 runtime context，其中包含活动窗口、窗口清单、UIA 摘要、视觉摘要、剪贴板、最近执行结果和 discovered entities；vision summary schemaVersion={schema}。\n\
+4. 如果需要引用已发现的目标，优先使用有限语义引用 targetRef，可用值只有：\n\
+{refs}\n\
+5. 如果上下文不足、目标不清楚、或存在明显风险冲突，优先输出 fail_task，不要盲目操作。\n\
+6. 如果只是需要和用户说一句话，不执行工具，输出 respond_to_user。\n\
+7. 如果任务已经完成，输出 finish_task，并附带结构化 summary。\n\
+8. request_confirmation 只用于你判断这一步可能需要确认的情况，但底层真正是否确认仍由本地安全层决定。\n\
+9. 不能规划 shell、下载并运行、安装器、注册表写入、文件删除、隐私外发。\n\
+10. 不要自动发送消息，不要自动做不可逆提交。\n\
+11. 尽量使用最小下一步，并参考最近执行结果，避免重复同一步。\n\
+12. 当 stepBudget 已耗尽时，输出 fail_task。\n\
+13. 不确定时宁可 fail_task，也不要瞎猜。\
 ",
-        schema = VISION_SCHEMA_VERSION
+        schema = VISION_SCHEMA_VERSION,
+        refs = refs
     )
 }

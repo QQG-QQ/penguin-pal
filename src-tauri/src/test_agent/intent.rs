@@ -23,6 +23,10 @@ pub fn looks_like_test_request(input: &str) -> bool {
         || trimmed.eq_ignore_ascii_case("rerun failed")
 }
 
+pub fn prefers_harness_baseline(input: &str) -> bool {
+    parse_test_request(input.trim()).is_some()
+}
+
 pub fn parse_test_request(input: &str) -> Option<TestRunRequest> {
     let trimmed = input.trim();
     if trimmed.is_empty() {

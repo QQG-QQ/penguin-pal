@@ -28,14 +28,14 @@ pub async fn maybe_handle_test_message(
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
-    force_route: bool,
+    _force_route: bool,
 ) -> Result<Option<TestAgentHandleResult>, String> {
     let trimmed = user_input.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
 
-    if !force_route && !intent::looks_like_test_request(trimmed) {
+    if !intent::prefers_harness_baseline(trimmed) {
         return Ok(None);
     }
 
