@@ -28,7 +28,7 @@ pub fn request_memory_maintenance_shutdown() {
 
 use crate::{
     agent::{intent_classifier, router as agent_router, AgentTaskState},
-    ai::{guardrails, memory, provider},
+    ai::{guardrails, memory as ai_memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
         AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, DesktopAction, OAuthFlowResult,
@@ -845,7 +845,7 @@ async fn send_chat_message(
         expire_transient_state(&mut runtime);
         runtime.mode = PetMode::Thinking;
         runtime.messages.push(user_message);
-        memory::trim_history(&mut runtime.messages);
+        ai_memory::trim_history(&mut runtime.messages);
         save(&app, &runtime)?;
         let allowed_actions = policy::actions_for_level(runtime.permission_level);
         let codex_runtime = resolve_for_app(&app).ok();
@@ -862,7 +862,7 @@ async fn send_chat_message(
             codex_runtime
                 .as_ref()
                 .map(|item| item.home_root.to_string_lossy().to_string()),
-            memory::context_window(&runtime.messages),
+            ai_memory::context_window(&runtime.messages),
             runtime.permission_level,
             allowed_actions,
         )
@@ -1113,7 +1113,7 @@ async fn send_chat_message(
         let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
         runtime.messages.push(reply_message.clone());
         runtime.mode = PetMode::Idle;
-        memory::trim_history(&mut runtime.messages);
+        ai_memory::trim_history(&mut runtime.messages);
 
         if let Err(error) = history::record_input_history(&app, trimmed) {
             audit::push_entry(

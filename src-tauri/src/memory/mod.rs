@@ -18,12 +18,18 @@ pub mod write_back;
 #[cfg(test)]
 mod tests;
 
+// 导出供外部使用（部分尚未集成，暂时允许未使用）
+#[allow(unused_imports)]
 pub use core_policy::{check_action, get_policy_summary, CorePolicyCheck};
+#[allow(unused_imports)]
 pub use retrieval::{build_memory_summary, render_memory_summary_for_prompt};
 pub use service::{MaintenanceResult, MemoryService};
+#[allow(unused_imports)]
 pub use store::MemoryStore;
+#[allow(unused_imports)]
 pub use types::{
     now_millis, EpisodicEntry, EpisodicMemory, MemoryQuery, MemorySummary, PolicyMemory,
     PolicySuggestion, ProceduralEntry, ProceduralMemory, ProfileMemory, WriteBackRequest,
 };
+#[allow(unused_imports)]
 pub use write_back::{write_back_task_result, write_confirmation_rejected};

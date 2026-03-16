@@ -75,10 +75,10 @@ fn write_back_task_memory(app: &AppHandle, task: &AgentTaskRun) {
         _ => "running",
     };
 
-    let failure_reason_code = task
-        .failure_reason_code
-        .as_ref()
-        .map(|c| format!("{:?}", c));
+    let failure_reason_code = match task.failure_reason_code {
+        FailureReasonCode::None => None,
+        ref code => Some(format!("{:?}", code)),
+    };
     let failure_stage = task.failure_stage.as_ref().map(|s| format!("{:?}", s));
 
     let window_title = task
@@ -101,7 +101,7 @@ fn write_back_task_memory(app: &AppHandle, task: &AgentTaskRun) {
         .collect();
 
     let request = crate::memory::service::build_write_back_request(
-        &task.id,
+        &task.task_id,
         &task.goal,
         &format!("{:?}", task.intent),
         final_status,
@@ -1226,7 +1226,7 @@ async fn cancel_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolIn
     let _ = control_router::cancel(app, pending_id).map_err(|error| error.to_string())?;
 
     // Write-back: 记录确认被拒绝的经验
-    if let Some(ref pending) = task.pending_request {
+    if let Some(ref tool) = task.last_retryable_tool {
         let window_title = task
             .runtime_context
             .as_ref()
@@ -1238,7 +1238,7 @@ async fn cancel_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolIn
             let memory_service = crate::memory::MemoryService::new(&app_data);
             let _ = memory_service.write_confirmation_rejected(
                 &task.goal,
-                &pending.tool,
+                tool,
                 window_title,
             );
         }
@@ -1257,7 +1257,7 @@ async fn cancel_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolIn
                 Some("当前桌面任务已取消。".to_string()),
             ),
         })),
-        message: Some(format!("任务"{}"已取消。", task.task_title)),
+        message: Some(format!("任务 \"{}\" 已取消。", task.task_title)),
         pending_request: None,
         error: None,
     })
@@ -1440,7 +1440,7 @@ fn complete_result(
 
 fn fail_result(route: AgentRoute, provider_label: &str, task: &AgentTaskRun, reason: String) -> AgentHandleResult {
     let mut lines = task.completed_notes.clone();
-    lines.push(format!("任务“{}”已停止。\n原因：{}", task.task_title, reason));
+    lines.push(format!("任务 \"{}\" 已停止。\n原因：{}", task.task_title, reason));
     let summary = task.final_summary.clone().unwrap_or_else(|| AgentLoopSummary {
         goal: task.goal.clone(),
         steps_taken: task.recent_steps.len(),
