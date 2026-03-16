@@ -36,6 +36,7 @@ pub async fn plan_next_action(
         "用户原始请求：\n{}\n\n\
 当前目标：\n{}\n\n\
 当前任务状态：\n\
+- intent: {:?}\n\
 - mode: {:?}\n\
 - stepBudget: {}\n\
 - retryBudget: {}\n\
@@ -44,6 +45,7 @@ pub async fn plan_next_action(
 当前 screen context：\n{}\n",
         user_input.trim(),
         task.goal.trim(),
+        task.intent,
         task.mode,
         task.step_budget,
         task.retry_budget,

@@ -12,8 +12,6 @@ use super::{prompt, types::TopLevelIntent};
 #[serde(rename_all = "camelCase")]
 pub struct IntentDecision {
     pub route: TopLevelIntent,
-    #[serde(default)]
-    pub reason: String,
 }
 
 pub async fn classify_user_intent(

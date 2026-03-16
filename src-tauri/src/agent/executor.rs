@@ -12,7 +12,7 @@ use crate::{
 use super::{
     task_store,
     types::{
-        is_agent_tool_allowed, AgentPlan, AgentStepRecord, AgentTaskMode, AgentTaskProgress,
+        is_agent_tool_allowed, AgentStepRecord, AgentTaskMode, AgentTaskProgress,
         AgentTaskRun, AgentTaskStatus, AgentToolStep,
     },
 };
@@ -29,10 +29,7 @@ pub struct AgentExecutionResult {
 
 #[derive(Debug, Clone)]
 pub enum LoopToolExecution {
-    Success {
-        note: String,
-        result: Value,
-    },
+    Success,
     Pending {
         note: String,
         pending_request: ControlPendingRequest,
@@ -40,24 +37,6 @@ pub enum LoopToolExecution {
     Failure {
         reason: String,
     },
-}
-
-pub fn execute_plan(
-    app: &AppHandle,
-    plan: AgentPlan,
-    original_request: &str,
-) -> Result<AgentExecutionResult, String> {
-    validate_plan(&plan)?;
-
-    if plan.steps.len() > 1 && task_store::has_active_task(app)? {
-        return Ok(blocked_execution(
-            plan_steps(&plan),
-            "当前还有一个未完成的桌面任务，请先确认或取消。".to_string(),
-        ));
-    }
-
-    let mut task = AgentTaskRun::new(plan, original_request);
-    continue_task(app, &mut task, None)
 }
 
 pub fn confirm_pending(app: &AppHandle, pending_id: &str) -> Result<ToolInvokeResponse, String> {
@@ -176,7 +155,7 @@ pub fn execute_loop_tool(
                 outcome: "success".to_string(),
                 detail: Some(note.clone()),
             });
-            Ok(LoopToolExecution::Success { note, result })
+            Ok(LoopToolExecution::Success)
         }
         Ok(response) => {
             let reason = response
@@ -335,18 +314,6 @@ fn finish_waiting_step(task: &mut AgentTaskRun, confirmed_step: ConfirmedStep) -
     task.waiting_step_index = None;
     task.waiting_pending_id = None;
     task.updated_at = now_millis();
-    Ok(())
-}
-
-fn validate_plan(plan: &AgentPlan) -> Result<(), String> {
-    if plan.steps.is_empty() {
-        return Err("动作计划为空。".to_string());
-    }
-
-    if plan.steps.len() > 4 {
-        return Err("第一版多步桌面代理最多只允许 4 个步骤。".to_string());
-    }
-
     Ok(())
 }
 
@@ -722,8 +689,4 @@ fn step_label(step: &AgentToolStep) -> String {
             "click_at" => "点击坐标".to_string(),
             _ => step.tool.clone(),
         })
-}
-
-fn plan_steps(plan: &AgentPlan) -> Vec<String> {
-    plan.steps.iter().map(|step| step.tool.clone()).collect::<Vec<_>>()
 }

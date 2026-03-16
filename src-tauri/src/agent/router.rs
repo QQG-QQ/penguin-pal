@@ -390,7 +390,7 @@ async fn continue_desktop_loop(
             } => {
                 let action_args = args.clone();
                 match execute_tool_step(app, task, &tool, args, summary.clone())? {
-                LoopToolExecution::Success { .. } => {
+                LoopToolExecution::Success => {
                     task.step_budget = task.step_budget.saturating_sub(1);
                     task.task_status = AgentLoopTaskStatus::Observing;
                     if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
@@ -420,7 +420,7 @@ async fn continue_desktop_loop(
             } => {
                 let action_args = args.clone();
                 match execute_tool_step(app, task, &tool, args, Some(summary.clone()))? {
-                LoopToolExecution::Success { .. } => {
+                LoopToolExecution::Success => {
                     task.step_budget = task.step_budget.saturating_sub(1);
                     task.task_status = AgentLoopTaskStatus::Observing;
                 }

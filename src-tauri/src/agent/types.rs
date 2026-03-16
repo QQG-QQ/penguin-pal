@@ -204,43 +204,6 @@ pub fn empty_json_object() -> Value {
 }
 
 impl AgentTaskRun {
-    pub fn new(plan: AgentPlan, original_request: &str) -> Self {
-        let task_id = format!("agent-task-{}", now_millis());
-        let task_title = plan
-            .task_title
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| truncate_task_title(original_request));
-        let timestamp = now_millis();
-
-        Self {
-            task_id,
-            mode: AgentTaskMode::Plan,
-            intent: TopLevelIntent::DesktopAction,
-            task_title,
-            original_request: original_request.trim().to_string(),
-            goal: original_request.trim().to_string(),
-            max_steps: plan.steps.len().max(1),
-            step_budget: 0,
-            retry_budget: 0,
-            pending_action_id: None,
-            pending_action_summary: None,
-            last_observation: None,
-            last_tool_result: None,
-            task_status: AgentLoopTaskStatus::Executing,
-            recent_steps: vec![],
-            failure_reason: None,
-            plan,
-            next_step_index: 0,
-            waiting_step_index: None,
-            waiting_pending_id: None,
-            completed_notes: vec![],
-            completed_results: vec![],
-            created_at: timestamp,
-            updated_at: timestamp,
-        }
-    }
-
     pub fn new_loop(intent: TopLevelIntent, goal: &str, max_steps: usize, retry_budget: usize) -> Self {
         let task_id = format!("agent-task-{}", now_millis());
         let timestamp = now_millis();
