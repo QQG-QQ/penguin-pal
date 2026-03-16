@@ -12,9 +12,12 @@ use crate::{
 use super::{
     errors::{ControlError, ControlResult},
     files,
+    installer,
     pending,
     policy,
     registry,
+    shell,
+    system_registry,
     types::{ControlPendingRequest, ControlServiceStatus, ToolInvokeRequest, ToolInvokeResponse},
     windows,
     ControlServiceState,
@@ -218,6 +221,63 @@ fn normalize_args(tool: &str, args: Value) -> ControlResult<Value> {
                 "recursive": get_optional_bool(&map, "recursive", false),
             }))
         }
+        "run_shell_command" => {
+            let command = get_required_string(&map, "command", "command", 32)?;
+            let args = map
+                .get("args")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(ToString::to_string)
+                        .ok_or_else(|| ControlError::invalid_argument("run_shell_command.args 必须是字符串数组。"))
+                })
+                .collect::<ControlResult<Vec<_>>>()?;
+            if args.len() > 8 || args.iter().any(|item| item.chars().count() > 300) {
+                return Err(ControlError::invalid_argument(
+                    "run_shell_command.args 长度或单项字符数超出安全范围。",
+                ));
+            }
+            let workdir = get_optional_string(&map, "workdir");
+            let timeout_ms = map
+                .get("timeoutMs")
+                .and_then(Value::as_i64)
+                .unwrap_or(20_000)
+                .clamp(1_000, 300_000);
+            Ok(json!({
+                "command": command,
+                "args": args,
+                "workdir": workdir,
+                "timeoutMs": timeout_ms,
+            }))
+        }
+        "launch_installer_file" => {
+            let path = get_required_string(&map, "path", "path", 400)?;
+            Ok(json!({ "path": path }))
+        }
+        "query_registry_key" => {
+            let path = get_required_string(&map, "path", "path", 400)?;
+            Ok(json!({ "path": path }))
+        }
+        "read_registry_value" | "delete_registry_value" => {
+            let path = get_required_string(&map, "path", "path", 400)?;
+            let name = get_required_string(&map, "name", "name", 128)?;
+            Ok(json!({ "path": path, "name": name }))
+        }
+        "write_registry_value" => {
+            let path = get_required_string(&map, "path", "path", 400)?;
+            let name = get_required_string(&map, "name", "name", 128)?;
+            let value_type = get_required_string(&map, "valueType", "valueType", 32)?;
+            let value = get_required_string(&map, "value", "value", 2048)?;
+            Ok(json!({
+                "path": path,
+                "name": name,
+                "valueType": value_type,
+                "value": value,
+            }))
+        }
         "focus_window" => {
             let title = get_required_string(&map, "title", "窗口标题", 120)?;
             let match_mode =
@@ -370,6 +430,20 @@ fn pending_prompt(tool: &str, args: &Value) -> String {
             "即将删除路径：{}。",
             args.get("path").and_then(Value::as_str).unwrap_or_default()
         ),
+        "launch_installer_file" => format!(
+            "即将启动安装器文件：{}。",
+            args.get("path").and_then(Value::as_str).unwrap_or_default()
+        ),
+        "write_registry_value" => format!(
+            "即将写入注册表值：{} / {}。",
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+            args.get("name").and_then(Value::as_str).unwrap_or_default()
+        ),
+        "delete_registry_value" => format!(
+            "即将删除注册表值：{} / {}。",
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+            args.get("name").and_then(Value::as_str).unwrap_or_default()
+        ),
         _ => "即将执行高风险控制动作。".to_string(),
     }
 }
@@ -413,6 +487,19 @@ fn pending_preview(tool: &str, args: &Value) -> Value {
         "delete_path" => json!({
             "path": args.get("path").cloned().unwrap_or(Value::Null),
             "recursive": args.get("recursive").cloned().unwrap_or(Value::Bool(false)),
+        }),
+        "launch_installer_file" => json!({
+            "path": args.get("path").cloned().unwrap_or(Value::Null),
+        }),
+        "write_registry_value" => json!({
+            "path": args.get("path").cloned().unwrap_or(Value::Null),
+            "name": args.get("name").cloned().unwrap_or(Value::Null),
+            "valueType": args.get("valueType").cloned().unwrap_or(Value::Null),
+            "value": args.get("value").cloned().unwrap_or(Value::Null),
+        }),
+        "delete_registry_value" => json!({
+            "path": args.get("path").cloned().unwrap_or(Value::Null),
+            "name": args.get("name").cloned().unwrap_or(Value::Null),
         }),
         _ => pending::default_preview("控制动作"),
     }
@@ -464,6 +551,49 @@ fn execute_tool(app: &AppHandle, tool: &str, args: &Value) -> ControlResult<Valu
             app,
             args.get("path").and_then(Value::as_str).unwrap_or_default(),
             args.get("recursive").and_then(Value::as_bool).unwrap_or(false),
+        ),
+        "run_shell_command" => {
+            let command = args.get("command").and_then(Value::as_str).unwrap_or_default();
+            let shell_args = args
+                .get("args")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|item| item.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>();
+            shell::run_shell_command(
+                app,
+                command,
+                &shell_args,
+                args.get("workdir").and_then(Value::as_str),
+                args.get("timeoutMs").and_then(Value::as_i64).unwrap_or(20_000),
+            )
+        }
+        "launch_installer_file" => installer::launch_installer_file(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+        ),
+        "query_registry_key" => system_registry::query_registry_key(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+        ),
+        "read_registry_value" => system_registry::read_registry_value(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+            args.get("name").and_then(Value::as_str).unwrap_or_default(),
+        ),
+        "write_registry_value" => system_registry::write_registry_value(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+            args.get("name").and_then(Value::as_str).unwrap_or_default(),
+            args.get("valueType").and_then(Value::as_str).unwrap_or_default(),
+            args.get("value").and_then(Value::as_str).unwrap_or_default(),
+        ),
+        "delete_registry_value" => system_registry::delete_registry_value(
+            app,
+            args.get("path").and_then(Value::as_str).unwrap_or_default(),
+            args.get("name").and_then(Value::as_str).unwrap_or_default(),
         ),
         "type_text" => windows::input::type_text(
             app,

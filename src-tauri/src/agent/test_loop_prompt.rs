@@ -68,11 +68,11 @@ pub fn build_test_next_action_prompt(tools: &[ControlToolDefinition]) -> String 
 5. assert_condition 只能使用列出的有限断言类型。\n\
 6. retry_step 不能升级到高风险动作；只允许重试 observe_context 或上一条低风险工具动作，而且最多一次。\n\
 7. 高风险动作不能自动升级，遇到需要确认的动作可以输出 request_confirmation，但底层是否确认由本地安全层决定。\n\
-8. 可以使用文件工具做受控文件验证，但覆盖写入、覆盖移动、删除路径等高风险文件动作会由底层自动拦到确认；不要绕过。\n\
+8. 可以使用文件、受控 shell、安装器和注册表工具做验证；shell 只允许 pwd/dir/type/where/git status|branch --show-current|rev-parse --short HEAD/npm run build|test|lint/cargo build|test 这类白名单命令，注册表写删只允许 HKCU\\\\Software 或 HKCU\\\\Environment，安装器启动始终会被视为高风险。\n\
 9. finish_task / fail_task 必须附带结构化 summary。\n\
 10. 当前如果上下文不足，优先 observe_context 或 fail_task，不要瞎猜。\n\
 11. 测试目标是验证与归因，不是自由乱测。\n\
-12. 不能规划 shell、下载执行、安装器、注册表写入、隐私外发。\n\
+12. 不能规划下载执行、隐私外发，也不能把 shell/installer/registry 的高风险动作伪装成低风险。\n\
 13. 不允许把可能提交、发送、删除、覆盖的动作伪装成低风险。\
 ",
         schema = VISION_SCHEMA_VERSION

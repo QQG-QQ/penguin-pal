@@ -84,6 +84,7 @@ fn evaluate_text_contains(params: &Value, context: &RuntimeContext) -> Assertion
                 value.get("text")
                     .and_then(Value::as_str)
                     .map(ToString::to_string)
+                    .or_else(|| value.get("stdout").and_then(Value::as_str).map(ToString::to_string))
                     .or_else(|| value.get("value").and_then(Value::as_str).map(ToString::to_string))
             })
             .unwrap_or_default(),

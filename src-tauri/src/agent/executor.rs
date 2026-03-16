@@ -249,6 +249,69 @@ fn render_success(step: &AgentToolStep, result: &Value) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("目标路径")
         ),
+        "run_shell_command" => format!(
+            "已执行 shell 命令：{}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("displayName"))
+                .and_then(Value::as_str)
+                .unwrap_or("受控命令")
+        ),
+        "launch_installer_file" => format!(
+            "已启动安装器：{}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("安装器文件")
+        ),
+        "query_registry_key" => format!(
+            "已读取注册表项：{}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标注册表项")
+        ),
+        "read_registry_value" => format!(
+            "已读取注册表值：{} / {}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标注册表路径"),
+            result
+                .as_object()
+                .and_then(|map| map.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("值")
+        ),
+        "write_registry_value" => format!(
+            "已写入注册表值：{} / {}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标注册表路径"),
+            result
+                .as_object()
+                .and_then(|map| map.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("值")
+        ),
+        "delete_registry_value" => format!(
+            "已删除注册表值：{} / {}。",
+            result
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("目标注册表路径"),
+            result
+                .as_object()
+                .and_then(|map| map.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("值")
+        ),
         "type_text" => format!(
             "已输入 {} 个字符。",
             result
@@ -320,6 +383,12 @@ fn step_label(step: &AgentToolStep) -> String {
             "create_directory" => "创建目录".to_string(),
             "move_path" => "移动路径".to_string(),
             "delete_path" => "删除路径".to_string(),
+            "run_shell_command" => "执行 shell 命令".to_string(),
+            "launch_installer_file" => "启动安装器".to_string(),
+            "query_registry_key" => "读取注册表项".to_string(),
+            "read_registry_value" => "读取注册表值".to_string(),
+            "write_registry_value" => "写入注册表值".to_string(),
+            "delete_registry_value" => "删除注册表值".to_string(),
             "type_text" => "输入文本".to_string(),
             "send_hotkey" => "发送快捷键".to_string(),
             "click_at" => "点击坐标".to_string(),

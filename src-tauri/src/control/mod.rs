@@ -1,11 +1,14 @@
 pub mod errors;
 pub mod files;
 pub mod http;
+pub mod installer;
 pub mod logging;
 pub mod pending;
 pub mod policy;
 pub mod registry;
 pub mod router;
+pub mod shell;
+pub mod system_registry;
 pub mod types;
 pub mod windows;
 

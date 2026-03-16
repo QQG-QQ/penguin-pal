@@ -14,6 +14,8 @@ pub const ALLOWED_ENTITY_REFS: &[&str] = &[
     "current_notepad_window",
     "current_wechat_window",
     "latest_visible_input",
+    "latest_file_ref",
+    "latest_text_value",
 ];
 
 pub fn merge_screen_context_entities(
@@ -321,6 +323,89 @@ pub fn merge_tool_result_entities(
                 remove_file_entity(context, path);
             }
         }
+        "run_shell_command" => {
+            if let Some(workdir) = result.get("workdir").and_then(Value::as_str) {
+                upsert_entity(
+                    context,
+                    DiscoveredEntity {
+                        id: format!("file:{}", sanitize_id(workdir)),
+                        label: workdir.to_string(),
+                        payload_type: EntityPayloadType::FileRef,
+                        payload: DiscoveredEntityPayload::FileRef {
+                            path: workdir.to_string(),
+                        },
+                        created_at_step: step,
+                        last_seen_step: step,
+                        source: DiscoveredEntitySource::ToolResult,
+                        confidence: 0.8,
+                    },
+                );
+            }
+            if let Some(stdout) = result.get("stdout").and_then(Value::as_str) {
+                let trimmed = stdout.trim();
+                if !trimmed.is_empty() {
+                    upsert_entity(
+                        context,
+                        DiscoveredEntity {
+                            id: format!("text:shell_step:{step}"),
+                            label: format!("shell_output_step_{step}"),
+                            payload_type: EntityPayloadType::TextValue,
+                            payload: DiscoveredEntityPayload::TextValue {
+                                text: trimmed.to_string(),
+                            },
+                            created_at_step: step,
+                            last_seen_step: step,
+                            source: DiscoveredEntitySource::ToolResult,
+                            confidence: 0.8,
+                        },
+                    );
+                }
+            }
+        }
+        "launch_installer_file" => {
+            if let Some(path) = result.get("path").and_then(Value::as_str) {
+                upsert_entity(
+                    context,
+                    DiscoveredEntity {
+                        id: format!("file:{}", sanitize_id(path)),
+                        label: path.to_string(),
+                        payload_type: EntityPayloadType::FileRef,
+                        payload: DiscoveredEntityPayload::FileRef {
+                            path: path.to_string(),
+                        },
+                        created_at_step: step,
+                        last_seen_step: step,
+                        source: DiscoveredEntitySource::ToolResult,
+                        confidence: 0.85,
+                    },
+                );
+            }
+        }
+        "query_registry_key" | "read_registry_value" | "write_registry_value" | "delete_registry_value" => {
+            let summary_text = result
+                .get("value")
+                .and_then(Value::as_str)
+                .or_else(|| result.get("stdout").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if let Some(text) = summary_text {
+                upsert_entity(
+                    context,
+                    DiscoveredEntity {
+                        id: format!("text:registry_step:{step}"),
+                        label: format!("registry_output_step_{step}"),
+                        payload_type: EntityPayloadType::TextValue,
+                        payload: DiscoveredEntityPayload::TextValue {
+                            text: text.to_string(),
+                        },
+                        created_at_step: step,
+                        last_seen_step: step,
+                        source: DiscoveredEntitySource::ToolResult,
+                        confidence: 0.7,
+                    },
+                );
+            }
+        }
         "find_element" => {
             let label = result
                 .get("name")
@@ -391,6 +476,21 @@ pub fn materialize_tool_args(context: &RuntimeContext, tool: &str, args: &Value)
         ("type_text", DiscoveredEntityPayload::TextValue { text }) => {
             map.insert("text".to_string(), Value::String(text.clone()));
         }
+        ("list_directory" | "read_file_text" | "create_directory" | "delete_path" | "launch_installer_file", DiscoveredEntityPayload::FileRef { path }) => {
+            map.insert("path".to_string(), Value::String(path.clone()));
+        }
+        ("write_file_text", DiscoveredEntityPayload::FileRef { path }) => {
+            map.insert("path".to_string(), Value::String(path.clone()));
+        }
+        ("write_file_text", DiscoveredEntityPayload::TextValue { text }) => {
+            map.insert("content".to_string(), Value::String(text.clone()));
+        }
+        ("move_path", DiscoveredEntityPayload::FileRef { path }) => {
+            map.insert("fromPath".to_string(), Value::String(path.clone()));
+        }
+        ("run_shell_command", DiscoveredEntityPayload::FileRef { path }) => {
+            map.insert("workdir".to_string(), Value::String(path.clone()));
+        }
         _ => {
             return Err(format!("语义引用 {reference} 不能用于工具 {tool}。"));
         }
@@ -432,6 +532,12 @@ fn resolve_entity_ref<'a>(context: &'a RuntimeContext, reference: &str) -> Optio
                     ..
                 } if kind == "wechat"
             )
+        }),
+        "latest_file_ref" => context.discovered_entities.iter().rev().find(|entity| {
+            matches!(&entity.payload, DiscoveredEntityPayload::FileRef { .. })
+        }),
+        "latest_text_value" => context.discovered_entities.iter().rev().find(|entity| {
+            matches!(&entity.payload, DiscoveredEntityPayload::TextValue { .. })
         }),
         _ => None,
     }

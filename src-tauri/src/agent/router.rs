@@ -28,9 +28,9 @@ use super::{
     },
 };
 
-const DEFAULT_LOOP_STEP_BUDGET: usize = 6;
+const DEFAULT_LOOP_STEP_BUDGET: usize = 12;
 const DEFAULT_LOOP_RETRY_BUDGET: usize = 1;
-const TEST_LOOP_STEP_BUDGET: usize = 8;
+const TEST_LOOP_STEP_BUDGET: usize = 12;
 const TEST_LOOP_RETRY_BUDGET: usize = 1;
 
 #[derive(Debug, Clone)]
@@ -364,7 +364,30 @@ async fn continue_desktop_loop(
     user_input: &str,
     task: &mut AgentTaskRun,
 ) -> Result<AgentHandleResult, String> {
-    while task.step_budget > 0 {
+    loop {
+        if task.step_budget == 0 {
+            if can_auto_complete_loop_task(task) {
+                task.task_status = AgentLoopTaskStatus::Completed;
+                let summary = build_auto_completion_summary(task);
+                task.final_summary = Some(summary.clone());
+                let message = if task.completed_notes.is_empty() {
+                    "桌面任务已完成。".to_string()
+                } else {
+                    task.completed_notes
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| "桌面任务已完成。".to_string())
+                };
+                return Ok(complete_result(
+                    AgentRoute::Control,
+                    "Desktop Agent",
+                    task,
+                    message,
+                    summary,
+                ));
+            }
+            break;
+        }
         task.task_status = AgentLoopTaskStatus::Planning;
         let context =
             runtime_context::refresh_runtime_context(app, task, vision_channel, vision_api_key.clone())
@@ -580,7 +603,30 @@ async fn continue_test_loop(
     user_input: &str,
     task: &mut AgentTaskRun,
 ) -> Result<AgentHandleResult, String> {
-    while task.step_budget > 0 {
+    loop {
+        if task.step_budget == 0 {
+            if can_auto_complete_loop_task(task) {
+                task.task_status = AgentLoopTaskStatus::Completed;
+                let summary = build_auto_completion_summary(task);
+                task.final_summary = Some(summary.clone());
+                let message = if task.completed_notes.is_empty() {
+                    "测试任务已完成。".to_string()
+                } else {
+                    task.completed_notes
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| "测试任务已完成。".to_string())
+                };
+                return Ok(complete_result(
+                    AgentRoute::Test,
+                    "Test Agent",
+                    task,
+                    message,
+                    summary,
+                ));
+            }
+            break;
+        }
         task.task_status = AgentLoopTaskStatus::Planning;
         let context = runtime_context::refresh_runtime_context(app, task, vision_channel, vision_api_key.clone()).await;
         task.updated_at = now_millis();
@@ -955,6 +1001,45 @@ fn perform_retry_step(
                 }
             }
         }
+    }
+}
+
+fn can_auto_complete_loop_task(task: &AgentTaskRun) -> bool {
+    if task.pending_action_id.is_some() || task.waiting_pending_id.is_some() {
+        return false;
+    }
+    if matches!(
+        task.task_status,
+        AgentLoopTaskStatus::Failed | AgentLoopTaskStatus::Cancelled | AgentLoopTaskStatus::WaitingConfirmation
+    ) {
+        return false;
+    }
+    if matches!(
+        task.failure_reason_code,
+        FailureReasonCode::PlannerFailed
+            | FailureReasonCode::ContextUnavailable
+            | FailureReasonCode::ToolFailed
+            | FailureReasonCode::AssertionFailed
+            | FailureReasonCode::ConfirmationRejected
+            | FailureReasonCode::RetryExhausted
+            | FailureReasonCode::PolicyBlocked
+            | FailureReasonCode::InvalidAction
+            | FailureReasonCode::FileMissing
+    ) {
+        return false;
+    }
+    !task.recent_steps.is_empty()
+}
+
+fn build_auto_completion_summary(task: &AgentTaskRun) -> AgentLoopSummary {
+    AgentLoopSummary {
+        goal: task.goal.clone(),
+        steps_taken: task.recent_steps.len(),
+        final_status: AgentTaskStatus::Completed,
+        failure_stage: None,
+        failure_reason_code: FailureReasonCode::None,
+        used_probe: task.used_probe,
+        used_retry: task.used_retry,
     }
 }
 
