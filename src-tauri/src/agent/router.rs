@@ -508,6 +508,7 @@ async fn confirm_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolI
     task.step_budget = task.step_budget.saturating_sub(1);
     executor::clear_loop_pending(&mut task);
     task.task_status = AgentLoopTaskStatus::Observing;
+    let goal = task.goal.clone();
 
     let (
         provider_config,
@@ -532,7 +533,7 @@ async fn confirm_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolI
         codex_home,
         permission_level,
         &allowed_actions,
-        &task.goal,
+        &goal,
         &mut task,
     )
     .await?;

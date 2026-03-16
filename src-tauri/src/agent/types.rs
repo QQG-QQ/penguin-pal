@@ -127,7 +127,7 @@ pub enum AgentTaskStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTaskProgress {
     pub task_id: String,
@@ -250,7 +250,7 @@ impl AgentTaskRun {
             task_id,
             mode: AgentTaskMode::Loop,
             intent,
-            task_title,
+            task_title: task_title.clone(),
             original_request: goal.trim().to_string(),
             goal: goal.trim().to_string(),
             max_steps: max_steps.max(1),
