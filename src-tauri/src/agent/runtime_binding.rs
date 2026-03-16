@@ -39,7 +39,8 @@ pub fn merge_screen_context_entities(
         },
     );
 
-    for item in &context.window_inventory {
+    let window_inventory = context.window_inventory.clone();
+    for item in &window_inventory {
         let Some(title) = item.get("title").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()) else {
             continue;
         };

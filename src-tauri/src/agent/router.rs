@@ -982,8 +982,9 @@ async fn confirm_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolI
     task.last_tool_result = Some(confirmed_result.clone());
     task.completed_results.push(confirmed_result);
     let confirmed_tool = task.recent_steps.last().and_then(|step| step.tool.clone());
+    let confirmed_payload = task.last_tool_result.clone();
     if let Some(tool) = confirmed_tool {
-        runtime_context::append_runtime_tool_result(&mut task, &tool, "success", task.last_tool_result.clone());
+        runtime_context::append_runtime_tool_result(&mut task, &tool, "success", confirmed_payload);
     }
     task.step_budget = task.step_budget.saturating_sub(1);
     executor::clear_loop_pending(&mut task);
