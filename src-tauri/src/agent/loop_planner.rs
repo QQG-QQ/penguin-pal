@@ -300,7 +300,42 @@ fn normalize_final_summary(
         return;
     };
 
-    if summary_value.is_object() {
+    if let Some(summary) = summary_value.as_object() {
+        let mut normalized = summary.clone();
+        normalized.insert("goal".to_string(), Value::String(goal.to_string()));
+        normalized.insert(
+            "stepsTaken".to_string(),
+            normalized
+                .get("stepsTaken")
+                .cloned()
+                .filter(|value| value.is_u64() || value.is_i64())
+                .unwrap_or_else(|| Value::from(0)),
+        );
+        normalized.insert(
+            "finalStatus".to_string(),
+            normalize_final_status_value(normalized.get("finalStatus"), kind),
+        );
+        normalized.insert(
+            "failureStage".to_string(),
+            normalize_failure_stage_value(normalized.get("failureStage"), kind),
+        );
+        normalized.insert(
+            "failureReasonCode".to_string(),
+            normalize_failure_reason_code_value(
+                normalized.get("failureReasonCode"),
+                &message,
+                kind,
+            ),
+        );
+        normalized.insert(
+            "usedProbe".to_string(),
+            normalize_bool_value(normalized.get("usedProbe")),
+        );
+        normalized.insert(
+            "usedRetry".to_string(),
+            normalize_bool_value(normalized.get("usedRetry")),
+        );
+        next.insert("summary".to_string(), Value::Object(normalized));
         return;
     }
 
@@ -341,6 +376,72 @@ fn normalize_final_summary(
             "usedRetry": false,
         }),
     );
+}
+
+fn normalize_final_status_value(value: Option<&Value>, kind: &str) -> Value {
+    let fallback = if kind == "finish_task" {
+        "completed"
+    } else {
+        "failed"
+    };
+    let next = value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| matches!(*item, "completed" | "failed" | "cancelled"))
+        .unwrap_or(fallback);
+    Value::String(next.to_string())
+}
+
+fn normalize_failure_stage_value(value: Option<&Value>, kind: &str) -> Value {
+    if kind == "finish_task" {
+        return Value::Null;
+    }
+
+    let next = value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| {
+            matches!(
+                *item,
+                "planning" | "observation" | "execute_tool" | "assertion" | "confirmation" | "retry" | "finish"
+            )
+        })
+        .unwrap_or("finish");
+    Value::String(next.to_string())
+}
+
+fn normalize_failure_reason_code_value(value: Option<&Value>, message: &str, kind: &str) -> Value {
+    if kind == "finish_task" {
+        return Value::String("none".to_string());
+    }
+
+    let next = value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| {
+            matches!(
+                *item,
+                "none"
+                    | "planner_failed"
+                    | "context_unavailable"
+                    | "tool_failed"
+                    | "assertion_failed"
+                    | "confirmation_required"
+                    | "confirmation_rejected"
+                    | "retry_exhausted"
+                    | "step_budget_exceeded"
+                    | "policy_blocked"
+                    | "invalid_action"
+                    | "file_missing"
+            )
+        })
+        .map(ToString::to_string)
+        .unwrap_or_else(|| map_failure_reason_code(message).to_string());
+    Value::String(next)
+}
+
+fn normalize_bool_value(value: Option<&Value>) -> Value {
+    Value::Bool(value.and_then(Value::as_bool).unwrap_or(false))
 }
 
 fn map_failure_reason_code(message: &str) -> &'static str {

@@ -51,7 +51,7 @@ pub fn build_test_next_action_prompt(tools: &[ControlToolDefinition]) -> String 
       \"goal\":\"...\",\n\
       \"stepsTaken\":0,\n\
       \"finalStatus\":\"completed|failed|cancelled\",\n\
-      \"failureStage\":\"planning|observation|execute_tool|assertion|confirmation|retry|finish|null\",\n\
+      \"failureStage\":\"planning|observation|execute_tool|assertion|confirmation|retry|finish\",\n\
       \"failureReasonCode\":\"none|planner_failed|context_unavailable|tool_failed|assertion_failed|confirmation_required|confirmation_rejected|retry_exhausted|step_budget_exceeded|policy_blocked|invalid_action|file_missing\",\n\
       \"usedProbe\":false,\n\
       \"usedRetry\":false\n\
@@ -73,7 +73,8 @@ pub fn build_test_next_action_prompt(tools: &[ControlToolDefinition]) -> String 
 10. 当前如果上下文不足，优先 observe_context 或 fail_task，不要瞎猜。\n\
 11. 测试目标是验证与归因，不是自由乱测。\n\
 12. 不能规划下载执行、隐私外发，也不能把 shell/installer/registry 的高风险动作伪装成低风险。\n\
-13. 不允许把可能提交、发送、删除、覆盖的动作伪装成低风险。\
+13. finish_task 时 failureStage 必须省略或使用 JSON null，不要输出字符串 \"null\"。\n\
+14. 不允许把可能提交、发送、删除、覆盖的动作伪装成低风险。\
 ",
         schema = VISION_SCHEMA_VERSION
     )

@@ -17,7 +17,6 @@ use super::{
     runtime_binding,
     runtime_context,
     screen_context,
-    screen_planner,
     task_store,
     test_assertions,
     test_loop_planner,
@@ -410,46 +409,16 @@ async fn continue_desktop_loop(
         {
             Ok(decision) => decision,
             Err(primary_error) => {
-                let fallback = if intent::parse_simple_control_plan(user_input).is_some() {
-                    screen_planner::plan_from_screen_context(
-                        provider_config,
-                        api_key.clone(),
-                        oauth_access_token.clone(),
-                        codex_command.clone(),
-                        codex_home.clone(),
-                        permission_level,
-                        allowed_actions,
-                        user_input,
-                        &screen_context::describe_current_screen(
-                            app,
-                            vision_channel,
-                            vision_api_key.clone(),
-                        )
-                        .await,
-                    )
-                    .await
-                    .and_then(|plan| loop_planner::decision_from_plan(&task.goal, plan))
-                } else {
-                    Err("当前请求未启用 deterministic control fallback。".to_string())
-                };
-
-                match fallback {
-                    Ok(decision) => decision,
-                    Err(fallback_error) => {
-                        task.task_status = AgentLoopTaskStatus::Failed;
-                        task.failure_reason = Some(fallback_error.clone());
-                        task.failure_reason_code = FailureReasonCode::PlannerFailed;
-                        task.failure_stage = Some(FailureStage::Planning);
-                        return Ok(fail_result(
-                            AgentRoute::Control,
-                            "Desktop Agent",
-                            task,
-                            format!(
-                                "桌面 agent 没能基于当前上下文生成下一步动作。\n主路径：{primary_error}\nfallback：{fallback_error}"
-                            ),
-                        ));
-                    }
-                }
+                task.task_status = AgentLoopTaskStatus::Failed;
+                task.failure_reason = Some(primary_error.clone());
+                task.failure_reason_code = FailureReasonCode::PlannerFailed;
+                task.failure_stage = Some(FailureStage::Planning);
+                return Ok(fail_result(
+                    AgentRoute::Control,
+                    "Desktop Agent",
+                    task,
+                    format!("桌面 agent 没能基于当前上下文生成下一步动作。\n主路径：{primary_error}"),
+                ));
             }
         };
 

@@ -46,7 +46,7 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
       \"goal\":\"...\",\n\
       \"stepsTaken\":0,\n\
       \"finalStatus\":\"completed|failed|cancelled\",\n\
-      \"failureStage\":\"planning|observation|execute_tool|assertion|confirmation|retry|finish|null\",\n\
+      \"failureStage\":\"planning|observation|execute_tool|assertion|confirmation|retry|finish\",\n\
       \"failureReasonCode\":\"none|planner_failed|context_unavailable|tool_failed|assertion_failed|confirmation_required|confirmation_rejected|retry_exhausted|step_budget_exceeded|policy_blocked|invalid_action|file_missing\",\n\
       \"usedProbe\":false,\n\
       \"usedRetry\":false\n\
@@ -69,7 +69,8 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
 11. 不要自动发送消息，不要自动做不可逆提交。\n\
 12. 尽量使用最小下一步，并参考最近执行结果，避免重复同一步。\n\
 13. 当 stepBudget 已耗尽时，输出 fail_task。\n\
-14. 不确定时宁可 fail_task，也不要瞎猜；不要尝试隐私外发。\
+14. finish_task 时 failureStage 必须省略或使用 JSON null，不要输出字符串 \"null\"。\n\
+15. 不确定时宁可 fail_task，也不要瞎猜；不要尝试隐私外发。\
 ",
         schema = VISION_SCHEMA_VERSION,
         refs = refs
