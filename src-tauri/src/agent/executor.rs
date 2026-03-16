@@ -12,8 +12,8 @@ use crate::{
 use super::{
     task_store,
     types::{
-        is_agent_tool_allowed, AgentPlan, AgentTaskProgress, AgentTaskRun, AgentTaskStatus,
-        AgentToolStep,
+        is_agent_tool_allowed, AgentPlan, AgentStepRecord, AgentTaskMode, AgentTaskProgress,
+        AgentTaskRun, AgentTaskStatus, AgentToolStep,
     },
 };
 
@@ -25,6 +25,21 @@ pub struct AgentExecutionResult {
     pub planned_tools: Vec<String>,
     pub pending_request: Option<ControlPendingRequest>,
     pub task: Option<AgentTaskProgress>,
+}
+
+#[derive(Debug, Clone)]
+pub enum LoopToolExecution {
+    Success {
+        note: String,
+        result: Value,
+    },
+    Pending {
+        note: String,
+        pending_request: ControlPendingRequest,
+    },
+    Failure {
+        reason: String,
+    },
 }
 
 pub fn execute_plan(
@@ -98,6 +113,117 @@ pub fn cancel_pending(app: &AppHandle, pending_id: &str) -> Result<ToolInvokeRes
         pending_request: None,
         error: None,
     })
+}
+
+pub fn execute_loop_tool(
+    app: &AppHandle,
+    task: &mut AgentTaskRun,
+    tool: &str,
+    args: Value,
+    summary: Option<String>,
+) -> Result<LoopToolExecution, String> {
+    if !is_agent_tool_allowed(tool) {
+        return Ok(LoopToolExecution::Failure {
+            reason: format!("工具 {tool} 不在当前桌面代理白名单中。"),
+        });
+    }
+
+    let step = AgentToolStep {
+        id: None,
+        summary: summary.clone(),
+        tool: tool.to_string(),
+        args: args.clone(),
+    };
+    let request = ToolInvokeRequest {
+        tool: tool.to_string(),
+        args,
+    };
+
+    match control_router::invoke(app, request) {
+        Ok(response) if response.status == "pending_confirmation" => {
+            let pending_request = response.pending_request.clone().ok_or_else(|| {
+                "控制层返回了 pending_confirmation，但没有 pendingRequest。".to_string()
+            })?;
+            let note = format!("{} 需要确认。", step_label(&step));
+            task.waiting_pending_id = Some(pending_request.id.clone());
+            task.pending_action_id = Some(pending_request.id.clone());
+            task.pending_action_summary = step.summary.clone().or_else(|| Some(step.tool.clone()));
+            task.task_status = super::types::AgentLoopTaskStatus::WaitingConfirmation;
+            task.updated_at = now_millis();
+            task.recent_steps.push(AgentStepRecord {
+                summary: step_label(&step),
+                tool: Some(step.tool.clone()),
+                args: Some(step.args.clone()),
+                outcome: "pending".to_string(),
+                detail: Some(note.clone()),
+            });
+            Ok(LoopToolExecution::Pending {
+                note,
+                pending_request,
+            })
+        }
+        Ok(response) if response.status == "success" => {
+            let result = response.result.unwrap_or_else(|| json!({}));
+            let note = render_success(&step, &result);
+            task.last_tool_result = Some(result.clone());
+            task.completed_notes.push(note.clone());
+            task.completed_results.push(result.clone());
+            task.updated_at = now_millis();
+            task.recent_steps.push(AgentStepRecord {
+                summary: step_label(&step),
+                tool: Some(step.tool.clone()),
+                args: Some(step.args.clone()),
+                outcome: "success".to_string(),
+                detail: Some(note.clone()),
+            });
+            Ok(LoopToolExecution::Success { note, result })
+        }
+        Ok(response) => {
+            let reason = response
+                .message
+                .unwrap_or_else(|| "控制工具返回了未知状态。".to_string());
+            task.last_tool_result = Some(json!({
+                "status": response.status,
+                "message": reason,
+            }));
+            task.updated_at = now_millis();
+            task.recent_steps.push(AgentStepRecord {
+                summary: step_label(&step),
+                tool: Some(step.tool.clone()),
+                args: Some(step.args.clone()),
+                outcome: "failure".to_string(),
+                detail: Some(reason.clone()),
+            });
+            Ok(LoopToolExecution::Failure { reason })
+        }
+        Err(error) => {
+            let reason = error.payload().message;
+            task.last_tool_result = Some(json!({
+                "status": "error",
+                "message": reason,
+            }));
+            task.updated_at = now_millis();
+            task.recent_steps.push(AgentStepRecord {
+                summary: step_label(&step),
+                tool: Some(step.tool.clone()),
+                args: Some(step.args.clone()),
+                outcome: "failure".to_string(),
+                detail: Some(reason.clone()),
+            });
+            Ok(LoopToolExecution::Failure { reason })
+        }
+    }
+}
+
+pub fn clear_loop_pending(task: &mut AgentTaskRun) {
+    task.waiting_pending_id = None;
+    task.pending_action_id = None;
+    task.pending_action_summary = None;
+    task.updated_at = now_millis();
+}
+
+pub fn is_loop_task(task: &AgentTaskRun) -> bool {
+    matches!(task.mode, AgentTaskMode::Loop)
 }
 
 struct ConfirmedStep {

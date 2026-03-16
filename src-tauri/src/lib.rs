@@ -206,7 +206,7 @@ async fn confirm_control_pending(app: AppHandle, pending_id: String) -> Result<c
     if let Some(response) = test_agent::router::confirm_control_pending(&app, &pending_id).await? {
         return Ok(response);
     }
-    agent_router::confirm_control_pending(&app, &pending_id)
+    agent_router::confirm_control_pending(&app, &pending_id).await
 }
 
 #[tauri::command]
@@ -214,7 +214,7 @@ async fn cancel_control_pending(app: AppHandle, pending_id: String) -> Result<co
     if let Some(response) = test_agent::router::cancel_control_pending(&app, &pending_id).await? {
         return Ok(response);
     }
-    agent_router::cancel_control_pending(&app, &pending_id)
+    agent_router::cancel_control_pending(&app, &pending_id).await
 }
 
 #[tauri::command]
@@ -962,7 +962,30 @@ async fn send_chat_message(
                 None,
             ),
         },
-        Some(agent::types::TopLevelIntent::Chat) | Some(agent::types::TopLevelIntent::DebugRequest) => {
+        Some(agent::types::TopLevelIntent::DebugRequest) => match agent_router::handle_debug_request(
+            &app,
+            &vision_channel,
+            vision_api_key,
+            trimmed,
+        )
+        .await
+        {
+            Ok(result) => (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+            ),
+            Err(error) => (
+                provider::fallback_reply(&error),
+                "Safety fallback".to_string(),
+                "fallback".to_string(),
+                error,
+                None,
+            ),
+        },
+        Some(agent::types::TopLevelIntent::Chat) => {
             provider_response(
                 &provider_config,
                 api_key,
@@ -975,20 +998,38 @@ async fn send_chat_message(
             )
             .await
         }
-        Some(agent::types::TopLevelIntent::MemoryRequest) => (
-            "当前还没有启用真正的持久化记忆系统，但会保存本地历史数据：输入历史、今日回复历史、测试历史和回归记录。后续会在此基础上再扩成正式记忆层。".to_string(),
-            "Memory Info".to_string(),
-            "memory_info".to_string(),
-            "top_level_intent=memory_request".to_string(),
-            None,
-        ),
-        Some(agent::types::TopLevelIntent::ConfirmationResponse) => (
-            "如果界面上当前没有待确认条，说明这次没有等待你确认的动作。真正的高风险动作仍然只会在确认面板或 /confirm /cancel 流程里继续执行。".to_string(),
-            "Confirmation Info".to_string(),
-            "confirmation_info".to_string(),
-            "top_level_intent=confirmation_response".to_string(),
-            None,
-        ),
+        Some(agent::types::TopLevelIntent::MemoryRequest) => match agent_router::handle_memory_request(&app) {
+            Ok(result) => (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+            ),
+            Err(error) => (
+                provider::fallback_reply(&error),
+                "Safety fallback".to_string(),
+                "fallback".to_string(),
+                error,
+                None,
+            ),
+        },
+        Some(agent::types::TopLevelIntent::ConfirmationResponse) => match agent_router::handle_confirmation_response(&app, trimmed).await {
+            Ok(result) => (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+            ),
+            Err(error) => (
+                provider::fallback_reply(&error),
+                "Safety fallback".to_string(),
+                "fallback".to_string(),
+                error,
+                None,
+            ),
+        },
         None => match test_agent::router::maybe_handle_test_message(
             &app,
             &provider_config,
