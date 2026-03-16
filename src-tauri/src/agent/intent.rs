@@ -25,6 +25,9 @@ const CONTROL_HINTS: &[&str] = &[
     "浏览器",
 ];
 
+/// DEPRECATED: AI-first 架构不再使用关键词预检
+/// 保留用于可选降级模式或调试
+#[deprecated(since = "0.1.0", note = "AI-first 架构使用 force_route，不再依赖关键词预检")]
 pub fn looks_like_control_request(input: &str) -> bool {
     let lowered = input.trim().to_lowercase();
     if lowered.is_empty() {

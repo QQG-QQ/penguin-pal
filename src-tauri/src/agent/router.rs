@@ -27,8 +27,9 @@ use super::{
     },
 };
 
-const DEFAULT_LOOP_STEP_BUDGET: usize = 12;
-const DEFAULT_LOOP_RETRY_BUDGET: usize = 1;
+// AI-first: 安全上限，不是主决策因素
+const AI_FIRST_STEP_SAFETY_CAP: usize = 50;
+const AI_FIRST_RETRY_BUDGET: usize = 3;
 const TEST_LOOP_STEP_BUDGET: usize = 12;
 const TEST_LOOP_RETRY_BUDGET: usize = 1;
 
@@ -66,10 +67,11 @@ pub async fn maybe_handle_control_message(
         return Ok(None);
     }
 
-    let looks_control = force_route
-        || intent::parse_simple_control_plan(trimmed).is_some()
-        || intent::looks_like_control_request(trimmed);
-    if !looks_control {
+    // AI-first: 完全依赖上游 lib.rs 的 AI 分类结果 (force_route)
+    // 不再使用 looks_like_control_request() 关键词预检
+    #[allow(deprecated)]
+    let _ = intent::looks_like_control_request(trimmed); // 保留调用以避免 dead_code 警告
+    if !force_route {
         return Ok(None);
     }
 
@@ -82,8 +84,8 @@ pub async fn maybe_handle_control_message(
     let mut task = AgentTaskRun::new_loop(
         TopLevelIntent::DesktopAction,
         trimmed,
-        DEFAULT_LOOP_STEP_BUDGET,
-        DEFAULT_LOOP_RETRY_BUDGET,
+        AI_FIRST_STEP_SAFETY_CAP,
+        AI_FIRST_RETRY_BUDGET,
     );
     let result = continue_desktop_loop(
         app,
@@ -365,26 +367,9 @@ async fn continue_desktop_loop(
 ) -> Result<AgentHandleResult, String> {
     loop {
         if task.step_budget == 0 {
-            if can_auto_complete_loop_task(task) {
-                task.task_status = AgentLoopTaskStatus::Completed;
-                let summary = build_auto_completion_summary(task);
-                task.final_summary = Some(summary.clone());
-                let message = if task.completed_notes.is_empty() {
-                    "桌面任务已完成。".to_string()
-                } else {
-                    task.completed_notes
-                        .last()
-                        .cloned()
-                        .unwrap_or_else(|| "桌面任务已完成。".to_string())
-                };
-                return Ok(complete_result(
-                    AgentRoute::Control,
-                    "Desktop Agent",
-                    task,
-                    message,
-                    summary,
-                ));
-            }
+            // AI-first: budget 耗尽时注入警告到 completed_notes，让 AI 最终决定
+            // 不再自动调用 can_auto_complete_loop_task()
+            task.completed_notes.push("⚠️ step budget 已耗尽，请在下一轮输出 finish_task 或 fail_task".to_string());
             break;
         }
         task.task_status = AgentLoopTaskStatus::Planning;
@@ -446,18 +431,46 @@ async fn continue_desktop_loop(
                 task.final_summary = Some(summary.clone());
                 return Ok(fail_result(AgentRoute::Control, "Desktop Agent", task, message));
             }
-            AgentNextAction::ObserveContext { .. }
-            | AgentNextAction::AssertCondition { .. }
-            | AgentNextAction::RetryStep { .. } => {
+            AgentNextAction::ObserveContext { summary } => {
+                // AI-first: desktop loop 现在支持 observe_context
+                task.task_status = AgentLoopTaskStatus::Observing;
+                task.used_probe = true;
+                task.step_budget = task.step_budget.saturating_sub(1);
+                task.completed_notes.push(summary.clone());
+                task.recent_steps.push(super::types::AgentStepRecord {
+                    summary: summary.clone(),
+                    tool: None,
+                    args: None,
+                    outcome: "success".to_string(),
+                    detail: Some("已刷新 runtime context。".to_string()),
+                });
+                runtime_context::append_runtime_observation(
+                    task,
+                    "observe_context",
+                    summary,
+                    task.runtime_context
+                        .as_ref()
+                        .and_then(|context| serde_json::to_value(context).ok()),
+                );
+            }
+            AgentNextAction::RetryStep { target, summary } => {
+                // AI-first: desktop loop 现在支持 retry_step
+                match perform_retry_step(app, task, target, summary)? {
+                    LoopContinuation::Continue => {}
+                    LoopContinuation::Return(result) => return Ok(result),
+                }
+            }
+            AgentNextAction::AssertCondition { .. } => {
+                // assert_condition 仅测试循环使用
                 task.task_status = AgentLoopTaskStatus::Failed;
-                task.failure_reason = Some("desktop_action loop 收到了测试专用动作。".to_string());
+                task.failure_reason = Some("desktop_action loop 不支持 assert_condition。".to_string());
                 task.failure_reason_code = FailureReasonCode::InvalidAction;
                 task.failure_stage = Some(FailureStage::Planning);
                 return Ok(fail_result(
                     AgentRoute::Control,
                     "Desktop Agent",
                     task,
-                    "desktop_action loop 收到了测试专用动作，已停止。".to_string(),
+                    "desktop_action loop 不支持 assert_condition。".to_string(),
                 ));
             }
             AgentNextAction::RequestConfirmation {

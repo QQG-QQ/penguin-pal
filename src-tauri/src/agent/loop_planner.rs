@@ -175,10 +175,21 @@ fn validate_next_action(action: &AgentNextAction) -> Result<(), String> {
                 return Err("finish_task/fail_task.summary.finalStatus 非法。".to_string());
             }
         }
-        AgentNextAction::ObserveContext { .. }
-        | AgentNextAction::AssertCondition { .. }
-        | AgentNextAction::RetryStep { .. } => {
-            return Err("desktop_action loop 不接受测试专用动作。".to_string());
+        AgentNextAction::ObserveContext { summary } => {
+            // AI-first: desktop loop 现在支持 observe_context
+            if summary.trim().is_empty() {
+                return Err("observe_context.summary 不能为空。".to_string());
+            }
+        }
+        AgentNextAction::RetryStep { summary, .. } => {
+            // AI-first: desktop loop 现在支持 retry_step
+            if summary.trim().is_empty() {
+                return Err("retry_step.summary 不能为空。".to_string());
+            }
+        }
+        AgentNextAction::AssertCondition { .. } => {
+            // assert_condition 仅测试循环使用
+            return Err("desktop_action loop 不接受 assert_condition。".to_string());
         }
         AgentNextAction::RequestConfirmation { tool, args, .. } => {
             if !is_agent_tool_allowed(tool) {

@@ -450,12 +450,19 @@ pub fn materialize_tool_args(context: &RuntimeContext, tool: &str, args: &Value)
         return Ok(Value::Object(map));
     };
 
-    if !ALLOWED_ENTITY_REFS.contains(&reference.as_str()) {
-        return Err(format!("未允许的语义引用：{reference}"));
-    }
-
-    let entity = resolve_entity_ref(context, &reference)
-        .ok_or_else(|| format!("当前 runtime context 中没有可用的引用：{reference}"))?;
+    // AI-first: 支持两种引用方式
+    // 1. 动态引用：discovered_entity:$TYPE:$ID（精确）
+    // 2. 语义引用：latest_browser_window 等（便捷）
+    let entity = if reference.starts_with("discovered_entity:") {
+        resolve_discovered_entity_ref(context, &reference)
+            .ok_or_else(|| format!("当前 runtime context 中没有匹配的动态引用：{reference}"))?
+    } else {
+        if !ALLOWED_ENTITY_REFS.contains(&reference.as_str()) {
+            return Err(format!("未允许的语义引用：{reference}"));
+        }
+        resolve_entity_ref(context, &reference)
+            .ok_or_else(|| format!("当前 runtime context 中没有可用的引用：{reference}"))?
+    };
 
     match (tool, &entity.payload) {
         ("focus_window", DiscoveredEntityPayload::WindowRef { title, .. }) => {
@@ -542,6 +549,29 @@ fn resolve_entity_ref<'a>(context: &'a RuntimeContext, reference: &str) -> Optio
         }),
         _ => None,
     }
+}
+
+/// AI-first: 支持动态引用 discovered_entity:$TYPE:$ID
+/// 格式: discovered_entity:window:Chrome, discovered_entity:element:Edit_1
+fn resolve_discovered_entity_ref<'a>(context: &'a RuntimeContext, reference: &str) -> Option<&'a DiscoveredEntity> {
+    let rest = reference.strip_prefix("discovered_entity:")?;
+    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let entity_type = parts[0];
+    let entity_id_part = parts[1];
+
+    context.discovered_entities.iter().rev().find(|entity| {
+        let type_match = match entity_type {
+            "window" => matches!(&entity.payload, DiscoveredEntityPayload::WindowRef { .. }),
+            "element" => matches!(&entity.payload, DiscoveredEntityPayload::ElementRef { .. }),
+            "file" => matches!(&entity.payload, DiscoveredEntityPayload::FileRef { .. }),
+            "text" => matches!(&entity.payload, DiscoveredEntityPayload::TextValue { .. }),
+            _ => false,
+        };
+        type_match && (entity.id.contains(entity_id_part) || entity.label.contains(entity_id_part))
+    })
 }
 
 fn upsert_entity(context: &mut RuntimeContext, mut next: DiscoveredEntity) {
