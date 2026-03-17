@@ -5,6 +5,7 @@ use crate::{
         AuthMode, ChatMessage, DesktopAction, ProviderConfig, ProviderKind, VisionChannelConfig,
         VisionChannelKind,
     },
+    codex_config::{CodexConfig, load_skills, load_rules},
     codex_runtime::apply_private_env,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -363,14 +364,6 @@ async fn call_codex_cli(
         return Err("当前没有可发送给 Codex CLI 的用户消息。".to_string());
     }
 
-    let system_prompt = guardrails::compose_system_prompt(provider, permission_level, allowed_actions);
-
-    // 构建包含完整对话历史的 prompt
-    let conversation = build_codex_conversation(history);
-    let prompt = format!(
-        "{system_prompt}\n\n## 对话历史\n{conversation}\n\n请基于上述对话历史，直接输出对最后一条用户消息的答复。不要输出命令行日志。"
-    );
-
     let command = codex_command
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "未检测到桌宠内置 Codex 运行时。请先把 Codex 私有运行时打包进应用资源。".to_string())?;
@@ -378,6 +371,47 @@ async fn call_codex_cli(
         .filter(|value| !value.trim().is_empty())
         .map(std::path::PathBuf::from)
         .ok_or_else(|| "当前未初始化桌宠私有 Codex 凭据目录。".to_string())?;
+
+    // 加载 Codex 配置
+    let codex_home_dir = home_root.join(".codex");
+    let config = CodexConfig::load_from_home(&codex_home_dir).unwrap_or_default();
+
+    // 加载技能
+    let skills = load_skills(&codex_home_dir).unwrap_or_default();
+    let skills_prompt = skills.build_skills_prompt();
+
+    // 构建系统提示
+    let base_system_prompt = guardrails::compose_system_prompt(provider, permission_level, allowed_actions);
+
+    // 添加人格提示
+    let personality_prompt = config.personality_prompt().unwrap_or_default();
+
+    // 添加推理强度提示
+    let reasoning_prompt = match config.model_reasoning_effort.as_str() {
+        "xhigh" => "请进行深度思考和详细分析。",
+        "high" => "请认真思考后给出详细回答。",
+        "low" => "请简洁快速地回答。",
+        _ => "", // medium 或默认
+    };
+
+    // 组合完整系统提示
+    let mut system_parts = vec![base_system_prompt];
+    if !personality_prompt.is_empty() {
+        system_parts.push(personality_prompt);
+    }
+    if !reasoning_prompt.is_empty() {
+        system_parts.push(reasoning_prompt.to_string());
+    }
+    if !skills_prompt.is_empty() {
+        system_parts.push(skills_prompt);
+    }
+    let system_prompt = system_parts.join("\n\n");
+
+    // 构建包含完整对话历史的 prompt
+    let conversation = build_codex_conversation(history);
+    let prompt = format!(
+        "{system_prompt}\n\n## 对话历史\n{conversation}\n\n请基于上述对话历史，直接输出对最后一条用户消息的答复。不要输出命令行日志。"
+    );
 
     let reply = async_runtime::spawn_blocking(move || run_codex_exec(&command, &home_root, &prompt))
         .await

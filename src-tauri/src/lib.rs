@@ -1,6 +1,7 @@
 mod agent;
 mod ai;
 mod app_state;
+mod codex_config;
 mod codex_runtime;
 mod control;
 mod audio;
@@ -35,7 +36,7 @@ use crate::{
         PetMode, ProviderConfig, ProviderConfigInput, RuntimeState,
         DEFAULT_OAUTH_REDIRECT_URL,
     },
-    codex_runtime::{apply_private_env, private_auth_path, resolve_for_app},
+    codex_runtime::{apply_private_env, initialize_codex_config, private_auth_path, resolve_for_app},
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
@@ -1366,6 +1367,11 @@ pub fn run() {
             app.manage(ControlServiceState::new());
             app.manage(AgentTaskState::new());
             let _ = history::prepare_storage(&app.handle());
+
+            // 初始化 Codex 配置目录结构
+            if let Err(error) = initialize_codex_config(&app.handle()) {
+                eprintln!("Codex config initialization failed: {error}");
+            }
 
             let control_service_status = match control::http::start(app.handle().clone()) {
                 Ok(address) => {
