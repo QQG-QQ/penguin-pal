@@ -353,7 +353,7 @@ fn run_codex_exec(command: &str, home_root: &Path, prompt: &str) -> Result<Strin
 }
 
 async fn call_codex_cli(
-    provider: &ProviderConfig,
+    _provider: &ProviderConfig,
     codex_command: Option<String>,
     codex_home: Option<String>,
     permission_level: u8,

@@ -23,6 +23,7 @@ mod tests;
 pub use core_policy::{check_action, get_policy_summary, CorePolicyCheck};
 #[allow(unused_imports)]
 pub use retrieval::{build_memory_summary, render_memory_summary_for_prompt};
+#[allow(unused_imports)]
 pub use service::{MaintenanceResult, MemoryService};
 #[allow(unused_imports)]
 pub use store::MemoryStore;

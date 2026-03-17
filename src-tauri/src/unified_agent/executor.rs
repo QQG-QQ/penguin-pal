@@ -302,7 +302,7 @@ fn format_episodic_memory(service: &MemoryService) -> String {
         .iter()
         .rev()
         .take(5)
-        .map(|e| format!("- {}: {}", e.task_title, e.outcome))
+        .map(|e| format!("- {}: {}", e.goal, e.final_status))
         .collect();
     format!("最近任务：\n{}", recent.join("\n"))
 }

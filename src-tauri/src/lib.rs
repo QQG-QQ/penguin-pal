@@ -33,8 +33,8 @@ use crate::{
     ai::{guardrails, memory as ai_memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
-        AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, DesktopAction, OAuthFlowResult,
-        PetMode, ProviderConfig, ProviderConfigInput, RuntimeState,
+        AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult,
+        PetMode, ProviderConfigInput, RuntimeState,
         DEFAULT_OAUTH_REDIRECT_URL,
     },
     codex_runtime::{apply_private_env, initialize_codex_config, private_auth_path, resolve_for_app},
