@@ -8,6 +8,8 @@ mod audio;
 mod desktop;
 mod history;
 mod memory;
+mod permission;
+mod rule_engine;
 mod security;
 mod shell_agent;
 mod testing;
@@ -34,14 +36,15 @@ use crate::{
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
         AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult,
-        PetMode, ProviderConfigInput, RuntimeState,
+        PetMode, ProviderConfigInput, RuntimeState, ShellPermissionSettings,
         DEFAULT_OAUTH_REDIRECT_URL,
     },
     codex_runtime::{apply_private_env, initialize_codex_config, private_auth_path, resolve_for_app},
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
-    shell_agent::ShellAgentExecutor,
+    shell_agent::{ShellAgentExecutor, BehaviorState},
+    permission::{PermissionScope, GrantSource},
 };
 
 fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
@@ -52,6 +55,51 @@ fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
         &allowed_actions,
     );
     runtime.to_snapshot(audio::default_audio_profile(), allowed_actions, ai_constraints)
+}
+
+/// 将设置中的 Shell 权限同步到 PermissionChecker
+fn sync_shell_permissions_to_checker(
+    app: &AppHandle,
+    settings: &ShellPermissionSettings,
+) -> Result<(), String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
+
+    let behavior_state = BehaviorState::new(&app_data_dir);
+
+    // 计算权限有效期
+    let duration_ms = if settings.duration_hours == 0 {
+        None // 永久
+    } else {
+        Some(settings.duration_hours * 60 * 60 * 1000) // 转换为毫秒
+    };
+
+    // 如果 Shell Agent 未启用，撤销所有权限
+    if !settings.enabled {
+        behavior_state.revoke_all_shell_permissions()?;
+        return Ok(());
+    }
+
+    // 根据设置授予或撤销权限
+    let permission_map = [
+        ("shell:execute", settings.allow_execute),
+        ("shell:modify", settings.allow_file_modify),
+        ("shell:delete", settings.allow_file_delete),
+        ("shell:network", settings.allow_network),
+        ("shell:system", settings.allow_system),
+    ];
+
+    for (permission_id, enabled) in permission_map {
+        if enabled {
+            behavior_state.grant_permission(permission_id, PermissionScope::Global, duration_ms)?;
+        } else {
+            behavior_state.revoke_permission(permission_id)?;
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,6 +453,11 @@ fn save_provider_config(
         &runtime.vision_channel,
         runtime.vision_api_key.as_ref(),
     );
+
+    // Shell Agent 权限设置
+    runtime.shell_permissions = input.shell_permissions.clone();
+    // 同步到 PermissionChecker
+    sync_shell_permissions_to_checker(&app, &input.shell_permissions)?;
 
     let oauth_identity_changed = previous_provider_kind != runtime.provider.kind
         || previous_auth_mode != runtime.provider.auth_mode
@@ -771,6 +824,106 @@ fn disconnect_oauth_sign_in(
         authorization_url: None,
         snapshot: snapshot_from_runtime(&runtime),
     })
+}
+
+// ============================================================================
+// Shell Agent 权限管理
+// ============================================================================
+
+/// 权限状态响应
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionStatusResponse {
+    granted_permissions: Vec<String>,
+    pending_requests: Vec<String>,
+    message: String,
+}
+
+#[tauri::command]
+fn get_shell_permissions(app: AppHandle) -> Result<PermissionStatusResponse, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let behavior_state = BehaviorState::new(&app_data);
+    let checker = behavior_state.permission_checker();
+
+    let granted: Vec<String> = checker
+        .granted_permissions()
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
+
+    let pending: Vec<String> = checker
+        .pending_requests()
+        .iter()
+        .map(|r| format!("{}: {}", r.permission_id, r.reason))
+        .collect();
+
+    Ok(PermissionStatusResponse {
+        granted_permissions: granted,
+        pending_requests: pending,
+        message: "权限状态查询成功".to_string(),
+    })
+}
+
+#[tauri::command]
+fn grant_shell_permission(
+    app: AppHandle,
+    permission_id: String,
+    duration_hours: Option<u64>,
+) -> Result<PermissionStatusResponse, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let behavior_state = BehaviorState::new(&app_data);
+
+    let duration_ms = duration_hours.map(|h| h * 60 * 60 * 1000);
+
+    {
+        let mut checker = behavior_state.permission_checker();
+        checker.grant(
+            &permission_id,
+            GrantSource::User,
+            PermissionScope::Session,
+            duration_ms,
+        )?;
+    }
+
+    // 保存状态
+    behavior_state.save()?;
+
+    // 返回更新后的状态
+    get_shell_permissions(app)
+}
+
+#[tauri::command]
+fn revoke_shell_permission(
+    app: AppHandle,
+    permission_id: String,
+) -> Result<PermissionStatusResponse, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let behavior_state = BehaviorState::new(&app_data);
+
+    {
+        let mut checker = behavior_state.permission_checker();
+        checker.revoke(&permission_id, "user")?;
+    }
+
+    behavior_state.save()?;
+    get_shell_permissions(app)
+}
+
+#[tauri::command]
+fn grant_basic_shell_access(app: AppHandle) -> Result<PermissionStatusResponse, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let behavior_state = BehaviorState::new(&app_data);
+
+    // 授予基本 shell 执行权限（24 小时）
+    let duration_ms = Some(24 * 60 * 60 * 1000);
+
+    {
+        let mut checker = behavior_state.permission_checker();
+        checker.grant("shell:execute", GrantSource::User, PermissionScope::Session, duration_ms)?;
+    }
+
+    behavior_state.save()?;
+    get_shell_permissions(app)
 }
 
 #[tauri::command]
@@ -1189,17 +1342,18 @@ pub fn run() {
                 window::setup_window(&window)?;
             }
 
-            // 启动 memory 维护后台任务
+            // 启动三层架构维护后台任务（记忆 + 规则 + 权限）
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 // 启动时执行一次维护
                 if let Ok(app_data) = app_handle.path().app_data_dir() {
-                    let service = memory::MemoryService::new(&app_data);
-                    let result = service.run_maintenance();
+                    let behavior_state = shell_agent::BehaviorState::new(&app_data);
+                    let result = behavior_state.run_maintenance();
                     if result.total_changes() > 0 {
                         eprintln!(
-                            "Memory maintenance: decayed={}, merged={}, pruned={}",
-                            result.decayed, result.merged, result.pruned
+                            "Behavior maintenance: memory(decayed={}, merged={}, pruned={}), rules_generated={}",
+                            result.memory_decayed, result.memory_merged, result.memory_pruned,
+                            result.rules_generated
                         );
                     }
                 }
@@ -1222,17 +1376,18 @@ pub fn run() {
                     }
 
                     if let Ok(app_data) = app_handle.path().app_data_dir() {
-                        let service = memory::MemoryService::new(&app_data);
-                        let result = service.run_maintenance();
+                        let behavior_state = shell_agent::BehaviorState::new(&app_data);
+                        let result = behavior_state.run_maintenance();
                         if result.total_changes() > 0 {
                             eprintln!(
-                                "Memory maintenance: decayed={}, merged={}, pruned={}",
-                                result.decayed, result.merged, result.pruned
+                                "Behavior maintenance: memory(decayed={}, merged={}, pruned={}), rules_generated={}",
+                                result.memory_decayed, result.memory_merged, result.memory_pruned,
+                                result.rules_generated
                             );
                         }
                     }
                 }
-                eprintln!("Memory maintenance thread stopped.");
+                eprintln!("Behavior maintenance thread stopped.");
             });
 
             Ok(())
@@ -1260,7 +1415,12 @@ pub fn run() {
             clear_conversation,
             get_input_history,
             get_today_reply_history,
-            clear_today_reply_history
+            clear_today_reply_history,
+            // Shell Agent 权限管理
+            get_shell_permissions,
+            grant_shell_permission,
+            revoke_shell_permission,
+            grant_basic_shell_access
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

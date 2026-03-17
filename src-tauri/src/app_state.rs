@@ -385,6 +385,8 @@ pub struct AssistantSnapshot {
     pub audit_trail: Vec<AuditEntry>,
     pub audio_profile: AudioProfile,
     pub ai_constraints: AiConstraintProfile,
+    /// Shell Agent 权限设置
+    pub shell_permissions: ShellPermissionSettings,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -416,6 +418,9 @@ pub struct ProviderConfigInput {
     pub clear_oauth_token: Option<bool>,
     #[serde(default)]
     pub vision_channel: VisionChannelConfigInput,
+    /// Shell Agent 权限设置
+    #[serde(default)]
+    pub shell_permissions: ShellPermissionSettings,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -515,6 +520,43 @@ pub struct RuntimeState {
     pub oauth_last_error: Option<String>,
     pub pending_oauth: Option<PendingOAuthState>,
     pub pending_action_approvals: Vec<ActionApprovalRequest>,
+    /// Shell Agent 权限设置
+    #[serde(default)]
+    pub shell_permissions: ShellPermissionSettings,
+}
+
+/// Shell Agent 权限设置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellPermissionSettings {
+    /// 是否启用 Shell Agent
+    pub enabled: bool,
+    /// 基本执行权限
+    pub allow_execute: bool,
+    /// 文件修改权限
+    pub allow_file_modify: bool,
+    /// 文件删除权限
+    pub allow_file_delete: bool,
+    /// 网络访问权限
+    pub allow_network: bool,
+    /// 系统操作权限
+    pub allow_system: bool,
+    /// 权限有效期（小时，0 表示永久）
+    pub duration_hours: u64,
+}
+
+impl Default for ShellPermissionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,          // 默认关闭，需要用户手动开启
+            allow_execute: false,
+            allow_file_modify: false,
+            allow_file_delete: false,
+            allow_network: false,
+            allow_system: false,
+            duration_hours: 24,      // 默认 24 小时
+        }
+    }
 }
 
 impl Default for RuntimeState {
@@ -545,6 +587,7 @@ impl Default for RuntimeState {
             oauth_last_error: None,
             pending_oauth: None,
             pending_action_approvals: vec![],
+            shell_permissions: ShellPermissionSettings::default(),
         }
     }
 }
@@ -603,6 +646,7 @@ impl RuntimeState {
             audit_trail: self.audit_trail.clone(),
             audio_profile,
             ai_constraints,
+            shell_permissions: self.shell_permissions.clone(),
         }
     }
 }
@@ -617,6 +661,9 @@ struct PersistedState {
     vision_channel: VisionChannelConfig,
     permission_level: u8,
     audit_trail: Vec<AuditEntry>,
+    /// Shell Agent 权限设置
+    #[serde(default)]
+    shell_permissions: ShellPermissionSettings,
 }
 
 fn default_vision_timeout_ms() -> u64 {
@@ -723,6 +770,7 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         oauth_last_error: None,
         pending_oauth: None,
         pending_action_approvals: vec![],
+        shell_permissions: persisted.shell_permissions,
     };
 
     if runtime.messages.is_empty() {
@@ -781,6 +829,7 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
         vision_channel,
         permission_level: runtime.permission_level.min(2),
         audit_trail: runtime.audit_trail.clone(),
+        shell_permissions: runtime.shell_permissions.clone(),
     };
 
     let content = serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?;

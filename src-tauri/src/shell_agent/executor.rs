@@ -1,14 +1,24 @@
 //! Shell Agent 执行器
 //!
-//! 核心循环：AI 决策 → 执行 → 反馈 → AI 决策
+//! 核心循环：AI 决策 → 规则检查 → 权限验证 → 执行 → 反馈 → 记忆写回 → AI 决策
+//!
+//! ## 三层架构集成
+//!
+//! 1. **记忆层**: 从 MemoryService 检索相关记忆，任务完成后写回经验
+//! 2. **规则层**: RuleEngine 应用行为规则，调整 AI 行为
+//! 3. **权限层**: PermissionChecker 验证操作权限，AI 不能自主修改权限
 
+use std::path::PathBuf;
 use std::process::Command;
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::app_state::now_millis;
+use crate::memory::{MemoryService, MemoryQuery, WriteBackRequest, RuntimeContextDigest, KeyEntity};
+use crate::permission::{PermissionChecker, PermissionScope, GrantSource, PermissionCheckResult};
+use crate::rule_engine::{RuleEngine, RuleContext, RuleApplicationResult, EffectType};
 use super::risk::{is_high_risk_command, is_forbidden_command, get_risk_description};
-use super::prompt::{build_system_prompt, build_context, CommandExecution};
+use super::prompt::{build_system_prompt, build_context_with_memory, CommandExecution};
 
 /// Agent 循环结果
 #[derive(Debug, Clone)]
@@ -48,6 +58,10 @@ pub struct ShellAgentExecutor {
     history: Vec<CommandExecution>,
     /// 当前步数
     current_step: usize,
+    /// 权限检查器
+    permission_checker: PermissionChecker,
+    /// 规则引擎
+    rule_engine: RuleEngine,
 }
 
 impl ShellAgentExecutor {
@@ -56,13 +70,126 @@ impl ShellAgentExecutor {
             max_steps: 100,  // 系统保护，不是业务逻辑
             history: Vec::new(),
             current_step: 0,
+            permission_checker: PermissionChecker::new(),
+            rule_engine: RuleEngine::default(),
         }
+    }
+
+    /// 检查命令权限
+    fn check_command_permission(&mut self, cmd: &str) -> PermissionCheckResult {
+        // 根据命令类型构建权限 ID
+        let permission_id = if cmd.contains("rm ") || cmd.contains("del ") || cmd.contains("rmdir") {
+            "shell:delete"
+        } else if cmd.contains("mv ") || cmd.contains("move ") || cmd.contains("ren ") {
+            "shell:modify"
+        } else if cmd.contains("curl ") || cmd.contains("wget ") || cmd.contains("Invoke-WebRequest") {
+            "shell:network"
+        } else if cmd.contains("reg ") || cmd.contains("regedit") {
+            "shell:registry"
+        } else if cmd.contains("shutdown") || cmd.contains("reboot") {
+            "shell:system"
+        } else {
+            "shell:execute"
+        };
+
+        self.permission_checker.check(permission_id, "shell_agent")
+    }
+
+    /// 应用规则引擎
+    fn apply_rules(&self, cmd: &str) -> RuleApplicationResult {
+        let context = RuleContext::new()
+            .with_tool("shell")
+            .with_goal(cmd)
+            .with_step(self.current_step as u32);
+
+        self.rule_engine.apply_rules(&context)
+    }
+
+    /// 检索相关记忆上下文
+    fn retrieve_memory_context(&self, app: &AppHandle, user_task: &str) -> Option<String> {
+        let app_data_dir = match app.path().app_data_dir() {
+            Ok(dir) => dir,
+            Err(_) => return None,
+        };
+
+        let memory_service = MemoryService::new(&app_data_dir);
+        let query = MemoryQuery {
+            goal: Some(user_task.to_string()),
+            intent: Some("shell_command".to_string()),
+            limit: 3,  // 最多返回 3 条相关记忆
+            ..Default::default()
+        };
+
+        match memory_service.render_for_prompt(&query) {
+            Ok(context) if !context.is_empty() => Some(context),
+            _ => None,
+        }
+    }
+
+    /// 写回任务结果到记忆系统
+    fn write_back_result(&self, app: &AppHandle, user_task: &str, success: bool, message: &str) {
+        let app_data_dir = match app.path().app_data_dir() {
+            Ok(dir) => dir,
+            Err(_) => return,
+        };
+
+        let memory_service = MemoryService::new(&app_data_dir);
+
+        // 提取使用的工具（命令）
+        let used_tools: Vec<String> = self.history
+            .iter()
+            .filter(|h| h.success)
+            .map(|h| {
+                // 提取命令的第一个词作为工具名
+                h.command.split_whitespace().next().unwrap_or("unknown").to_string()
+            })
+            .collect();
+
+        // 提取关键实体
+        let key_entities: Vec<KeyEntity> = self.history
+            .iter()
+            .filter_map(|h| {
+                // 尝试提取文件路径等实体
+                if h.command.contains(":\\") || h.command.contains("/") {
+                    Some(KeyEntity {
+                        entity_type: "path".to_string(),
+                        value: h.command.clone(),
+                        label: None,
+                    })
+                } else {
+                    None
+                }
+            })
+            .take(5)  // 最多 5 个
+            .collect();
+
+        let request = WriteBackRequest {
+            goal: user_task.to_string(),
+            intent: "shell_command".to_string(),
+            final_status: if success { "completed".to_string() } else { "failed".to_string() },
+            failure_reason_code: if success { None } else { Some("execution_error".to_string()) },
+            failure_stage: if success { None } else { Some("execution".to_string()) },
+            runtime_context_digest: RuntimeContextDigest {
+                active_window_title: None,
+                active_element_name: None,
+                stable_window: None,
+                stable_element: None,
+            },
+            key_entities,
+            used_tools,
+            used_retry: false,
+            used_probe: false,
+            steps_taken: self.current_step as u32,
+        };
+
+        // 写回结果（忽略错误，不影响主流程）
+        let _ = memory_service.write_back(request);
     }
 
     /// 执行 Agent 循环
     pub async fn run<F, Fut>(
         &mut self,
-        _app: &AppHandle,
+        app: &AppHandle,
         user_task: &str,
         ai_caller: F,
     ) -> AgentLoopResult
@@ -72,11 +199,16 @@ impl ShellAgentExecutor {
     {
         let system_prompt = build_system_prompt();
 
+        // 1. 检索相关记忆
+        let memory_context = self.retrieve_memory_context(app, user_task);
+
         loop {
             self.current_step += 1;
 
             // 系统保护上限
             if self.current_step > self.max_steps {
+                // 写回失败记录
+                self.write_back_result(app, user_task, false, "达到系统保护上限");
                 return AgentLoopResult {
                     success: false,
                     message: format!("已达到系统保护上限({})，任务中止", self.max_steps),
@@ -86,13 +218,19 @@ impl ShellAgentExecutor {
                 };
             }
 
-            // 构建上下文
-            let context = build_context(user_task, &self.history, self.current_step);
+            // 构建上下文（包含记忆）
+            let context = build_context_with_memory(
+                user_task,
+                &self.history,
+                self.current_step,
+                memory_context.as_deref(),
+            );
 
             // 调用 AI
             let ai_response = match ai_caller(system_prompt.clone(), context).await {
                 Ok(response) => response,
                 Err(e) => {
+                    self.write_back_result(app, user_task, false, &format!("AI 调用失败：{}", e));
                     return AgentLoopResult {
                         success: false,
                         message: format!("AI 调用失败：{}", e),
@@ -108,6 +246,7 @@ impl ShellAgentExecutor {
                 Ok(p) => p,
                 Err(_) => {
                     // 如果解析失败，把原始响应当作完成消息
+                    self.write_back_result(app, user_task, true, &ai_response);
                     return AgentLoopResult {
                         success: true,
                         message: ai_response,
@@ -121,6 +260,7 @@ impl ShellAgentExecutor {
             match parsed {
                 AIResponse::Reply { reply } => {
                     // 直接回复，不执行命令
+                    self.write_back_result(app, user_task, true, &reply);
                     return AgentLoopResult {
                         success: true,
                         message: reply,
@@ -130,6 +270,7 @@ impl ShellAgentExecutor {
                     };
                 }
                 AIResponse::Done { done } => {
+                    self.write_back_result(app, user_task, true, &done);
                     return AgentLoopResult {
                         success: true,
                         message: done,
@@ -139,6 +280,7 @@ impl ShellAgentExecutor {
                     };
                 }
                 AIResponse::Fail { fail } => {
+                    self.write_back_result(app, user_task, false, &fail);
                     return AgentLoopResult {
                         success: false,
                         message: fail,
@@ -148,7 +290,7 @@ impl ShellAgentExecutor {
                     };
                 }
                 AIResponse::Command { cmd } => {
-                    // 检查是否被禁止
+                    // 1. 检查是否被禁止（硬编码安全规则）
                     if let Some(reason) = is_forbidden_command(&cmd) {
                         self.history.push(CommandExecution {
                             command: cmd.clone(),
@@ -158,7 +300,47 @@ impl ShellAgentExecutor {
                         continue;
                     }
 
-                    // 检查是否需要确认
+                    // 2. 应用规则引擎
+                    let rule_result = self.apply_rules(&cmd);
+                    if rule_result.blocked {
+                        let block_reason = rule_result.block_reason.unwrap_or_else(|| "规则阻止".to_string());
+                        self.history.push(CommandExecution {
+                            command: cmd.clone(),
+                            output: format!("命令被规则阻止：{}", block_reason),
+                            success: false,
+                        });
+                        continue;
+                    }
+
+                    // 3. 检查权限（AI 不能自主授予权限）
+                    let perm_result = self.check_command_permission(&cmd);
+                    if !perm_result.allowed {
+                        if perm_result.requires_confirmation {
+                            // 需要用户授权
+                            return AgentLoopResult {
+                                success: false,
+                                message: format!("命令需要权限授权：{}", cmd),
+                                steps_executed: self.current_step,
+                                history: self.history.clone(),
+                                pending_confirmation: Some(PendingShellConfirmation {
+                                    id: format!("perm-{}", now_millis()),
+                                    command: cmd,
+                                    risk_description: format!("需要 {} 权限", perm_result.permission_id),
+                                    created_at: now_millis(),
+                                }),
+                            };
+                        } else {
+                            // 权限被拒绝
+                            self.history.push(CommandExecution {
+                                command: cmd.clone(),
+                                output: format!("权限不足：{}", perm_result.reason),
+                                success: false,
+                            });
+                            continue;
+                        }
+                    }
+
+                    // 4. 检查是否需要高风险确认
                     if is_high_risk_command(&cmd) {
                         let risk_desc = get_risk_description(&cmd);
                         return AgentLoopResult {
@@ -175,13 +357,19 @@ impl ShellAgentExecutor {
                         };
                     }
 
-                    // 执行命令
+                    // 5. 执行命令
                     let output = execute_shell_command(&cmd);
+                    let success = !output.starts_with("命令执行失败") && !output.starts_with("命令执行错误");
                     self.history.push(CommandExecution {
-                        command: cmd,
+                        command: cmd.clone(),
                         output: output.clone(),
-                        success: true,
+                        success,
                     });
+
+                    // 6. 更新规则置信度
+                    for rule_id in &rule_result.applied_rules {
+                        self.rule_engine.update_rule_confidence(rule_id, success);
+                    }
                 }
             }
         }
@@ -213,6 +401,20 @@ impl Default for ShellAgentExecutor {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 授予 Shell Agent 基本执行权限（需要用户确认）
+///
+/// 这个函数应该在用户首次同意使用 Shell Agent 时调用
+pub fn grant_basic_shell_permissions(checker: &mut PermissionChecker) -> Result<(), String> {
+    // 授予基本执行权限（会话级别）
+    checker.grant(
+        "shell:execute",
+        GrantSource::User,
+        PermissionScope::Session,
+        Some(24 * 60 * 60 * 1000),  // 24 小时
+    )?;
+    Ok(())
 }
 
 /// 解析 AI 响应

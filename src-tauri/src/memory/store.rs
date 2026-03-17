@@ -273,4 +273,92 @@ impl MemoryStore {
             *cache = None;
         }
     }
+
+    // ========================================================================
+    // 统一入口
+    // ========================================================================
+
+    /// 加载所有记忆条目（用于规则生成）
+    pub fn load_all_entries(&self) -> Result<Vec<super::types::MemoryEntry>, String> {
+        use super::types::{MemoryEntry, MemoryType, MemoryScope, MemoryStatus, PrivacyLevel};
+
+        let mut entries = Vec::new();
+
+        // 1. 从 Episodic 转换
+        let episodic = self.load_episodic()?;
+        for entry in episodic.entries {
+            entries.push(MemoryEntry {
+                id: entry.id.clone(),
+                memory_type: MemoryType::Episodic,
+                content: format!("Goal: {}; Status: {}", entry.goal, entry.final_status),
+                summary: entry.goal.clone(),
+                source: "episodic".to_string(),
+                created_at: entry.timestamp,
+                updated_at: entry.timestamp,
+                importance: if entry.final_status == "completed" { 0.6 } else { 0.4 },
+                confidence: 0.8,
+                recency: 1.0,
+                frequency: 1,
+                scope: MemoryScope::Session,
+                tags: entry.tags.clone(),
+                related_memories: Vec::new(),
+                status: MemoryStatus::Active,
+                privacy: PrivacyLevel::Internal,
+                ttl: None,
+                retrieval_keys: vec![entry.goal, entry.intent],
+            });
+        }
+
+        // 2. 从 Procedural 转换
+        let procedural = self.load_procedural()?;
+        for entry in procedural.procedures {
+            entries.push(MemoryEntry {
+                id: entry.id.clone(),
+                memory_type: MemoryType::Procedural,
+                content: format!("Pattern: {}; Tools: {:?}", entry.target_pattern, entry.preferred_tool_sequence),
+                summary: entry.target_pattern.clone(),
+                source: "procedural".to_string(),
+                created_at: entry.created_at,
+                updated_at: entry.updated_at,
+                importance: entry.confidence,
+                confidence: entry.confidence,
+                recency: 0.8,
+                frequency: entry.success_count + entry.failure_count,
+                scope: MemoryScope::Project,
+                tags: vec![entry.target_kind.clone()],
+                related_memories: Vec::new(),
+                status: MemoryStatus::Active,
+                privacy: PrivacyLevel::Internal,
+                ttl: None,
+                retrieval_keys: vec![entry.target_pattern, entry.target_kind],
+            });
+        }
+
+        // 3. 从 Policy 转换
+        let policy = self.load_policy()?;
+        for entry in policy.suggestions {
+            entries.push(MemoryEntry {
+                id: entry.id.clone(),
+                memory_type: MemoryType::Policy,
+                content: format!("{}: {}", entry.suggestion_type, entry.value),
+                summary: entry.suggestion_type.clone(),
+                source: "policy".to_string(),
+                created_at: entry.created_at,
+                updated_at: entry.updated_at,
+                importance: entry.confidence,
+                confidence: entry.confidence,
+                recency: 0.7,
+                frequency: 1,
+                scope: entry.scope.clone(),
+                tags: Vec::new(),
+                related_memories: Vec::new(),
+                status: if entry.approved { MemoryStatus::Active } else { MemoryStatus::Pending },
+                privacy: PrivacyLevel::Internal,
+                ttl: None,
+                retrieval_keys: vec![entry.suggestion_type],
+            });
+        }
+
+        Ok(entries)
+    }
 }

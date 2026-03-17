@@ -1,6 +1,7 @@
 //! Shell Agent 极简 Prompt
 //!
 //! 只提供最基本的信息，让 AI 完全自主决策
+//! 同时注入从记忆系统检索到的相关经验
 
 /// 构建系统提示
 pub fn build_system_prompt() -> String {
@@ -30,14 +31,39 @@ pub fn build_context(
     history: &[CommandExecution],
     current_step: usize,
 ) -> String {
-    let mut context = format!("用户任务：{}\n\n", user_task);
+    build_context_with_memory(user_task, history, current_step, None)
+}
 
+/// 构建包含执行历史和记忆上下文的上下文
+pub fn build_context_with_memory(
+    user_task: &str,
+    history: &[CommandExecution],
+    current_step: usize,
+    memory_context: Option<&str>,
+) -> String {
+    let mut context = String::new();
+
+    // 1. 注入记忆上下文（相关经验）
+    if let Some(memory) = memory_context {
+        if !memory.is_empty() {
+            context.push_str("## 相关经验\n");
+            context.push_str(memory);
+            context.push_str("\n\n");
+        }
+    }
+
+    // 2. 用户任务
+    context.push_str(&format!("## 当前任务\n{}\n\n", user_task));
+
+    // 3. 执行历史
     if !history.is_empty() {
-        context.push_str("执行历史：\n");
+        context.push_str("## 执行历史\n");
         for (i, exec) in history.iter().enumerate() {
+            let status = if exec.success { "✓" } else { "✗" };
             context.push_str(&format!(
-                "第{}步：{}\n结果：{}\n\n",
+                "第{}步 {}: {}\n输出: {}\n\n",
                 i + 1,
+                status,
                 exec.command,
                 truncate_output(&exec.output, 500)
             ));
