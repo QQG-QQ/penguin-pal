@@ -128,6 +128,10 @@ fn normalize_loop_decision(mut payload: Value) -> Result<Value, String> {
             ensure_final_summary_seed(next, &kind);
             normalize_final_summary(next, &goal, &kind);
         }
+        "observe_context" | "assert_condition" | "retry_step" => {
+            // 这些 kind 也需要 summary 字段
+            ensure_step_summary(next, &kind);
+        }
         "respond_to_user" => {}
         _ => {}
     }
