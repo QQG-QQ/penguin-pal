@@ -381,14 +381,24 @@ async fn call_codex_cli(
     let skills = load_skills(&codex_home_dir).unwrap_or_default();
     let skills_prompt = skills.build_skills_prompt();
 
-    // 使用统一 agent 提示（包含工具描述）
-    let personality_prompt = config.personality_prompt();
-    let unified_system = unified_prompt::build_unified_system_prompt(
-        permission_level,
-        allowed_actions,
-        personality_prompt.as_deref(),
-        if skills_prompt.is_empty() { None } else { Some(&skills_prompt) },
-    );
+    // 检查 history 中是否有 system 消息（Shell Agent 模式）
+    let system_from_history = history
+        .iter()
+        .find(|m| m.role == "system")
+        .map(|m| m.content.clone());
+
+    // 如果有 system 消息，使用它；否则使用统一 agent 提示
+    let unified_system = if let Some(sys_prompt) = system_from_history {
+        sys_prompt
+    } else {
+        let personality_prompt = config.personality_prompt();
+        unified_prompt::build_unified_system_prompt(
+            permission_level,
+            allowed_actions,
+            personality_prompt.as_deref(),
+            if skills_prompt.is_empty() { None } else { Some(&skills_prompt) },
+        )
+    };
 
     // 添加推理强度提示
     let reasoning_hint = match config.model_reasoning_effort.as_str() {
@@ -400,8 +410,16 @@ async fn call_codex_cli(
 
     // 构建包含完整对话历史的 prompt
     let conversation = build_codex_conversation(history);
+
+    // Shell Agent 模式下使用简化提示
+    let final_instruction = if system_from_history.is_some() {
+        "请根据上述内容决定下一步操作。"
+    } else {
+        "请基于上述对话历史，直接输出对最后一条用户消息的答复。如果是普通对话，直接用自然语言回复；如果需要操作电脑，返回 JSON 格式的工具调用。"
+    };
+
     let prompt = format!(
-        "{unified_system}{reasoning_hint}\n\n## 对话历史\n{conversation}\n\n请基于上述对话历史，直接输出对最后一条用户消息的答复。如果是普通对话，直接用自然语言回复；如果需要操作电脑，返回 JSON 格式的工具调用。"
+        "{unified_system}{reasoning_hint}\n\n## 对话历史\n{conversation}\n\n{final_instruction}"
     );
 
     let reply = async_runtime::spawn_blocking(move || run_codex_exec(&command, &home_root, &prompt))
