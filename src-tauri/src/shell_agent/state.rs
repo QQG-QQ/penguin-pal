@@ -20,10 +20,10 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use crate::memory::MemoryService;
-use crate::rule_engine::{RuleEngine, RuleGenerator, Rule};
+use crate::rule_engine::{RuleEngine, RuleGenerator};
 use crate::permission::{PermissionChecker, PermissionStore, PermissionState, PermissionScope, GrantSource};
 
 /// 三层架构统一状态
@@ -117,9 +117,9 @@ impl BehaviorState {
 
         // 1. 运行记忆维护
         let memory_result = self.memory_service.run_maintenance();
-        result.memory_decayed = memory_result.decayed;
-        result.memory_merged = memory_result.merged;
-        result.memory_pruned = memory_result.pruned;
+        result.memory_decayed = memory_result.decayed as usize;
+        result.memory_merged = memory_result.merged as usize;
+        result.memory_pruned = memory_result.pruned as usize;
 
         // 2. 从记忆生成规则
         if let Ok(count) = self.generate_rules_from_memories() {

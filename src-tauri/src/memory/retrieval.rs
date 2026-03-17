@@ -250,6 +250,7 @@ pub fn build_memory_summary(
         relevant_episodes,
         relevant_procedures,
         active_policies,
+        semantic_context: Vec::new(),
         profile_hints,
     }
 }

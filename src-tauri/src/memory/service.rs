@@ -285,6 +285,10 @@ pub fn build_query_from_task(
         window_title: window_title.map(String::from),
         app_name: app_name.map(String::from),
         tags: Vec::new(),
+        memory_types: Vec::new(),
+        min_importance: None,
+        min_confidence: None,
+        scope: None,
         limit: 5,
     }
 }

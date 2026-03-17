@@ -299,11 +299,11 @@ impl MemoryStore {
                 confidence: 0.8,
                 recency: 1.0,
                 frequency: 1,
-                scope: MemoryScope::Session,
+                scope: MemoryScope::Task,
                 tags: entry.tags.clone(),
                 related_memories: Vec::new(),
                 status: MemoryStatus::Active,
-                privacy: PrivacyLevel::Internal,
+                privacy: PrivacyLevel::Public,
                 ttl: None,
                 retrieval_keys: vec![entry.goal, entry.intent],
             });
@@ -328,7 +328,7 @@ impl MemoryStore {
                 tags: vec![entry.target_kind.clone()],
                 related_memories: Vec::new(),
                 status: MemoryStatus::Active,
-                privacy: PrivacyLevel::Internal,
+                privacy: PrivacyLevel::Public,
                 ttl: None,
                 retrieval_keys: vec![entry.target_pattern, entry.target_kind],
             });
@@ -337,6 +337,14 @@ impl MemoryStore {
         // 3. 从 Policy 转换
         let policy = self.load_policy()?;
         for entry in policy.suggestions {
+            // 解析 scope 字符串到枚举
+            let scope = match entry.scope.as_str() {
+                "global" => MemoryScope::Global,
+                "user" => MemoryScope::User,
+                "project" => MemoryScope::Project,
+                "task" => MemoryScope::Task,
+                _ => MemoryScope::Global,
+            };
             entries.push(MemoryEntry {
                 id: entry.id.clone(),
                 memory_type: MemoryType::Policy,
@@ -349,11 +357,11 @@ impl MemoryStore {
                 confidence: entry.confidence,
                 recency: 0.7,
                 frequency: 1,
-                scope: entry.scope.clone(),
+                scope,
                 tags: Vec::new(),
                 related_memories: Vec::new(),
-                status: if entry.approved { MemoryStatus::Active } else { MemoryStatus::Pending },
-                privacy: PrivacyLevel::Internal,
+                status: MemoryStatus::Active,
+                privacy: PrivacyLevel::Public,
                 ttl: None,
                 retrieval_keys: vec![entry.suggestion_type],
             });

@@ -22,6 +22,8 @@
 //! - `shell:registry` - 注册表操作
 //! - `shell:system` - 系统管理操作
 
+#![allow(unused_imports)]
+
 pub mod executor;
 pub mod prompt;
 pub mod risk;

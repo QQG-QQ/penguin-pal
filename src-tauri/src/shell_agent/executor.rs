@@ -8,7 +8,6 @@
 //! 2. **规则层**: RuleEngine 应用行为规则，调整 AI 行为
 //! 3. **权限层**: PermissionChecker 验证操作权限，AI 不能自主修改权限
 
-use std::path::PathBuf;
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -16,7 +15,7 @@ use tauri::{AppHandle, Manager};
 use crate::app_state::now_millis;
 use crate::memory::{MemoryService, MemoryQuery, WriteBackRequest, RuntimeContextDigest, KeyEntity};
 use crate::permission::{PermissionChecker, PermissionScope, GrantSource, PermissionCheckResult};
-use crate::rule_engine::{RuleEngine, RuleContext, RuleApplicationResult, EffectType};
+use crate::rule_engine::{RuleEngine, RuleContext, RuleApplicationResult};
 use super::risk::{is_high_risk_command, is_forbidden_command, get_risk_description};
 use super::prompt::{build_system_prompt, build_context_with_memory, CommandExecution};
 
@@ -153,8 +152,8 @@ impl ShellAgentExecutor {
                 if h.command.contains(":\\") || h.command.contains("/") {
                     Some(KeyEntity {
                         entity_type: "path".to_string(),
-                        value: h.command.clone(),
-                        label: None,
+                        id: h.command.clone(),
+                        label: h.command.clone(),
                     })
                 } else {
                     None
@@ -164,6 +163,7 @@ impl ShellAgentExecutor {
             .collect();
 
         let request = WriteBackRequest {
+            task_id: format!("shell_{}", crate::memory::now_millis()),
             goal: user_task.to_string(),
             intent: "shell_command".to_string(),
             final_status: if success { "completed".to_string() } else { "failed".to_string() },
@@ -171,15 +171,16 @@ impl ShellAgentExecutor {
             failure_stage: if success { None } else { Some("execution".to_string()) },
             runtime_context_digest: RuntimeContextDigest {
                 active_window_title: None,
-                active_element_name: None,
-                stable_window: None,
-                stable_element: None,
+                active_window_class: None,
+                had_vision_context: false,
+                had_uia_context: false,
+                clipboard_preview: None,
             },
             key_entities,
             used_tools,
             used_retry: false,
             used_probe: false,
-            steps_taken: self.current_step as u32,
+            steps_taken: self.current_step,
         };
 
         // 写回结果（忽略错误，不影响主流程）

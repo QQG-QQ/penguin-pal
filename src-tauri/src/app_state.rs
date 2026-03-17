@@ -521,7 +521,6 @@ pub struct RuntimeState {
     pub pending_oauth: Option<PendingOAuthState>,
     pub pending_action_approvals: Vec<ActionApprovalRequest>,
     /// Shell Agent 权限设置
-    #[serde(default)]
     pub shell_permissions: ShellPermissionSettings,
 }
 

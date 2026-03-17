@@ -10,6 +10,8 @@
 //!
 //! 另有不可变的 Core Policy（硬编码安全策略）。
 
+#![allow(unused_imports)]
+
 pub mod core_policy;
 pub mod retrieval;
 pub mod service;

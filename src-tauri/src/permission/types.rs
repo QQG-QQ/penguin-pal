@@ -177,7 +177,7 @@ impl PermissionRequest {
     pub fn new(permission_id: &str, requested_by: &str, reason: &str) -> Self {
         let now = crate::memory::now_millis();
         Self {
-            id: crate::memory::generate_id(),
+            id: crate::memory::generate_id("perm_req"),
             permission_id: permission_id.to_string(),
             requested_by: requested_by.to_string(),
             requested_at: now,
@@ -336,7 +336,7 @@ pub enum AuditAction {
 impl PermissionAuditEntry {
     pub fn new(action: AuditAction, permission_id: &str, actor: &str, result: &str) -> Self {
         Self {
-            id: crate::memory::generate_id(),
+            id: crate::memory::generate_id("perm_audit"),
             timestamp: crate::memory::now_millis(),
             action,
             permission_id: permission_id.to_string(),

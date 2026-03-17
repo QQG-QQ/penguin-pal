@@ -202,7 +202,8 @@ impl PermissionChecker {
             message,
         });
 
-        self.log_audit(AuditAction::Deny, &request.permission_id, "user", "denied");
+        let permission_id = request.permission_id.clone();
+        self.log_audit(AuditAction::Deny, &permission_id, "user", "denied");
         Ok(())
     }
 
