@@ -484,6 +484,76 @@ fn save_provider_config(
         }
     }
 
+    // 同步 Shell Agent 权限设置
+    let previous_shell_enabled = runtime.shell_permissions.enabled;
+    runtime.shell_permissions = input.shell_permissions.clone();
+
+    // 同步到 BehaviorState 权限系统
+    if let Ok(app_data) = app.path().app_data_dir() {
+        let behavior_state = shell_agent::BehaviorState::new(&app_data);
+        let duration_ms = if input.shell_permissions.duration_hours > 0 {
+            Some(input.shell_permissions.duration_hours as u64 * 60 * 60 * 1000)
+        } else {
+            None // 永久
+        };
+
+        if input.shell_permissions.enabled {
+            // 根据设置授予对应权限
+            if input.shell_permissions.allow_execute {
+                let _ = behavior_state.grant_permission(
+                    "shell:execute",
+                    crate::permission::PermissionScope::Global,
+                    duration_ms,
+                );
+            } else {
+                let _ = behavior_state.revoke_permission("shell:execute");
+            }
+
+            if input.shell_permissions.allow_file_modify {
+                let _ = behavior_state.grant_permission(
+                    "shell:modify",
+                    crate::permission::PermissionScope::Global,
+                    duration_ms,
+                );
+            } else {
+                let _ = behavior_state.revoke_permission("shell:modify");
+            }
+
+            if input.shell_permissions.allow_file_delete {
+                let _ = behavior_state.grant_permission(
+                    "shell:delete",
+                    crate::permission::PermissionScope::Global,
+                    duration_ms,
+                );
+            } else {
+                let _ = behavior_state.revoke_permission("shell:delete");
+            }
+
+            if input.shell_permissions.allow_network {
+                let _ = behavior_state.grant_permission(
+                    "shell:network",
+                    crate::permission::PermissionScope::Global,
+                    duration_ms,
+                );
+            } else {
+                let _ = behavior_state.revoke_permission("shell:network");
+            }
+
+            if input.shell_permissions.allow_system {
+                let _ = behavior_state.grant_permission(
+                    "shell:system",
+                    crate::permission::PermissionScope::Global,
+                    duration_ms,
+                );
+            } else {
+                let _ = behavior_state.revoke_permission("shell:system");
+            }
+        } else if previous_shell_enabled {
+            // 如果之前启用现在禁用，撤销所有权限
+            let _ = behavior_state.revoke_all_shell_permissions();
+        }
+    }
+
     runtime.mode = PetMode::Idle;
 
     let audit_detail = format!(
