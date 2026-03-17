@@ -9,6 +9,7 @@ mod desktop;
 mod history;
 mod memory;
 mod security;
+mod shell_agent;
 mod testing;
 mod tray;
 mod unified_agent;
@@ -41,7 +42,7 @@ use crate::{
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
-    unified_agent::{response as agent_response, UnifiedAgentExecutor},
+    shell_agent::ShellAgentExecutor,
 };
 
 fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
@@ -791,7 +792,7 @@ async fn send_chat_message(
         oauth_access_token,
         codex_command,
         codex_home,
-        history_window,
+        _history_window,  // Shell Agent 自己管理上下文
         permission_level,
         allowed_actions,
     ) = {
@@ -820,56 +821,77 @@ async fn send_chat_message(
         )
     };
 
-    // 统一智能 Agent 流程：直接调用 AI，让 AI 自主决定行动
-    let (reply_text, provider_label, outcome, detail) = match provider::respond(
-        &provider_config,
-        api_key,
-        oauth_access_token,
-        codex_command,
-        codex_home,
-        permission_level,
-        &allowed_actions,
-        &history_window,
-    )
-    .await
-    {
-        Ok((raw_reply, label)) => {
-            // 解析 AI 响应，判断是文本回复还是工具调用
-            let response = agent_response::parse_response(&raw_reply);
-            match response {
-                Ok(parsed) => {
-                    if parsed.is_text_reply() {
-                        // 纯文本回复，直接返回
-                        (
-                            parsed.text_message().unwrap_or(&raw_reply).to_string(),
-                            label,
-                            "ok".to_string(),
-                            "unified_agent_text_reply".to_string(),
-                        )
-                    } else {
-                        // 工具调用，执行工具
-                        let executor = UnifiedAgentExecutor::new(&app, permission_level);
-                        let result = executor.execute(parsed);
-                        (
-                            result.reply,
-                            label,
-                            result.status,
-                            result.detail,
-                        )
-                    }
-                }
-                Err(_) => {
-                    // 解析失败，作为纯文本返回
-                    (raw_reply, label, "ok".to_string(), "unified_agent_raw".to_string())
-                }
-            }
+    // Shell Agent 自主循环：AI 完全自主决定行动
+    let mut shell_executor = ShellAgentExecutor::new();
+
+    // 创建 AI 调用闭包
+    let provider_config_clone = provider_config.clone();
+    let api_key_clone = api_key.clone();
+    let oauth_token_clone = oauth_access_token.clone();
+    let codex_cmd_clone = codex_command.clone();
+    let codex_home_clone = codex_home.clone();
+    let allowed_actions_clone = allowed_actions.clone();
+
+    let ai_caller = |system_prompt: String, context: String| {
+        let provider = provider_config_clone.clone();
+        let key = api_key_clone.clone();
+        let token = oauth_token_clone.clone();
+        let cmd = codex_cmd_clone.clone();
+        let home = codex_home_clone.clone();
+        let actions = allowed_actions_clone.clone();
+        let perm = permission_level;
+
+        async move {
+            // 构建包含 shell agent 上下文的历史
+            let messages = vec![
+                ChatMessage::new("system", system_prompt),
+                ChatMessage::user(context),
+            ];
+
+            provider::respond(
+                &provider,
+                key,
+                token,
+                cmd,
+                home,
+                perm,
+                &actions,
+                &messages,
+            )
+            .await
+            .map(|(reply, _label)| reply)
         }
-        Err(error) => (
-            provider::fallback_reply(&error),
-            "Safety fallback".to_string(),
-            "fallback".to_string(),
-            error,
-        ),
+    };
+
+    let result = shell_executor.run(&app, trimmed, ai_caller).await;
+
+    let (reply_text, provider_label, outcome, detail) = if result.pending_confirmation.is_some() {
+        // 需要用户确认
+        let pending = result.pending_confirmation.unwrap();
+        (
+            format!(
+                "需要确认执行以下命令：\n\n```\n{}\n```\n\n{}（输入 yes 确认，no 取消）",
+                pending.command,
+                pending.risk_description
+            ),
+            "Shell Agent".to_string(),
+            "pending_confirmation".to_string(),
+            format!("pending_id={}", pending.id),
+        )
+    } else if result.success {
+        (
+            result.message,
+            "Shell Agent".to_string(),
+            "ok".to_string(),
+            format!("steps={}", result.steps_executed),
+        )
+    } else {
+        (
+            result.message,
+            "Shell Agent".to_string(),
+            "error".to_string(),
+            format!("steps={}", result.steps_executed),
+        )
     };
 
     let reply_message = ChatMessage::assistant(reply_text);

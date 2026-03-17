@@ -114,38 +114,19 @@ fn build_response_format_prompt() -> String {
 当用户在聊天、提问、让你记住信息时，直接用自然语言回复，不需要 JSON。
 
 ## 2. 工具调用（返回 JSON）
-当用户要求操作电脑时，返回：
+当用户要求操作电脑时，返回单个工具调用：
 ```json
 {"action":{"type":"tool_call","tool":"工具名","args":{...},"summary":"简要说明"}}
 ```
 
-## 3. 多步骤任务
-需要多个工具配合时：
+执行后你会收到工具执行结果，根据结果决定下一步操作，直到任务完成。
+任务完成时返回：
 ```json
-{"action":{"type":"tool_sequence","steps":[{"tool":"...","args":{...}},{"tool":"...","args":{...}}],"task_summary":"任务说明"}}
-```
-
-## 工具序列最佳实践
-**重要**：open_app 启动应用后需要等待窗口就绪再进行后续操作：
-1. 调用 open_app 启动应用
-2. 调用 list_windows 刷新窗口列表
-3. 调用 focus_window 确保窗口获得焦点
-4. 再进行 send_hotkey / type_text 等操作
-
-示例（打开浏览器访问网址）：
-```json
-{"action":{"type":"tool_sequence","steps":[
-  {"tool":"open_app","args":{"name":"browser"},"summary":"打开浏览器"},
-  {"tool":"list_windows","args":{},"summary":"刷新窗口列表"},
-  {"tool":"focus_window","args":{"title":"Edge","match":"contains"},"summary":"聚焦浏览器窗口"},
-  {"tool":"send_hotkey","args":{"keys":["CTRL","L"]},"summary":"聚焦地址栏"},
-  {"tool":"type_text","args":{"text":"https://www.bilibili.com"},"summary":"输入网址"},
-  {"tool":"send_hotkey","args":{"keys":["ENTER"]},"summary":"确认导航"}
-],"task_summary":"打开B站"}}
+{"action":{"type":"finish","message":"任务完成的总结"}}
 ```
 
 ## 判断原则
-- 用户说"记住xxx"、"帮我记一下"→ 这是让你记住信息，直接文本回复确认
+- 用户说"记住xxx"、"帮我记一下"→ 直接文本回复确认
 - 用户问"xxx是什么"、"你能做什么"→ 普通对话，直接回复
 - 用户说"打开xxx"、"帮我输入"、"点击"→ 桌面操作，返回工具调用
 - 用户问"之前说了什么"→ 回忆对话历史，直接回复
