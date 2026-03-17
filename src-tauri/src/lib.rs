@@ -11,6 +11,7 @@ mod memory;
 mod security;
 mod testing;
 mod tray;
+mod unified_agent;
 mod window;
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ pub fn request_memory_maintenance_shutdown() {
 }
 
 use crate::{
-    agent::{intent_classifier, router as agent_router, AgentTaskState},
+    agent::{router as agent_router, AgentTaskState},
     ai::{guardrails, memory as ai_memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
@@ -40,6 +41,7 @@ use crate::{
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
+    unified_agent::{response as agent_response, UnifiedAgentExecutor},
 };
 
 fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
@@ -151,53 +153,6 @@ fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
         runtime_path: command_label,
         source: runtime.source.to_string(),
         message,
-    }
-}
-
-async fn provider_response(
-    provider_config: &ProviderConfig,
-    api_key: Option<String>,
-    oauth_access_token: Option<String>,
-    codex_command: Option<String>,
-    codex_home: Option<String>,
-    permission_level: u8,
-    allowed_actions: &[DesktopAction],
-    history_window: &[ChatMessage],
-) -> (String, String, String, String, Option<agent::types::AgentMessageMeta>) {
-    match provider::respond(
-        provider_config,
-        api_key,
-        oauth_access_token,
-        codex_command,
-        codex_home,
-        permission_level,
-        allowed_actions,
-        history_window,
-    )
-    .await
-    {
-        Ok((reply, label)) => (
-            reply,
-            label,
-            "ok".to_string(),
-            format!(
-                "provider={} auth={} model={}",
-                provider_config.kind.label(),
-                match provider_config.auth_mode {
-                    AuthMode::ApiKey => "apiKey",
-                    AuthMode::OAuth => "oauth",
-                },
-                provider_config.model
-            ),
-            None,
-        ),
-        Err(error) => (
-            provider::fallback_reply(&error),
-            "Safety fallback".to_string(),
-            "fallback".to_string(),
-            error,
-            None,
-        ),
     }
 }
 
@@ -834,8 +789,6 @@ async fn send_chat_message(
         provider_config,
         api_key,
         oauth_access_token,
-        vision_channel,
-        vision_api_key,
         codex_command,
         codex_home,
         history_window,
@@ -854,8 +807,6 @@ async fn send_chat_message(
             runtime.provider.clone(),
             runtime.api_key.clone(),
             runtime.oauth_access_token.clone(),
-            runtime.vision_channel.clone(),
-            runtime.vision_api_key.clone(),
             codex_runtime
                 .as_ref()
                 .and_then(|item| item.command.as_ref())
@@ -869,243 +820,56 @@ async fn send_chat_message(
         )
     };
 
-    let classified_route = intent_classifier::classify_user_intent(
+    // 统一智能 Agent 流程：直接调用 AI，让 AI 自主决定行动
+    let (reply_text, provider_label, outcome, detail) = match provider::respond(
         &provider_config,
-        api_key.clone(),
-        oauth_access_token.clone(),
-        codex_command.clone(),
-        codex_home.clone(),
+        api_key,
+        oauth_access_token,
+        codex_command,
+        codex_home,
         permission_level,
         &allowed_actions,
-        trimmed,
-        )
+        &history_window,
+    )
     .await
-    .ok()
-    .map(|decision| decision.route);
-
-    let (reply_text, provider_label, outcome, detail, agent_meta) = match classified_route {
-        Some(agent::types::TopLevelIntent::TestRequest) => match agent_router::maybe_handle_test_message(
-            &app,
-            &provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
-            &vision_channel,
-            vision_api_key.clone(),
-            codex_command.clone(),
-            codex_home.clone(),
-            permission_level,
-            &allowed_actions,
-            trimmed,
-            true,
-        )
-        .await
-        {
-            Ok(Some(result)) => (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-            ),
-            Ok(None) => (
-                "测试 agent 当前没有生成下一步动作。".to_string(),
-                "Test Agent".to_string(),
-                "test_loop_no_action".to_string(),
-                "unified_test_loop_returned_none".to_string(),
-                None,
-            ),
-            Err(error) => (
-                provider::fallback_reply(&error),
-                "Safety fallback".to_string(),
-                "fallback".to_string(),
-                error,
-                None,
-            ),
-        },
-        Some(agent::types::TopLevelIntent::DesktopAction) => match agent_router::maybe_handle_control_message(
-            &app,
-            &provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
-            &vision_channel,
-            vision_api_key.clone(),
-            codex_command.clone(),
-            codex_home.clone(),
-            permission_level,
-            &allowed_actions,
-            trimmed,
-            true,
-        )
-        .await
-        {
-            Ok(Some(result)) => (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-            ),
-            Ok(None) => provider_response(
-                &provider_config,
-                api_key,
-                oauth_access_token,
-                codex_command,
-                codex_home,
-                permission_level,
-                &allowed_actions,
-                &history_window,
-            )
-            .await,
-            Err(error) => (
-                provider::fallback_reply(&error),
-                "Safety fallback".to_string(),
-                "fallback".to_string(),
-                error,
-                None,
-            ),
-        },
-        Some(agent::types::TopLevelIntent::DebugRequest) => match agent_router::handle_debug_request(
-            &app,
-            &vision_channel,
-            vision_api_key,
-            trimmed,
-        )
-        .await
-        {
-            Ok(result) => (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-            ),
-            Err(error) => (
-                provider::fallback_reply(&error),
-                "Safety fallback".to_string(),
-                "fallback".to_string(),
-                error,
-                None,
-            ),
-        },
-        Some(agent::types::TopLevelIntent::Chat) => {
-            provider_response(
-                &provider_config,
-                api_key,
-                oauth_access_token,
-                codex_command,
-                codex_home,
-                permission_level,
-                &allowed_actions,
-                &history_window,
-            )
-            .await
-        }
-        Some(agent::types::TopLevelIntent::MemoryRequest) => match agent_router::handle_memory_request(&app) {
-            Ok(result) => (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-            ),
-            Err(error) => (
-                provider::fallback_reply(&error),
-                "Safety fallback".to_string(),
-                "fallback".to_string(),
-                error,
-                None,
-            ),
-        },
-        Some(agent::types::TopLevelIntent::ConfirmationResponse) => match agent_router::handle_confirmation_response(&app, trimmed).await {
-            Ok(result) => (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-            ),
-            Err(error) => (
-                provider::fallback_reply(&error),
-                "Safety fallback".to_string(),
-                "fallback".to_string(),
-                error,
-                None,
-            ),
-        },
-        None => match agent_router::maybe_handle_test_message(
-            &app,
-            &provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
-            &vision_channel,
-            vision_api_key.clone(),
-            codex_command.clone(),
-            codex_home.clone(),
-            permission_level,
-            &allowed_actions,
-            trimmed,
-            false,
-        )
-        .await {
-            Ok(Some(result)) => (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-            ),
-            Ok(None) => match agent_router::maybe_handle_control_message(
-                &app,
-                &provider_config,
-                api_key.clone(),
-                oauth_access_token.clone(),
-                &vision_channel,
-                vision_api_key,
-                codex_command.clone(),
-                codex_home.clone(),
-                permission_level,
-                &allowed_actions,
-                trimmed,
-                false,
-            )
-            .await
-            {
-                Ok(Some(result)) => (
-                    result.reply_text,
-                    result.provider_label,
-                    result.outcome,
-                    result.detail,
-                    Some(result.meta),
-                ),
-                Ok(None) => {
-                    provider_response(
-                        &provider_config,
-                        api_key,
-                        oauth_access_token,
-                        codex_command,
-                        codex_home,
-                        permission_level,
-                        &allowed_actions,
-                        &history_window,
-                    )
-                    .await
+    {
+        Ok((raw_reply, label)) => {
+            // 解析 AI 响应，判断是文本回复还是工具调用
+            let response = agent_response::parse_response(&raw_reply);
+            match response {
+                Ok(parsed) => {
+                    if parsed.is_text_reply() {
+                        // 纯文本回复，直接返回
+                        (
+                            parsed.text_message().unwrap_or(&raw_reply).to_string(),
+                            label,
+                            "ok".to_string(),
+                            "unified_agent_text_reply".to_string(),
+                        )
+                    } else {
+                        // 工具调用，执行工具
+                        let executor = UnifiedAgentExecutor::new(&app, permission_level);
+                        let result = executor.execute(parsed).await;
+                        (
+                            result.reply,
+                            label,
+                            result.status,
+                            result.detail,
+                        )
+                    }
                 }
-                Err(error) => (
-                    provider::fallback_reply(&error),
-                    "Safety fallback".to_string(),
-                    "fallback".to_string(),
-                    error,
-                    None,
-                ),
-            },
-            Err(error) => (
-                provider::fallback_reply(&error),
-                "Safety fallback".to_string(),
-                "fallback".to_string(),
-                error,
-                None,
-            ),
-        },
+                Err(_) => {
+                    // 解析失败，作为纯文本返回
+                    (raw_reply, label, "ok".to_string(), "unified_agent_raw".to_string())
+                }
+            }
+        }
+        Err(error) => (
+            provider::fallback_reply(&error),
+            "Safety fallback".to_string(),
+            "fallback".to_string(),
+            error,
+        ),
     };
 
     let reply_message = ChatMessage::assistant(reply_text);
@@ -1152,7 +916,7 @@ async fn send_chat_message(
         reply: reply_message,
         provider_label,
         snapshot,
-        agent: agent_meta,
+        agent: None,
     })
 }
 

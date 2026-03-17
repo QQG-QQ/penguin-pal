@@ -7,6 +7,7 @@ use crate::{
     },
     codex_config::{CodexConfig, load_skills, load_rules},
     codex_runtime::apply_private_env,
+    unified_agent::prompt as unified_prompt,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::Client;
@@ -380,37 +381,27 @@ async fn call_codex_cli(
     let skills = load_skills(&codex_home_dir).unwrap_or_default();
     let skills_prompt = skills.build_skills_prompt();
 
-    // 构建系统提示
-    let base_system_prompt = guardrails::compose_system_prompt(provider, permission_level, allowed_actions);
-
-    // 添加人格提示
-    let personality_prompt = config.personality_prompt().unwrap_or_default();
+    // 使用统一 agent 提示（包含工具描述）
+    let personality_prompt = config.personality_prompt();
+    let unified_system = unified_prompt::build_unified_system_prompt(
+        permission_level,
+        allowed_actions,
+        personality_prompt.as_deref(),
+        if skills_prompt.is_empty() { None } else { Some(&skills_prompt) },
+    );
 
     // 添加推理强度提示
-    let reasoning_prompt = match config.model_reasoning_effort.as_str() {
-        "xhigh" => "请进行深度思考和详细分析。",
-        "high" => "请认真思考后给出详细回答。",
-        "low" => "请简洁快速地回答。",
-        _ => "", // medium 或默认
+    let reasoning_hint = match config.model_reasoning_effort.as_str() {
+        "xhigh" => "\n\n请进行深度思考和详细分析。",
+        "high" => "\n\n请认真思考后给出详细回答。",
+        "low" => "\n\n请简洁快速地回答。",
+        _ => "",
     };
-
-    // 组合完整系统提示
-    let mut system_parts = vec![base_system_prompt];
-    if !personality_prompt.is_empty() {
-        system_parts.push(personality_prompt);
-    }
-    if !reasoning_prompt.is_empty() {
-        system_parts.push(reasoning_prompt.to_string());
-    }
-    if !skills_prompt.is_empty() {
-        system_parts.push(skills_prompt);
-    }
-    let system_prompt = system_parts.join("\n\n");
 
     // 构建包含完整对话历史的 prompt
     let conversation = build_codex_conversation(history);
     let prompt = format!(
-        "{system_prompt}\n\n## 对话历史\n{conversation}\n\n请基于上述对话历史，直接输出对最后一条用户消息的答复。不要输出命令行日志。"
+        "{unified_system}{reasoning_hint}\n\n## 对话历史\n{conversation}\n\n请基于上述对话历史，直接输出对最后一条用户消息的答复。如果是普通对话，直接用自然语言回复；如果需要操作电脑，返回 JSON 格式的工具调用。"
     );
 
     let reply = async_runtime::spawn_blocking(move || run_codex_exec(&command, &home_root, &prompt))
