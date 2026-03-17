@@ -5,7 +5,7 @@ use crate::{
         AuthMode, ChatMessage, DesktopAction, ProviderConfig, ProviderKind, VisionChannelConfig,
         VisionChannelKind,
     },
-    codex_config::{CodexConfig, load_skills, load_rules},
+    codex_config::{CodexConfig, load_skills},
     codex_runtime::apply_private_env,
     unified_agent::prompt as unified_prompt,
 };

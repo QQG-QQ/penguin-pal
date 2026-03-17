@@ -3,7 +3,7 @@
 //! 负责执行 AI 决策的动作，包括工具调用和响应生成。
 
 use serde_json::Value;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::control::router as control_router;
 use crate::control::types::{ToolInvokeRequest, ToolInvokeResponse};
@@ -20,10 +20,12 @@ pub struct ExecutionResult {
     /// 详细信息
     pub detail: String,
     /// 是否有待确认的操作
+    #[allow(dead_code)]
     pub pending_confirmation: Option<PendingConfirmation>,
 }
 
 /// 待确认的操作
+#[allow(dead_code)]
 pub struct PendingConfirmation {
     pub id: String,
     pub tool: String,
@@ -33,6 +35,7 @@ pub struct PendingConfirmation {
 /// 统一 Agent 执行器
 pub struct UnifiedAgentExecutor<'a> {
     app: &'a AppHandle,
+    #[allow(dead_code)]
     permission_level: u8,
 }
 
@@ -52,11 +55,11 @@ impl<'a> UnifiedAgentExecutor<'a> {
             },
 
             AgentAction::ToolCall { tool, args, summary } => {
-                self.execute_tool(&tool, args, summary).await
+                self.execute_tool(&tool, args, summary)
             }
 
             AgentAction::ToolSequence { steps, task_summary } => {
-                self.execute_sequence(steps, task_summary).await
+                self.execute_sequence(steps, task_summary)
             }
 
             AgentAction::MemoryQuery { query_type } => {
@@ -64,13 +67,13 @@ impl<'a> UnifiedAgentExecutor<'a> {
             }
 
             AgentAction::ConfirmationRequired { tool, args, prompt } => {
-                self.create_confirmation(&tool, args, &prompt).await
+                self.create_confirmation(&tool, args, &prompt)
             }
         }
     }
 
     /// 执行单个工具调用
-    async fn execute_tool(
+    fn execute_tool(
         &self,
         tool: &str,
         args: Value,
@@ -81,14 +84,17 @@ impl<'a> UnifiedAgentExecutor<'a> {
             args,
         };
 
-        match control_router::invoke_tool(self.app, self.permission_level, request).await {
+        match control_router::invoke(self.app, request) {
             Ok(response) => self.handle_tool_response(tool, response, summary),
-            Err(error) => ExecutionResult {
-                reply: format!("工具执行失败：{}", error),
-                status: "error".to_string(),
-                detail: error.to_string(),
-                pending_confirmation: None,
-            },
+            Err(err) => {
+                let error_msg = err.to_string();
+                ExecutionResult {
+                    reply: format!("工具执行失败：{}", error_msg),
+                    status: "error".to_string(),
+                    detail: error_msg,
+                    pending_confirmation: None,
+                }
+            }
         }
     }
 
@@ -145,18 +151,16 @@ impl<'a> UnifiedAgentExecutor<'a> {
     }
 
     /// 执行工具序列
-    async fn execute_sequence(
+    fn execute_sequence(
         &self,
         steps: Vec<ToolStep>,
         task_summary: Option<String>,
     ) -> ExecutionResult {
         let mut results = Vec::new();
-        let mut last_error = None;
+        let mut last_error: Option<String> = None;
 
         for (i, step) in steps.iter().enumerate() {
-            let result = self
-                .execute_tool(&step.tool, step.args.clone(), step.summary.clone())
-                .await;
+            let result = self.execute_tool(&step.tool, step.args.clone(), step.summary.clone());
 
             // 如果需要确认，中断序列
             if result.pending_confirmation.is_some() {
@@ -172,7 +176,8 @@ impl<'a> UnifiedAgentExecutor<'a> {
             results.push(format!("步骤 {}: {}", i + 1, result.reply));
         }
 
-        let reply = if let Some(error) = last_error {
+        let has_error = last_error.is_some();
+        let reply = if let Some(ref error) = last_error {
             format!(
                 "任务执行中断：{}\n\n已完成步骤：\n{}",
                 error,
@@ -185,7 +190,7 @@ impl<'a> UnifiedAgentExecutor<'a> {
 
         ExecutionResult {
             reply,
-            status: if last_error.is_some() { "partial" } else { "ok" }.to_string(),
+            status: if has_error { "partial" } else { "ok" }.to_string(),
             detail: format!("steps={}", steps.len()),
             pending_confirmation: None,
         }
@@ -196,10 +201,11 @@ impl<'a> UnifiedAgentExecutor<'a> {
         let app_data = match self.app.path().app_data_dir() {
             Ok(path) => path,
             Err(e) => {
+                let error_msg = e.to_string();
                 return ExecutionResult {
-                    reply: format!("无法获取数据目录：{}", e),
+                    reply: format!("无法获取数据目录：{}", error_msg),
                     status: "error".to_string(),
-                    detail: e.to_string(),
+                    detail: error_msg,
                     pending_confirmation: None,
                 }
             }
@@ -222,14 +228,14 @@ impl<'a> UnifiedAgentExecutor<'a> {
     }
 
     /// 创建待确认的操作
-    async fn create_confirmation(
+    fn create_confirmation(
         &self,
         tool: &str,
         args: Value,
         prompt: &str,
     ) -> ExecutionResult {
         // 直接调用工具，让工具自己处理确认流程
-        self.execute_tool(tool, args, Some(prompt.to_string())).await
+        self.execute_tool(tool, args, Some(prompt.to_string()))
     }
 }
 
@@ -261,19 +267,19 @@ fn format_tool_result(value: &Value) -> String {
 /// 格式化记忆系统状态
 fn format_memory_status(service: &MemoryService) -> String {
     let profile = service.load_profile().unwrap_or_default();
-    let episodic = service.load_episodic().unwrap_or_default();
+    let episodic = service.store().load_episodic().unwrap_or_default();
 
     format!(
         r#"## 记忆系统状态
 
 ### Profile Memory (用户偏好)
 - 常用应用：{} 个
-- 常用路径：{} 个
+- 工作目录：{} 个
 
 ### Episodic Memory (任务历史)
 - 历史条目：{} 条"#,
-        profile.frequent_apps.len(),
-        profile.frequent_paths.len(),
+        profile.preferred_apps.len(),
+        profile.common_workdirs.len(),
         episodic.entries.len()
     )
 }
@@ -281,13 +287,13 @@ fn format_memory_status(service: &MemoryService) -> String {
 fn format_profile_memory(service: &MemoryService) -> String {
     let profile = service.load_profile().unwrap_or_default();
     format!(
-        "用户偏好：\n- 常用应用：{:?}\n- 常用路径：{:?}",
-        profile.frequent_apps, profile.frequent_paths
+        "用户偏好：\n- 常用应用：{:?}\n- 工作目录：{:?}",
+        profile.preferred_apps, profile.common_workdirs
     )
 }
 
 fn format_episodic_memory(service: &MemoryService) -> String {
-    let episodic = service.load_episodic().unwrap_or_default();
+    let episodic = service.store().load_episodic().unwrap_or_default();
     if episodic.entries.is_empty() {
         return "暂无任务历史记录。".to_string();
     }
@@ -300,5 +306,3 @@ fn format_episodic_memory(service: &MemoryService) -> String {
         .collect();
     format!("最近任务：\n{}", recent.join("\n"))
 }
-
-use tauri::Manager;
