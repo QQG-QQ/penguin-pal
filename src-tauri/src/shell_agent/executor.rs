@@ -8,6 +8,8 @@
 //! 2. **规则层**: RuleEngine 应用行为规则，调整 AI 行为
 //! 3. **权限层**: PermissionChecker 验证操作权限，AI 不能自主修改权限
 
+#![allow(dead_code)]
+
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -126,7 +128,7 @@ impl ShellAgentExecutor {
     }
 
     /// 写回任务结果到记忆系统
-    fn write_back_result(&self, app: &AppHandle, user_task: &str, success: bool, message: &str) {
+    fn write_back_result(&self, app: &AppHandle, user_task: &str, success: bool, _message: &str) {
         let app_data_dir = match app.path().app_data_dir() {
             Ok(dir) => dir,
             Err(_) => return,

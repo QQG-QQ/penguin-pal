@@ -2,6 +2,8 @@
 //!
 //! 支持 6 种记忆类型和 18 字段标准结构
 
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

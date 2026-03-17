@@ -3,6 +3,8 @@
 //! 这些策略是硬编码的，不能被 AI 或用户通过 memory 系统修改。
 //! 任何 memory 建议都不能覆盖这些核心策略。
 
+#![allow(dead_code)]
+
 /// 核心策略版本
 pub const CORE_POLICY_VERSION: &str = "1.0.0";
 

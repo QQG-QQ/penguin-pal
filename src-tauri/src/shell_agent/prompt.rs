@@ -3,6 +3,8 @@
 //! 只提供最基本的信息，让 AI 完全自主决策
 //! 同时注入从记忆系统检索到的相关经验
 
+#![allow(dead_code)]
+
 /// 构建系统提示
 pub fn build_system_prompt() -> String {
     r#"你是运行在用户 Windows 电脑上的桌面助手。你有完整的 shell 权限，可以执行任何 cmd/powershell 命令。

@@ -3,6 +3,8 @@
 //! 使用简单的 JSON 文件存储，不引入额外依赖。
 //! 存储路径: $APP_DATA/penguin-pal/memory/
 
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;

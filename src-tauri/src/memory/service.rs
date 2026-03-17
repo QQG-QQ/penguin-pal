@@ -2,6 +2,8 @@
 //!
 //! 提供高层 API，封装 store、retrieval、write_back 的交互。
 
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
