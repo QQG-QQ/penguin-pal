@@ -45,7 +45,7 @@ impl<'a> UnifiedAgentExecutor<'a> {
     }
 
     /// 执行 AI 响应
-    pub async fn execute(&self, response: AgentResponse) -> ExecutionResult {
+    pub fn execute(&self, response: AgentResponse) -> ExecutionResult {
         match response.action {
             AgentAction::TextReply { message } => ExecutionResult {
                 reply: message,

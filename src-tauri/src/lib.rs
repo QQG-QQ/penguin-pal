@@ -849,7 +849,7 @@ async fn send_chat_message(
                     } else {
                         // 工具调用，执行工具
                         let executor = UnifiedAgentExecutor::new(&app, permission_level);
-                        let result = executor.execute(parsed).await;
+                        let result = executor.execute(parsed);
                         (
                             result.reply,
                             label,
