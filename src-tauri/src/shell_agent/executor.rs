@@ -10,16 +10,17 @@
 
 #![allow(dead_code)]
 
+use std::path::Path;
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use crate::app_state::now_millis;
 use crate::memory::{MemoryService, MemoryQuery, WriteBackRequest, RuntimeContextDigest, KeyEntity};
-use crate::permission::{PermissionChecker, PermissionScope, GrantSource, PermissionCheckResult};
+use crate::permission::{PermissionChecker, PermissionScope, GrantSource, PermissionCheckResult, PermissionStore};
 use crate::rule_engine::{RuleEngine, RuleContext, RuleApplicationResult};
 use super::risk::{is_high_risk_command, is_forbidden_command, get_risk_description};
-use super::prompt::{build_system_prompt, build_context_with_memory, CommandExecution};
+use super::prompt::{build_system_prompt_with_permissions, build_context_with_memory, CommandExecution};
 
 /// Agent 循环结果
 #[derive(Debug, Clone)]
@@ -76,6 +77,37 @@ impl ShellAgentExecutor {
         }
     }
 
+    /// 从应用数据目录加载权限状态创建执行器
+    pub fn with_app_data(app_data_dir: &Path) -> Self {
+        let permission_store_path = app_data_dir.join("permissions");
+        let permission_store = PermissionStore::new(&permission_store_path);
+        let mut permission_checker = PermissionChecker::new();
+
+        // 从持久化存储加载权限
+        if let Ok(state) = permission_store.load() {
+            for permission in state.permissions {
+                if permission.is_valid() {
+                    permission_checker.restore_permission(permission);
+                }
+            }
+            for policy in state.policies {
+                permission_checker.add_policy(policy);
+            }
+        }
+
+        let rule_store_path = app_data_dir.join("rules");
+        let mut rule_engine = RuleEngine::new(&rule_store_path);
+        let _ = rule_engine.load();
+
+        Self {
+            max_steps: 100,
+            history: Vec::new(),
+            current_step: 0,
+            permission_checker,
+            rule_engine,
+        }
+    }
+
     /// 检查命令权限
     fn check_command_permission(&mut self, cmd: &str) -> PermissionCheckResult {
         // 根据命令类型构建权限 ID
@@ -94,6 +126,38 @@ impl ShellAgentExecutor {
         };
 
         self.permission_checker.check(permission_id, "shell_agent")
+    }
+
+    /// 获取当前权限摘要，用于 AI 回复
+    pub fn get_permission_summary(&self) -> String {
+        let permissions = [
+            ("shell:execute", "基本执行"),
+            ("shell:modify", "文件修改"),
+            ("shell:delete", "文件删除"),
+            ("shell:network", "网络访问"),
+            ("shell:system", "系统操作"),
+            ("shell:registry", "注册表"),
+        ];
+
+        let mut enabled = Vec::new();
+        let mut disabled = Vec::new();
+
+        for (id, label) in permissions {
+            match self.permission_checker.check(id, "shell_agent") {
+                PermissionCheckResult::Allowed(_) => enabled.push(label),
+                _ => disabled.push(label),
+            }
+        }
+
+        if enabled.is_empty() {
+            "Shell Agent 已禁用，无任何 shell 权限。".to_string()
+        } else {
+            format!(
+                "已启用: {}。未启用: {}。",
+                enabled.join("、"),
+                if disabled.is_empty() { "无".to_string() } else { disabled.join("、") }
+            )
+        }
     }
 
     /// 应用规则引擎
@@ -200,7 +264,8 @@ impl ShellAgentExecutor {
         F: Fn(String, String) -> Fut,
         Fut: std::future::Future<Output = Result<String, String>>,
     {
-        let system_prompt = build_system_prompt();
+        let permission_summary = self.get_permission_summary();
+        let system_prompt = build_system_prompt_with_permissions(&permission_summary);
 
         // 1. 检索相关记忆
         let memory_context = self.retrieve_memory_context(app, user_task);

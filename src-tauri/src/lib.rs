@@ -1044,7 +1044,11 @@ async fn send_chat_message(
     };
 
     // Shell Agent 自主循环：AI 完全自主决定行动
-    let mut shell_executor = ShellAgentExecutor::new();
+    let mut shell_executor = if let Ok(app_data) = app.path().app_data_dir() {
+        ShellAgentExecutor::with_app_data(&app_data)
+    } else {
+        ShellAgentExecutor::new()
+    };
 
     // 创建 AI 调用闭包
     let provider_config_clone = provider_config.clone();
