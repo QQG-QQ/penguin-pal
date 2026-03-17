@@ -10,5 +10,8 @@ pub mod executor;
 pub mod response;
 pub mod prompt;
 
+// 保留模块但不再导出，已被 shell_agent 替代
+#[allow(unused_imports)]
 pub use executor::UnifiedAgentExecutor;
+#[allow(unused_imports)]
 pub use response::parse_response as response;

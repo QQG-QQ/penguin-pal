@@ -160,6 +160,7 @@ impl ShellAgentExecutor {
 
                     // 检查是否需要确认
                     if is_high_risk_command(&cmd) {
+                        let risk_desc = get_risk_description(&cmd);
                         return AgentLoopResult {
                             success: false,
                             message: format!("命令需要确认：{}", cmd),
@@ -168,7 +169,7 @@ impl ShellAgentExecutor {
                             pending_confirmation: Some(PendingShellConfirmation {
                                 id: format!("shell-{}", now_millis()),
                                 command: cmd,
-                                risk_description: get_risk_description(&cmd),
+                                risk_description: risk_desc,
                                 created_at: now_millis(),
                             }),
                         };

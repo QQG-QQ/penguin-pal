@@ -9,5 +9,4 @@ pub mod executor;
 pub mod risk;
 pub mod prompt;
 
-pub use executor::{ShellAgentExecutor, AgentLoopResult};
-pub use risk::is_high_risk_command;
+pub use executor::ShellAgentExecutor;
