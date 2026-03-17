@@ -12,7 +12,6 @@ mod security;
 mod shell_agent;
 mod testing;
 mod tray;
-mod unified_agent;
 mod window;
 
 use serde::{Deserialize, Serialize};

@@ -5,9 +5,8 @@ use crate::{
         AuthMode, ChatMessage, DesktopAction, ProviderConfig, ProviderKind, VisionChannelConfig,
         VisionChannelKind,
     },
-    codex_config::{CodexConfig, load_skills},
+    codex_config::CodexConfig,
     codex_runtime::apply_private_env,
-    unified_agent::prompt as unified_prompt,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::Client;
@@ -356,8 +355,8 @@ async fn call_codex_cli(
     _provider: &ProviderConfig,
     codex_command: Option<String>,
     codex_home: Option<String>,
-    permission_level: u8,
-    allowed_actions: &[DesktopAction],
+    _permission_level: u8,
+    _allowed_actions: &[DesktopAction],
     history: &[ChatMessage],
 ) -> Result<(String, String), String> {
     // 检查是否有用户消息
@@ -377,28 +376,18 @@ async fn call_codex_cli(
     let codex_home_dir = home_root.join(".codex");
     let config = CodexConfig::load_from_home(&codex_home_dir).unwrap_or_default();
 
-    // 加载技能
-    let skills = load_skills(&codex_home_dir).unwrap_or_default();
-    let skills_prompt = skills.build_skills_prompt();
-
     // 检查 history 中是否有 system 消息（Shell Agent 模式）
     let system_from_history = history
         .iter()
         .find(|m| m.role == "system")
         .map(|m| m.content.clone());
 
-    // 如果有 system 消息，使用它；否则使用统一 agent 提示
-    let unified_system = if let Some(sys_prompt) = system_from_history {
-        sys_prompt
-    } else {
-        let personality_prompt = config.personality_prompt();
-        unified_prompt::build_unified_system_prompt(
-            permission_level,
-            allowed_actions,
-            personality_prompt.as_deref(),
-            if skills_prompt.is_empty() { None } else { Some(&skills_prompt) },
-        )
-    };
+    let is_shell_agent_mode = system_from_history.is_some();
+
+    // 如果有 system 消息，使用它；否则使用简单的默认提示
+    let unified_system = system_from_history.unwrap_or_else(|| {
+        "你是一个智能助手，可以回答问题和帮助用户完成任务。".to_string()
+    });
 
     // 添加推理强度提示
     let reasoning_hint = match config.model_reasoning_effort.as_str() {
@@ -412,10 +401,10 @@ async fn call_codex_cli(
     let conversation = build_codex_conversation(history);
 
     // Shell Agent 模式下使用简化提示
-    let final_instruction = if system_from_history.is_some() {
+    let final_instruction = if is_shell_agent_mode {
         "请根据上述内容决定下一步操作。"
     } else {
-        "请基于上述对话历史，直接输出对最后一条用户消息的答复。如果是普通对话，直接用自然语言回复；如果需要操作电脑，返回 JSON 格式的工具调用。"
+        "请基于上述对话历史，直接输出对最后一条用户消息的答复。"
     };
 
     let prompt = format!(
