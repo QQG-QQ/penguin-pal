@@ -120,6 +120,16 @@ const defaultVisionChannel = (): VisionChannelConfig => ({
   lastError: null
 })
 
+const defaultShellPermissions = () => ({
+  enabled: false,
+  allowExecute: false,
+  allowFileModify: false,
+  allowFileDelete: false,
+  allowNetwork: false,
+  allowSystem: false,
+  durationHours: 1
+})
+
 const fallbackVisionStatus = (
   visionChannel: VisionChannelConfig,
   apiKey?: string | null
@@ -274,7 +284,8 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
       }
     ]
   },
-  aiConstraints: defaultConstraintsProfile()
+  aiConstraints: defaultConstraintsProfile(),
+  shellPermissions: defaultShellPermissions()
 })
 
 let fallbackSnapshot = buildFallbackSnapshot()

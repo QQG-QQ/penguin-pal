@@ -432,6 +432,69 @@ const formatHistoryTime = (timestamp: number) =>
         </div>
       </section>
 
+      <section class="oauth-shell full-row">
+        <div class="oauth-header">
+          <div>
+            <strong>Shell Agent 权限</strong>
+            <p>控制 AI 通过 Shell 命令操作电脑的权限。启用后 AI 可以执行命令行操作。</p>
+          </div>
+          <span class="oauth-status">{{ localDraft.shellPermissions.enabled ? '已启用' : '已禁用' }}</span>
+        </div>
+
+        <div class="toggle-grid full-row" style="margin-top: 14px;">
+          <label class="toggle">
+            <input v-model="localDraft.shellPermissions.enabled" type="checkbox" />
+            启用 Shell Agent
+          </label>
+        </div>
+
+        <div v-if="localDraft.shellPermissions.enabled" class="oauth-grid">
+          <label class="toggle">
+            <input v-model="localDraft.shellPermissions.allowExecute" type="checkbox" />
+            基本执行权限
+          </label>
+
+          <label class="toggle">
+            <input v-model="localDraft.shellPermissions.allowFileModify" type="checkbox" />
+            文件修改权限
+          </label>
+
+          <label class="toggle">
+            <input v-model="localDraft.shellPermissions.allowFileDelete" type="checkbox" />
+            文件删除权限
+          </label>
+
+          <label class="toggle">
+            <input v-model="localDraft.shellPermissions.allowNetwork" type="checkbox" />
+            网络访问权限
+          </label>
+
+          <label class="toggle">
+            <input v-model="localDraft.shellPermissions.allowSystem" type="checkbox" />
+            系统操作权限
+          </label>
+
+          <label class="field">
+            <span>权限有效期（小时，0=永久）</span>
+            <input
+              v-model.number="localDraft.shellPermissions.durationHours"
+              type="number"
+              min="0"
+              max="720"
+            />
+          </label>
+        </div>
+
+        <div class="oauth-meta full-row">
+          <p v-if="!localDraft.shellPermissions.enabled">
+            Shell Agent 已禁用。AI 无法执行命令行操作。
+          </p>
+          <p v-else>
+            已启用的权限将在保存后生效。高风险操作仍需用户确认。
+          </p>
+        </div>
+      </section>
+
       <label class="field full-row">
         <span>权限等级</span>
         <input

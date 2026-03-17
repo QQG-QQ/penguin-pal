@@ -115,6 +115,16 @@ export interface VisionChannelConfig {
   lastError: string | null
 }
 
+export interface ShellPermissionSettings {
+  enabled: boolean
+  allowExecute: boolean
+  allowFileModify: boolean
+  allowFileDelete: boolean
+  allowNetwork: boolean
+  allowSystem: boolean
+  durationHours: number
+}
+
 export interface AssistantSnapshot {
   mode: PetMode
   messages: ChatMessage[]
@@ -126,6 +136,7 @@ export interface AssistantSnapshot {
   auditTrail: AuditEntry[]
   audioProfile: AudioProfile
   aiConstraints: AiConstraintProfile
+  shellPermissions: ShellPermissionSettings
 }
 
 export interface ProviderConfigInput {
@@ -147,6 +158,7 @@ export interface ProviderConfigInput {
   clearApiKey?: boolean
   clearOAuthToken?: boolean
   visionChannel: VisionChannelConfigInput
+  shellPermissions: ShellPermissionSettings
 }
 
 export interface VisionChannelConfigInput {

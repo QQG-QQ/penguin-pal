@@ -185,7 +185,16 @@ const emptySnapshot = (): AssistantSnapshot => ({
     outputMode: 'speech-synthesis',
     stages: []
   },
-  aiConstraints: emptyConstraints()
+  aiConstraints: emptyConstraints(),
+  shellPermissions: {
+    enabled: false,
+    allowExecute: false,
+    allowFileModify: false,
+    allowFileDelete: false,
+    allowNetwork: false,
+    allowSystem: false,
+    durationHours: 1
+  }
 })
 
 const emptyCodexStatus = (): CodexCliStatus => ({
@@ -228,6 +237,15 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
     maxImageHeight: state.visionChannel.maxImageHeight,
     apiKey: '',
     clearApiKey: false
+  },
+  shellPermissions: state.shellPermissions ?? {
+    enabled: false,
+    allowExecute: false,
+    allowFileModify: false,
+    allowFileDelete: false,
+    allowNetwork: false,
+    allowSystem: false,
+    durationHours: 1
   }
 })
 
