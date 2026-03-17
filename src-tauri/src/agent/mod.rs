@@ -1,3 +1,9 @@
+//! Agent Module - 桌面控制代理
+//!
+//! 保留用于 control service API 和 vision 缓存管理。
+//! 主聊天路径已迁移到 shell_agent 模块。
+#![allow(unused)]
+
 pub mod executor;
 pub mod intent;
 pub mod intent_classifier;

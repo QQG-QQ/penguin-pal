@@ -5,6 +5,7 @@
 //! - sessions 会话管理
 //! - skills 技能系统
 //! - rules 规则系统
+#![allow(unused)]
 
 pub mod config;
 pub mod rules;

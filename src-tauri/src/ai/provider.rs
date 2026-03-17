@@ -506,7 +506,12 @@ async fn call_openai_like(
 ) -> Result<(String, String), String> {
     let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let client = Client::new();
-    let system_prompt = guardrails::compose_system_prompt(provider, permission_level, allowed_actions);
+    // Shell Agent 模式：使用 history 中的 system 消息
+    let system_prompt = history
+        .iter()
+        .find(|m| m.role == "system")
+        .map(|m| m.content.clone())
+        .unwrap_or_else(|| guardrails::compose_system_prompt(provider, permission_level, allowed_actions));
     let payload = json!({
         "model": provider.model,
         "temperature": 0.4,
@@ -627,7 +632,12 @@ async fn call_anthropic(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
     let client = Client::new();
-    let system_prompt = guardrails::compose_system_prompt(provider, permission_level, allowed_actions);
+    // Shell Agent 模式：使用 history 中的 system 消息
+    let system_prompt = history
+        .iter()
+        .find(|m| m.role == "system")
+        .map(|m| m.content.clone())
+        .unwrap_or_else(|| guardrails::compose_system_prompt(provider, permission_level, allowed_actions));
     let payload = json!({
         "model": provider.model,
         "system": system_prompt,

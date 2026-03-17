@@ -1,3 +1,8 @@
+//! Control Module - 桌面控制服务
+//!
+//! 提供 HTTP API 和桌面控制工具。
+#![allow(unused)]
+
 pub mod errors;
 pub mod files;
 pub mod http;
