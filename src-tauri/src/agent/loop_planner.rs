@@ -26,6 +26,7 @@ pub async fn plan_next_action(
     user_input: &str,
     task: &AgentTaskRun,
     context: &RuntimeContext,
+    conversation_context: Option<&str>,
     memory_context: Option<&str>,
 ) -> Result<AgentLoopDecision, String> {
     let allowed_tools = registry::tool_definitions()
@@ -38,9 +39,14 @@ pub async fn plan_next_action(
         .filter(|s| !s.is_empty())
         .map(|s| format!("\n\n{}\n", s))
         .unwrap_or_default();
+    let conversation_section = conversation_context
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("最近对话上下文：\n{s}\n\n"))
+        .unwrap_or_default();
 
     let planner_input = format!(
         "用户原始请求：\n{}\n\n\
+{}\
 当前目标：\n{}\n\n\
 当前任务状态：\n\
 - intent: {:?}\n\
@@ -51,6 +57,7 @@ pub async fn plan_next_action(
 - lastToolResult: {}\n\n\
 当前 runtime context：\n{}{}\n",
         user_input.trim(),
+        conversation_section,
         task.goal.trim(),
         task.intent,
         task.mode,

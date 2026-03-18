@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    app_state::{now_millis, DesktopAction, ProviderConfig, RuntimeState, VisionChannelConfig},
+    app_state::{load, now_millis, ChatMessage, DesktopAction, ProviderConfig, RuntimeState, VisionChannelConfig},
     control::registry as control_registry,
     control::{router as control_router, types::ToolInvokeResponse},
     history,
@@ -32,6 +32,29 @@ const AI_FIRST_STEP_SAFETY_CAP: usize = 50;
 const AI_FIRST_RETRY_BUDGET: usize = 3;
 const TEST_LOOP_STEP_BUDGET: usize = 12;
 const TEST_LOOP_RETRY_BUDGET: usize = 1;
+
+fn render_recent_conversation_context(messages: &[ChatMessage]) -> Option<String> {
+    let rendered = messages
+        .iter()
+        .filter(|message| message.role == "user" || message.role == "assistant")
+        .map(|message| {
+            let role = if message.role == "user" { "用户" } else { "助手" };
+            format!("{role}：{}", message.content.trim())
+        })
+        .collect::<Vec<_>>();
+
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(format!("## 最近聊天上下文\n{}\n", rendered.join("\n\n")))
+    }
+}
+
+fn load_recent_conversation_context(app: &AppHandle) -> Option<String> {
+    let runtime = load(app).ok()?;
+    let start = runtime.messages.len().saturating_sub(12);
+    render_recent_conversation_context(&runtime.messages[start..])
+}
 
 /// 构建任务的 memory context (用于 prompt 注入)
 fn build_memory_context_for_task(
@@ -146,6 +169,7 @@ pub async fn maybe_handle_control_message(
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
+    conversation_context: Option<&str>,
     force_route: bool,
 ) -> Result<Option<AgentHandleResult>, String> {
     let trimmed = user_input.trim();
@@ -185,6 +209,7 @@ pub async fn maybe_handle_control_message(
         permission_level,
         allowed_actions,
         trimmed,
+        conversation_context,
         &mut task,
     )
     .await?;
@@ -203,6 +228,7 @@ pub async fn maybe_handle_test_message(
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
+    conversation_context: Option<&str>,
     force_route: bool,
 ) -> Result<Option<AgentHandleResult>, String> {
     let trimmed = user_input.trim();
@@ -239,6 +265,7 @@ pub async fn maybe_handle_test_message(
         permission_level,
         allowed_actions,
         trimmed,
+        conversation_context,
         &mut task,
     )
     .await?;
@@ -481,6 +508,7 @@ async fn continue_desktop_loop(
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
+    conversation_context: Option<&str>,
     task: &mut AgentTaskRun,
 ) -> Result<AgentHandleResult, String> {
     // 初始化 memory service 并构建 memory context
@@ -510,6 +538,7 @@ async fn continue_desktop_loop(
             user_input,
             task,
             &context,
+            conversation_context,
             memory_context.as_deref(),
         )
         .await
@@ -711,6 +740,7 @@ async fn continue_test_loop(
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
+    conversation_context: Option<&str>,
     task: &mut AgentTaskRun,
 ) -> Result<AgentHandleResult, String> {
     loop {
@@ -751,6 +781,7 @@ async fn continue_test_loop(
             allowed_actions,
             user_input,
             &context,
+            conversation_context,
         )
         .await
         {
@@ -1601,6 +1632,7 @@ async fn continue_loop_for_task(
 ) -> Result<AgentHandleResult, String> {
     match task.intent {
         TopLevelIntent::DesktopAction => {
+            let conversation_context = load_recent_conversation_context(app);
             continue_desktop_loop(
                 app,
                 provider_config,
@@ -1613,11 +1645,13 @@ async fn continue_loop_for_task(
                 permission_level,
                 allowed_actions,
                 user_input,
+                conversation_context.as_deref(),
                 task,
             )
             .await
         }
         TopLevelIntent::TestRequest => {
+            let conversation_context = load_recent_conversation_context(app);
             continue_test_loop(
                 app,
                 provider_config,
@@ -1630,6 +1664,7 @@ async fn continue_loop_for_task(
                 permission_level,
                 allowed_actions,
                 user_input,
+                conversation_context.as_deref(),
                 task,
             )
             .await

@@ -26,17 +26,24 @@ pub async fn plan_next_test_action(
     allowed_actions: &[DesktopAction],
     user_input: &str,
     context: &RuntimeContext,
+    conversation_context: Option<&str>,
 ) -> Result<AgentLoopDecision, String> {
     let allowed_tools = registry::tool_definitions()
         .into_iter()
         .filter(|tool| is_agent_tool_allowed(&tool.name))
         .collect::<Vec<_>>();
     let prompt = test_loop_prompt::build_test_next_action_prompt(&allowed_tools);
+    let conversation_section = conversation_context
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("最近对话上下文：\n{s}\n\n"))
+        .unwrap_or_default();
     let planner_input = format!(
         "用户原始请求：\n{}\n\n\
+{}\
 当前测试目标：\n{}\n\n\
 当前 runtime context：\n{}\n",
         user_input.trim(),
+        conversation_section,
         context.normalized_goal,
         render_runtime_context_for_prompt(context),
     );

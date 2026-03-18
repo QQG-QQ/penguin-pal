@@ -32,7 +32,11 @@ pub fn request_memory_maintenance_shutdown() {
 }
 
 use crate::{
-    agent::{router as agent_router, AgentTaskState},
+    agent::{
+        router as agent_router,
+        types::{AgentMessageMeta, AgentRoute, TopLevelIntent},
+        AgentTaskState,
+    },
     ai::{guardrails, memory as ai_memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
@@ -1281,6 +1285,46 @@ async fn cancel_pending_shell_command(
     })
 }
 
+fn build_chat_history_for_provider(
+    provider_config: &app_state::ProviderConfig,
+    permission_level: u8,
+    allowed_actions: &[app_state::DesktopAction],
+    messages: &[ChatMessage],
+) -> Vec<ChatMessage> {
+    let mut history = Vec::with_capacity(messages.len() + 1);
+    history.push(ChatMessage::new(
+        "system",
+        guardrails::compose_system_prompt(provider_config, permission_level, allowed_actions),
+    ));
+    history.extend(
+        messages
+            .iter()
+            .filter(|message| message.role != "system")
+            .cloned(),
+    );
+    history
+}
+
+fn render_recent_conversation_context(messages: &[ChatMessage]) -> Option<String> {
+    let rendered = messages
+        .iter()
+        .filter(|message| message.role == "user" || message.role == "assistant")
+        .map(|message| {
+            let role = if message.role == "user" { "用户" } else { "助手" };
+            format!("{role}：{}", message.content.trim())
+        })
+        .collect::<Vec<_>>();
+
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "## 最近聊天上下文\n{}\n",
+            rendered.join("\n\n")
+        ))
+    }
+}
+
 #[tauri::command]
 async fn send_chat_message(
     app: AppHandle,
@@ -1320,9 +1364,12 @@ async fn send_chat_message(
         provider_config,
         api_key,
         oauth_access_token,
+        vision_channel,
+        vision_api_key,
         codex_command,
         codex_home,
-        _history_window,  // Shell Agent 自己管理上下文
+        full_history,
+        recent_conversation_context,
         permission_level,
         allowed_actions,
     ) = {
@@ -1338,6 +1385,8 @@ async fn send_chat_message(
             runtime.provider.clone(),
             runtime.api_key.clone(),
             runtime.oauth_access_token.clone(),
+            runtime.vision_channel.clone(),
+            runtime.vision_api_key.clone(),
             codex_runtime
                 .as_ref()
                 .and_then(|item| item.command.as_ref())
@@ -1345,112 +1394,174 @@ async fn send_chat_message(
             codex_runtime
                 .as_ref()
                 .map(|item| item.home_root.to_string_lossy().to_string()),
-            ai_memory::context_window(&runtime.messages),
+            runtime.messages.clone(),
+            render_recent_conversation_context(&ai_memory::context_window(&runtime.messages)),
             runtime.permission_level,
             allowed_actions,
         )
     };
 
-    // Shell Agent 自主循环：AI 完全自主决定行动
-    let mut shell_executor = if let Ok(app_data) = app.path().app_data_dir() {
-        ShellAgentExecutor::with_app_data(&app_data)
+    let intent = if matches!(provider_config.kind, ProviderKind::Mock) {
+        TopLevelIntent::Chat
     } else {
-        ShellAgentExecutor::new()
-    };
-
-    // 创建 AI 调用闭包
-    let provider_config_clone = provider_config.clone();
-    let api_key_clone = api_key.clone();
-    let oauth_token_clone = oauth_access_token.clone();
-    let codex_cmd_clone = codex_command.clone();
-    let codex_home_clone = codex_home.clone();
-    let allowed_actions_clone = allowed_actions.clone();
-
-    let ai_caller = |system_prompt: String, context: String| {
-        let provider = provider_config_clone.clone();
-        let key = api_key_clone.clone();
-        let token = oauth_token_clone.clone();
-        let cmd = codex_cmd_clone.clone();
-        let home = codex_home_clone.clone();
-        let actions = allowed_actions_clone.clone();
-        let perm = permission_level;
-
-        async move {
-            // 构建包含 shell agent 上下文的历史
-            let messages = vec![
-                ChatMessage::new("system", system_prompt),
-                ChatMessage::user(context),
-            ];
-
-            provider::respond(
-                &provider,
-                key,
-                token,
-                cmd,
-                home,
-                perm,
-                &actions,
-                &messages,
-            )
-            .await
-            .map(|(reply, _label)| reply)
-        }
-    };
-
-    let result = shell_executor.run(&app, trimmed, ai_caller).await;
-
-    // 记录是否需要退出应用
-    let should_exit = result.request_exit;
-
-    // 提取待确认信息（如果有）并存储到 RuntimeState
-    let pending_shell_confirmation = if let Some(p) = &result.pending_confirmation {
-        // 存储待确认命令到 RuntimeState
+        match agent::intent_classifier::classify_user_intent(
+            &provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            permission_level,
+            &allowed_actions,
+            trimmed,
+        )
+        .await
         {
-            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
-            runtime.pending_shell_command = Some(PendingShellCommand {
-                id: p.id.clone(),
-                command: p.command.clone(),
-                risk_description: p.risk_description.clone(),
-                created_at: p.created_at,
-            });
+            Ok(decision) => decision.route,
+            Err(_) => TopLevelIntent::Chat,
         }
-        Some(PendingShellConfirmationInfo {
-            id: p.id.clone(),
-            command: p.command.clone(),
-            risk_description: p.risk_description.clone(),
-            created_at: p.created_at,
-        })
-    } else {
-        None
     };
 
-    let (reply_text, provider_label, outcome, detail) = if result.pending_confirmation.is_some() {
-        // 需要用户确认
-        let pending = result.pending_confirmation.as_ref().unwrap();
-        (
-            format!(
-                "需要确认执行以下命令：\n\n```\n{}\n```\n\n{}",
-                pending.command,
-                pending.risk_description
-            ),
-            "Shell Agent".to_string(),
-            "pending_confirmation".to_string(),
-            format!("pending_id={}", pending.id),
-        )
-    } else if result.success {
-        (
-            result.message,
-            "Shell Agent".to_string(),
-            "ok".to_string(),
-            format!("steps={}", result.steps_executed),
-        )
-    } else {
-        (
-            result.message,
-            "Shell Agent".to_string(),
-            "error".to_string(),
-            format!("steps={}", result.steps_executed),
-        )
+    let (
+        reply_text,
+        provider_label,
+        outcome,
+        detail,
+        agent_meta,
+        pending_shell_confirmation,
+        should_exit,
+    ) = match intent {
+        TopLevelIntent::Chat => {
+            let history = build_chat_history_for_provider(
+                &provider_config,
+                permission_level,
+                &allowed_actions,
+                &full_history,
+            );
+            let (reply, label) = provider::respond(
+                &provider_config,
+                api_key.clone(),
+                oauth_access_token.clone(),
+                codex_command.clone(),
+                codex_home.clone(),
+                permission_level,
+                &allowed_actions,
+                &history,
+            )
+            .await?;
+            (
+                reply,
+                label,
+                "chat_ok".to_string(),
+                "top_level_intent=chat".to_string(),
+                Some(AgentMessageMeta {
+                    route: AgentRoute::Chat,
+                    planned_tools: vec![],
+                    pending_request: None,
+                    task: None,
+                    summary: None,
+                }),
+                None,
+                false,
+            )
+        }
+        TopLevelIntent::DesktopAction => {
+            let result = agent_router::maybe_handle_control_message(
+                &app,
+                &provider_config,
+                api_key.clone(),
+                oauth_access_token.clone(),
+                &vision_channel,
+                vision_api_key.clone(),
+                codex_command.clone(),
+                codex_home.clone(),
+                permission_level,
+                &allowed_actions,
+                trimmed,
+                recent_conversation_context.as_deref(),
+                true,
+            )
+            .await?
+            .ok_or_else(|| "桌面 agent 没有返回结果。".to_string())?;
+            (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+                None,
+                false,
+            )
+        }
+        TopLevelIntent::TestRequest => {
+            let result = agent_router::maybe_handle_test_message(
+                &app,
+                &provider_config,
+                api_key.clone(),
+                oauth_access_token.clone(),
+                &vision_channel,
+                vision_api_key.clone(),
+                codex_command.clone(),
+                codex_home.clone(),
+                permission_level,
+                &allowed_actions,
+                trimmed,
+                recent_conversation_context.as_deref(),
+                true,
+            )
+            .await?
+            .ok_or_else(|| "测试 agent 没有返回结果。".to_string())?;
+            (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+                None,
+                false,
+            )
+        }
+        TopLevelIntent::DebugRequest => {
+            let result = agent_router::handle_debug_request(
+                &app,
+                &vision_channel,
+                vision_api_key.clone(),
+                trimmed,
+            )
+            .await?;
+            (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+                None,
+                false,
+            )
+        }
+        TopLevelIntent::MemoryRequest => {
+            let result = agent_router::handle_memory_request(&app)?;
+            (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+                None,
+                false,
+            )
+        }
+        TopLevelIntent::ConfirmationResponse => {
+            let result = agent_router::handle_confirmation_response(&app, trimmed).await?;
+            (
+                result.reply_text,
+                result.provider_label,
+                result.outcome,
+                result.detail,
+                Some(result.meta),
+                None,
+                false,
+            )
+        }
     };
 
     let reply_message = ChatMessage::assistant(reply_text);
@@ -1506,7 +1617,7 @@ async fn send_chat_message(
         reply: reply_message,
         provider_label,
         snapshot,
-        agent: None,
+        agent: agent_meta,
         pending_shell_confirmation,
     })
 }
