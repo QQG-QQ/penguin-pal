@@ -31,6 +31,8 @@ pub struct AgentLoopResult {
     pub history: Vec<CommandExecution>,
     /// 如果需要用户确认，返回待确认的命令
     pub pending_confirmation: Option<PendingShellConfirmation>,
+    /// 如果请求退出应用
+    pub request_exit: bool,
 }
 
 /// 待确认的 shell 命令
@@ -50,6 +52,7 @@ enum AIResponse {
     Reply { reply: String },
     Done { done: String },
     Fail { fail: String },
+    ExitApp { exit_app: String },
 }
 
 /// Shell Agent 执行器
@@ -285,6 +288,7 @@ impl ShellAgentExecutor {
                     steps_executed: self.current_step - 1,
                     history: self.history.clone(),
                     pending_confirmation: None,
+                    request_exit: false,
                 };
             }
 
@@ -307,6 +311,7 @@ impl ShellAgentExecutor {
                         steps_executed: self.current_step - 1,
                         history: self.history.clone(),
                         pending_confirmation: None,
+                        request_exit: false,
                     };
                 }
             };
@@ -323,6 +328,7 @@ impl ShellAgentExecutor {
                         steps_executed: self.current_step - 1,
                         history: self.history.clone(),
                         pending_confirmation: None,
+                        request_exit: false,
                     };
                 }
             };
@@ -337,6 +343,7 @@ impl ShellAgentExecutor {
                         steps_executed: self.current_step,
                         history: self.history.clone(),
                         pending_confirmation: None,
+                        request_exit: false,
                     };
                 }
                 AIResponse::Done { done } => {
@@ -347,6 +354,7 @@ impl ShellAgentExecutor {
                         steps_executed: self.current_step,
                         history: self.history.clone(),
                         pending_confirmation: None,
+                        request_exit: false,
                     };
                 }
                 AIResponse::Fail { fail } => {
@@ -357,6 +365,19 @@ impl ShellAgentExecutor {
                         steps_executed: self.current_step,
                         history: self.history.clone(),
                         pending_confirmation: None,
+                        request_exit: false,
+                    };
+                }
+                AIResponse::ExitApp { exit_app } => {
+                    // 请求退出应用
+                    self.write_back_result(app, user_task, true, &exit_app);
+                    return AgentLoopResult {
+                        success: true,
+                        message: exit_app,
+                        steps_executed: self.current_step,
+                        history: self.history.clone(),
+                        pending_confirmation: None,
+                        request_exit: true,
                     };
                 }
                 AIResponse::Command { cmd } => {
@@ -398,6 +419,7 @@ impl ShellAgentExecutor {
                                     risk_description: format!("需要 {} 权限", perm_result.permission_id),
                                     created_at: now_millis(),
                                 }),
+                                request_exit: false,
                             };
                         } else {
                             // 权限被拒绝
@@ -424,6 +446,7 @@ impl ShellAgentExecutor {
                                 risk_description: risk_desc,
                                 created_at: now_millis(),
                             }),
+                            request_exit: false,
                         };
                     }
 
@@ -536,9 +559,14 @@ fn extract_json(text: &str) -> Option<String> {
 /// 执行 shell 命令
 fn execute_shell_command(cmd: &str) -> String {
     #[cfg(target_os = "windows")]
-    let output = Command::new("cmd")
-        .args(["/C", cmd])
-        .output();
+    let output = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("cmd")
+            .args(["/C", cmd])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+    };
 
     #[cfg(not(target_os = "windows"))]
     let output = Command::new("sh")

@@ -473,6 +473,18 @@ pub struct ChatResponse {
     pub snapshot: AssistantSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentMessageMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_shell_confirmation: Option<PendingShellConfirmationInfo>,
+}
+
+/// Shell Agent 待确认命令信息
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingShellConfirmationInfo {
+    pub id: String,
+    pub command: String,
+    pub risk_description: String,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -522,6 +534,17 @@ pub struct RuntimeState {
     pub pending_action_approvals: Vec<ActionApprovalRequest>,
     /// Shell Agent 权限设置
     pub shell_permissions: ShellPermissionSettings,
+    /// Shell Agent 待确认的命令（会话级别，不持久化）
+    pub pending_shell_command: Option<PendingShellCommand>,
+}
+
+/// Shell Agent 待确认的命令
+#[derive(Debug, Clone)]
+pub struct PendingShellCommand {
+    pub id: String,
+    pub command: String,
+    pub risk_description: String,
+    pub created_at: u64,
 }
 
 /// Shell Agent 权限设置
@@ -587,6 +610,7 @@ impl Default for RuntimeState {
             pending_oauth: None,
             pending_action_approvals: vec![],
             shell_permissions: ShellPermissionSettings::default(),
+            pending_shell_command: None,
         }
     }
 }
@@ -770,6 +794,7 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         pending_oauth: None,
         pending_action_approvals: vec![],
         shell_permissions: persisted.shell_permissions,
+        pending_shell_command: None,
     };
 
     if runtime.messages.is_empty() {

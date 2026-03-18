@@ -29,5 +29,5 @@ pub mod prompt;
 pub mod risk;
 pub mod state;
 
-pub use executor::{ShellAgentExecutor, grant_basic_shell_permissions};
+pub use executor::{ShellAgentExecutor, grant_basic_shell_permissions, PendingShellConfirmation};
 pub use state::{BehaviorState, MaintenanceResult};

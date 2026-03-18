@@ -11,6 +11,7 @@ import type {
   ChatMessage,
   ChatResponse,
   CodexCliStatus,
+  CodexUpdateStatus,
   ControlPendingRequest,
   ControlServiceStatus,
   ControlToolInvokeResponse,
@@ -1569,5 +1570,33 @@ export const getWhisperRecordingState = async (): Promise<RecordingState> => {
   } catch (error) {
     rethrowIfDesktopRuntime(error)
     return 'idle'
+  }
+}
+
+// ============================================================================
+// Codex 更新 API
+// ============================================================================
+
+export const checkCodexUpdate = async (): Promise<CodexUpdateStatus> => {
+  try {
+    return await safeInvoke<CodexUpdateStatus>('check_codex_update')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return {
+      currentVersion: null,
+      latestVersion: null,
+      updateAvailable: false,
+      installPath: null,
+      message: '浏览器调试模式无法检查 Codex 更新'
+    }
+  }
+}
+
+export const updateCodex = async (): Promise<CodexUpdateStatus> => {
+  try {
+    return await safeInvoke<CodexUpdateStatus>('update_codex')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('Codex 更新需要桌宠运行时')
   }
 }

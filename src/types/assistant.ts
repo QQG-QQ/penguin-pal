@@ -200,6 +200,14 @@ export interface ChatResponse {
   providerLabel: string
   snapshot: AssistantSnapshot
   agent?: AgentMessageMeta | null
+  pendingShellConfirmation?: PendingShellConfirmation | null
+}
+
+export interface PendingShellConfirmation {
+  id: string
+  command: string
+  riskDescription: string
+  createdAt: number
 }
 
 export interface ActionApprovalCheck {
@@ -356,4 +364,16 @@ export interface DownloadProgress {
   downloadedBytes: number
   totalBytes: number
   progressPercent: number
+}
+
+// ============================================================================
+// Codex 更新类型
+// ============================================================================
+
+export interface CodexUpdateStatus {
+  currentVersion: string | null
+  latestVersion: string | null
+  updateAvailable: boolean
+  installPath: string | null
+  message: string
 }

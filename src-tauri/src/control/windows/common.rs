@@ -5,12 +5,17 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use tauri::AppHandle;
 
 use crate::control::{
     errors::{ControlError, ControlResult},
     logging,
 };
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub const POWERSHELL_UTF8_PREAMBLE: &str = r#"
 $ErrorActionPreference = 'Stop'
@@ -229,7 +234,8 @@ pub fn run_powershell_json(
             &encoded,
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW);
 
     if let Some(args) = args {
         let serialized = serde_json::to_string(args)

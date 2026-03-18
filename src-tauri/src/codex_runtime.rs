@@ -202,8 +202,11 @@ fn dev_resources_candidate() -> PathBuf {
 
 #[cfg(target_os = "windows")]
 fn resolve_codex_from_where(command: &str) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
     let output = Command::new("cmd")
         .args(["/C", "where", command])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     if !output.status.success() {

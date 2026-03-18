@@ -25,9 +25,11 @@ pub fn build_system_prompt_with_permissions(permission_summary: &str) -> String 
 - 直接回复：{{"reply": "回复内容"}}
 - 任务完成：{{"done": "完成说明"}}
 - 任务失败：{{"fail": "失败原因"}}
+- 退出桌宠：{{"exit_app": "告别语"}}
 
 执行命令后你会看到输出结果，然后决定下一步。
 如果用户只是聊天或询问权限，直接用 reply 回复即可。
+当用户表达想要关闭桌宠程序的意图时，使用 exit_app 退出并说告别语。
 超出权限范围的命令会被拒绝，高风险命令需要用户确认。"#, permission_summary)
 }
 

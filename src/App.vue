@@ -77,7 +77,8 @@ import type {
   ProviderKind,
   ReplyHistoryEntry,
   WhisperModel,
-  WhisperStatus
+  WhisperStatus,
+  PendingShellConfirmation
 } from './types/assistant'
 
 const providerDefaults: Record<ProviderKind, string> = {
@@ -284,6 +285,7 @@ const whisperDownloading = ref(false)
 const whisperDownloadProgress = ref<DownloadProgress | null>(null)
 const pendingApproval = ref<ActionApprovalRequest | null>(null)
 const controlPendingRequest = ref<ControlPendingRequest | null>(null)
+const pendingShellConfirmation = ref<PendingShellConfirmation | null>(null)
 const pendingCommandConfirmation = ref<PendingCommandConfirmation | null>(null)
 const agentTaskProgress = ref<AgentTaskProgress | null>(null)
 const approvalPhrase = ref('')
@@ -319,6 +321,7 @@ let autoListenTimer: number | null = null
 let speechPlaybackActive = false
 let petClampTimer: number | null = null
 let controlPendingTimer: number | null = null
+let shellConfirmationTimer: number | null = null
 let pendingCommandTimer: number | null = null
 let agentTaskTimer: number | null = null
 let petClampInFlight = false
@@ -1097,6 +1100,68 @@ const getControlPendingRequest = () => {
   }
 
   return pending
+}
+
+// Shell Agent 确认相关
+const SHELL_CONFIRMATION_TIMEOUT_MS = 60_000 // 60 秒超时
+
+const clearShellConfirmationTimer = () => {
+  if (shellConfirmationTimer !== null) {
+    window.clearTimeout(shellConfirmationTimer)
+    shellConfirmationTimer = null
+  }
+}
+
+const clearPendingShellConfirmation = () => {
+  clearShellConfirmationTimer()
+  pendingShellConfirmation.value = null
+}
+
+const handleShellConfirmationExpiry = () => {
+  const pending = pendingShellConfirmation.value
+  if (!pending) {
+    return
+  }
+
+  clearPendingShellConfirmation()
+  announce('Shell 命令确认已超时，已取消执行。', 'guarded')
+}
+
+const setPendingShellConfirmation = (nextPending: PendingShellConfirmation | null) => {
+  clearShellConfirmationTimer()
+  pendingShellConfirmation.value = nextPending
+
+  if (!nextPending) {
+    return
+  }
+
+  composerVisible.value = true
+  // 设置超时定时器
+  shellConfirmationTimer = window.setTimeout(() => {
+    handleShellConfirmationExpiry()
+  }, SHELL_CONFIRMATION_TIMEOUT_MS)
+}
+
+const confirmShellCommand = async () => {
+  const pending = pendingShellConfirmation.value
+  if (!pending || busy.value) {
+    return
+  }
+
+  clearPendingShellConfirmation()
+  // 发送 yes 确认
+  await sendMessage('yes')
+}
+
+const cancelShellCommand = async () => {
+  const pending = pendingShellConfirmation.value
+  if (!pending || busy.value) {
+    return
+  }
+
+  clearPendingShellConfirmation()
+  // 发送 no 取消
+  await sendMessage('no')
 }
 
 const clearPendingCommandTimer = () => {
@@ -2106,6 +2171,10 @@ const sendMessage = async (value = messageDraft.value) => {
     } else if (response.agent && response.agent.route !== 'chat') {
       clearControlPendingRequest()
     }
+    // 处理 Shell Agent 待确认命令
+    if (response.pendingShellConfirmation) {
+      setPendingShellConfirmation(response.pendingShellConfirmation)
+    }
     announce(
       response.reply.content,
       response.agent && response.agent.route !== 'chat' ? 'guarded' : 'speaking'
@@ -2518,6 +2587,7 @@ onBeforeUnmount(() => {
   clearAutoListenTimer()
   clearPetClampTimer()
   clearControlPendingTimer()
+  clearShellConfirmationTimer()
   clearPendingCommandTimer()
   clearAgentTaskTimer()
   mediaDevicesCleanup?.()
@@ -2684,6 +2754,37 @@ onBeforeUnmount(() => {
               @click="confirmActiveControlPending"
             >
               确认
+            </button>
+          </div>
+        </section>
+      </transition>
+
+      <transition name="composer">
+        <section v-if="pendingShellConfirmation" class="command-confirm-strip shell-confirm-strip">
+          <div class="command-confirm-copy">
+            <p class="eyebrow dark">Shell Agent 待确认</p>
+            <strong>执行命令确认</strong>
+            <p class="shell-command-preview">{{ pendingShellConfirmation.command }}</p>
+            <p>{{ pendingShellConfirmation.riskDescription }}</p>
+            <span class="command-confirm-hint">点击按钮确认或取消执行。60 秒内有效。</span>
+          </div>
+
+          <div class="command-confirm-actions">
+            <button
+              type="button"
+              class="panel-chip muted"
+              :disabled="busy"
+              @click="cancelShellCommand"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              class="confirm-button"
+              :disabled="busy"
+              @click="confirmShellCommand"
+            >
+              确认执行
             </button>
           </div>
         </section>
@@ -2873,6 +2974,23 @@ body {
   box-shadow:
     0 16px 28px rgba(5, 16, 27, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.shell-confirm-strip {
+  background: rgba(45, 30, 12, 0.92);
+  border: 1px solid rgba(255, 180, 60, 0.3);
+}
+
+.shell-command-preview {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #ffd080;
 }
 
 .task-status-strip {

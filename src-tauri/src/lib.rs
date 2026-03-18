@@ -3,6 +3,7 @@ mod ai;
 mod app_state;
 mod codex_config;
 mod codex_runtime;
+mod codex_update;
 mod control;
 mod audio;
 mod desktop;
@@ -36,11 +37,11 @@ use crate::{
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
         AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult,
-        PetMode, ProviderConfigInput, RuntimeState, ShellPermissionSettings,
-        DEFAULT_OAUTH_REDIRECT_URL,
+        PendingShellCommand, PendingShellConfirmationInfo, PetMode, ProviderConfigInput,
+        ProviderKind, RuntimeState, ShellPermissionSettings, DEFAULT_OAUTH_REDIRECT_URL,
     },
     audio::{types as audio_types, TranscriberService},
-    codex_runtime::{apply_private_env, initialize_codex_config, private_auth_path, resolve_for_app},
+    codex_runtime::{apply_private_env, initialize_codex_config, load_codex_config, private_auth_path, resolve_for_app, save_codex_config},
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
@@ -208,6 +209,41 @@ fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
 #[tauri::command]
 fn get_codex_cli_status(app: AppHandle) -> CodexCliStatus {
     inspect_codex_cli_status(&app)
+}
+
+#[tauri::command]
+async fn check_codex_update(app: AppHandle) -> Result<codex_update::CodexUpdateStatus, String> {
+    let status = inspect_codex_cli_status(&app);
+    Ok(codex_update::check_update_status(&app, status.version).await)
+}
+
+#[tauri::command]
+async fn update_codex(app: AppHandle) -> Result<codex_update::CodexUpdateStatus, String> {
+    let install_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("获取本地数据目录失败: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    let platform_dir = if cfg!(target_arch = "aarch64") {
+        "windows-arm64"
+    } else {
+        "windows-x64"
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let platform_dir = "unix";
+
+    let codex_install_dir = install_dir.join("codex").join(platform_dir);
+
+    // 执行更新
+    codex_update::install_or_update_codex(&codex_install_dir, |msg| {
+        eprintln!("[Codex Update] {}", msg);
+    })?;
+
+    // 返回更新后的状态
+    let status = inspect_codex_cli_status(&app);
+    Ok(codex_update::check_update_status(&app, status.version).await)
 }
 
 #[tauri::command]
@@ -571,6 +607,17 @@ fn save_provider_config(
         &mut runtime.audit_trail,
         audit::record("save_provider_config", "ok", audit_detail, 1),
     );
+
+    // 如果使用 Codex CLI，同步模型设置到 config.toml
+    if matches!(runtime.provider.kind, ProviderKind::CodexCli) {
+        if let Ok(mut codex_config) = load_codex_config(&app) {
+            if codex_config.model != runtime.provider.model {
+                codex_config.model = runtime.provider.model.clone();
+                let _ = save_codex_config(&app, &codex_config);
+                eprintln!("[save_provider_config] Synced model to Codex config: {}", runtime.provider.model);
+            }
+        }
+    }
 
     save(&app, &runtime)?;
     if let Some(agent_state) = app.try_state::<AgentTaskState>() {
@@ -1073,6 +1120,94 @@ fn get_whisper_recording_state(
     Ok(transcriber.get_recording_state())
 }
 
+/// 执行待确认的 Shell 命令
+async fn execute_pending_shell_command(
+    app: &AppHandle,
+    state: &State<'_, Mutex<RuntimeState>>,
+    pending: &PendingShellCommand,
+) -> Result<ChatResponse, String> {
+    // 使用 Shell Executor 执行命令
+    let mut shell_executor = if let Ok(app_data) = app.path().app_data_dir() {
+        ShellAgentExecutor::with_app_data(&app_data)
+    } else {
+        ShellAgentExecutor::new()
+    };
+
+    let exec_result = shell_executor.confirm_and_continue(&pending.command);
+
+    let reply_text = if exec_result.success {
+        format!("命令已执行：\n```\n{}\n```\n\n输出：\n```\n{}\n```",
+            pending.command, exec_result.output)
+    } else {
+        format!("命令执行失败：\n```\n{}\n```\n\n错误：{}", pending.command, exec_result.output)
+    };
+
+    let reply_message = ChatMessage::assistant(&reply_text);
+
+    let snapshot = {
+        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        runtime.pending_shell_command = None;
+        runtime.messages.push(ChatMessage::user("yes".to_string()));
+        runtime.messages.push(reply_message.clone());
+        runtime.mode = PetMode::Idle;
+        ai_memory::trim_history(&mut runtime.messages);
+
+        audit::push_entry(
+            &mut runtime.audit_trail,
+            audit::record(
+                "shell_command_confirmed",
+                if exec_result.success { "ok" } else { "error" },
+                format!("command={}", pending.command),
+                1,
+            ),
+        );
+        save(app, &runtime)?;
+        snapshot_from_runtime(&runtime)
+    };
+
+    Ok(ChatResponse {
+        reply: reply_message,
+        provider_label: "Shell Agent".to_string(),
+        snapshot,
+        agent: None,
+        pending_shell_confirmation: None,
+    })
+}
+
+/// 取消待确认的 Shell 命令
+async fn cancel_pending_shell_command(
+    app: &AppHandle,
+    state: &State<'_, Mutex<RuntimeState>>,
+    pending: &PendingShellCommand,
+) -> Result<ChatResponse, String> {
+    let reply_text = format!("已取消执行命令：`{}`", pending.command);
+    let reply_message = ChatMessage::assistant(&reply_text);
+
+    let snapshot = {
+        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        runtime.pending_shell_command = None;
+        runtime.messages.push(ChatMessage::user("no".to_string()));
+        runtime.messages.push(reply_message.clone());
+        runtime.mode = PetMode::Idle;
+        ai_memory::trim_history(&mut runtime.messages);
+
+        audit::push_entry(
+            &mut runtime.audit_trail,
+            audit::record("shell_command_cancelled", "ok", format!("command={}", pending.command), 1),
+        );
+        save(app, &runtime)?;
+        snapshot_from_runtime(&runtime)
+    };
+
+    Ok(ChatResponse {
+        reply: reply_message,
+        provider_label: "Shell Agent".to_string(),
+        snapshot,
+        agent: None,
+        pending_shell_confirmation: None,
+    })
+}
+
 #[tauri::command]
 async fn send_chat_message(
     app: AppHandle,
@@ -1082,6 +1217,29 @@ async fn send_chat_message(
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Err("消息不能为空".to_string());
+    }
+
+    // 检查是否有待确认的 Shell 命令
+    let pending_cmd = {
+        let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        runtime.pending_shell_command.clone()
+    };
+
+    // 处理 yes/no 确认
+    if let Some(pending) = pending_cmd {
+        let lower = trimmed.to_lowercase();
+        if lower == "yes" || lower == "y" || lower == "确认" {
+            // 用户确认执行
+            return execute_pending_shell_command(&app, &state, &pending).await;
+        } else if lower == "no" || lower == "n" || lower == "取消" {
+            // 用户取消执行
+            return cancel_pending_shell_command(&app, &state, &pending).await;
+        }
+        // 其他输入继续正常流程，清除待确认命令
+        {
+            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            runtime.pending_shell_command = None;
+        }
     }
 
     let user_message = ChatMessage::user(trimmed.to_string());
@@ -1168,12 +1326,37 @@ async fn send_chat_message(
 
     let result = shell_executor.run(&app, trimmed, ai_caller).await;
 
+    // 记录是否需要退出应用
+    let should_exit = result.request_exit;
+
+    // 提取待确认信息（如果有）并存储到 RuntimeState
+    let pending_shell_confirmation = if let Some(p) = &result.pending_confirmation {
+        // 存储待确认命令到 RuntimeState
+        {
+            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            runtime.pending_shell_command = Some(PendingShellCommand {
+                id: p.id.clone(),
+                command: p.command.clone(),
+                risk_description: p.risk_description.clone(),
+                created_at: p.created_at,
+            });
+        }
+        Some(PendingShellConfirmationInfo {
+            id: p.id.clone(),
+            command: p.command.clone(),
+            risk_description: p.risk_description.clone(),
+            created_at: p.created_at,
+        })
+    } else {
+        None
+    };
+
     let (reply_text, provider_label, outcome, detail) = if result.pending_confirmation.is_some() {
         // 需要用户确认
-        let pending = result.pending_confirmation.unwrap();
+        let pending = result.pending_confirmation.as_ref().unwrap();
         (
             format!(
-                "需要确认执行以下命令：\n\n```\n{}\n```\n\n{}（输入 yes 确认，no 取消）",
+                "需要确认执行以下命令：\n\n```\n{}\n```\n\n{}",
                 pending.command,
                 pending.risk_description
             ),
@@ -1237,11 +1420,21 @@ async fn send_chat_message(
         snapshot_from_runtime(&runtime)
     };
 
+    // 如果请求退出应用，延迟一小段时间后退出（让 UI 有时间显示告别语）
+    if should_exit {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            app_clone.exit(0);
+        });
+    }
+
     Ok(ChatResponse {
         reply: reply_message,
         provider_label,
         snapshot,
         agent: None,
+        pending_shell_confirmation,
     })
 }
 
@@ -1452,11 +1645,17 @@ pub fn run() {
         .setup(|app| {
             eprintln!("[Setup] Starting application setup...");
 
-            let runtime = load(&app.handle())
-                .map_err(|error| {
-                    eprintln!("[Setup] Failed to load runtime state: {}", error);
-                    std::io::Error::new(std::io::ErrorKind::Other, error)
-                })?;
+            // 更健壮的状态加载：如果加载失败则使用默认状态
+            let runtime = match load(&app.handle()) {
+                Ok(runtime) => {
+                    eprintln!("[Setup] RuntimeState loaded successfully");
+                    runtime
+                }
+                Err(error) => {
+                    eprintln!("[Setup] Failed to load runtime state: {}, using default", error);
+                    RuntimeState::default()
+                }
+            };
             app.manage(Mutex::new(runtime));
             eprintln!("[Setup] RuntimeState managed");
 
@@ -1583,6 +1782,8 @@ pub fn run() {
             complete_oauth_sign_in,
             disconnect_oauth_sign_in,
             get_codex_cli_status,
+            check_codex_update,
+            update_codex,
             get_control_service_status,
             confirm_control_pending,
             cancel_control_pending,
