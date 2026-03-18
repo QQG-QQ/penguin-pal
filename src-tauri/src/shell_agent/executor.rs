@@ -143,9 +143,11 @@ impl ShellAgentExecutor {
         let mut disabled = Vec::new();
 
         for (id, label) in permissions {
-            match self.permission_checker.check(id, "shell_agent") {
-                PermissionCheckResult::Allowed(_) => enabled.push(label),
-                _ => disabled.push(label),
+            let result = self.permission_checker.check(id, "shell_agent");
+            if result.allowed {
+                enabled.push(label);
+            } else {
+                disabled.push(label);
             }
         }
 

@@ -76,9 +76,13 @@ impl AudioRecorder {
 
         // 环形缓冲区: 30秒 * 16000 采样/秒
         let rb = HeapRb::<f32>::new(16000 * 30);
-        let (mut producer, mut consumer) = rb.split();
+        let (producer, mut consumer) = rb.split();
 
-        let mut stream: Option<cpal::Stream> = None;
+        // 使用 Arc<Mutex> 包装 producer，使其可以在多次迭代中共享
+        let producer = Arc::new(Mutex::new(producer));
+
+        // _stream 变量必须保持存活，否则录音会停止
+        let mut _stream: Option<cpal::Stream> = None;
 
         loop {
             match cmd_rx.recv() {
@@ -92,11 +96,13 @@ impl AudioRecorder {
 
                     let err_fn = |err| eprintln!("[AudioRecorder] Stream error: {}", err);
 
+                    let producer_clone = producer.clone();
                     let stream_result = device.build_input_stream(
                         &config,
                         move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            let mut prod = producer_clone.lock();
                             for &sample in data {
-                                let _ = producer.try_push(sample);
+                                let _ = prod.try_push(sample);
                             }
                         },
                         err_fn,
@@ -108,7 +114,7 @@ impl AudioRecorder {
                             if let Err(e) = s.play() {
                                 eprintln!("[AudioRecorder] Failed to play stream: {}", e);
                             }
-                            stream = Some(s);
+                            _stream = Some(s);
                         }
                         Err(e) => {
                             eprintln!("[AudioRecorder] Failed to build stream: {}", e);
@@ -118,7 +124,7 @@ impl AudioRecorder {
                 }
                 Ok(AudioCommand::Stop) => {
                     // 停止录音，收集采样
-                    stream = None;
+                    _stream = None;
                     *is_recording.lock() = false;
 
                     // 从 consumer 收集所有采样
@@ -129,7 +135,7 @@ impl AudioRecorder {
                     *samples.lock() = collected;
                 }
                 Ok(AudioCommand::Shutdown) => {
-                    stream = None;
+                    _stream = None;
                     break;
                 }
                 Err(_) => {
