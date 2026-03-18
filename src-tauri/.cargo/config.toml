@@ -1,2 +1,6 @@
 [build]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+# LLVM/libclang 路径，指向项目本地安装的 LLVM
+LIBCLANG_PATH = { value = "../.llvm/bin", relative = true }

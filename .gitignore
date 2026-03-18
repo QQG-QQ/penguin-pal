@@ -7,6 +7,9 @@ dist/
 # Tauri / Rust build outputs
 src-tauri/target/
 
+# LLVM 本地安装 (whisper-rs 依赖)
+src-tauri/.llvm/
+
 # Local artifacts and temp
 artifacts/
 *.tmp

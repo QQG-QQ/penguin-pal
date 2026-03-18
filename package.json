@@ -9,7 +9,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "prepare:codex-runtime": "powershell -ExecutionPolicy Bypass -File .\\scripts\\prepare-embedded-codex-runtime.ps1",
-    "tauri": "tauri"
+    "prepare:llvm": "node ./scripts/ensure-llvm.mjs",
+    "tauri": "node ./scripts/ensure-llvm.mjs && tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
