@@ -1450,15 +1450,29 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            eprintln!("[Setup] Starting application setup...");
+
             let runtime = load(&app.handle())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+                .map_err(|error| {
+                    eprintln!("[Setup] Failed to load runtime state: {}", error);
+                    std::io::Error::new(std::io::ErrorKind::Other, error)
+                })?;
             app.manage(Mutex::new(runtime));
+            eprintln!("[Setup] RuntimeState managed");
+
             app.manage(ControlServiceState::new());
+            eprintln!("[Setup] ControlServiceState managed");
+
             app.manage(AgentTaskState::new());
+            eprintln!("[Setup] AgentTaskState managed");
 
             // 初始化 Whisper 语音识别服务
             let app_data_dir = app.path().app_data_dir()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| {
+                    eprintln!("[Setup] Failed to get app_data_dir: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                })?;
+            eprintln!("[Setup] app_data_dir: {:?}", app_data_dir);
             match TranscriberService::new(app_data_dir) {
                 Ok(transcriber) => {
                     app.manage(transcriber);
