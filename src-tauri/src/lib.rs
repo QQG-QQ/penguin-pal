@@ -177,7 +177,10 @@ fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
     let version = runtime
         .command
         .as_ref()
-        .and_then(|path| read_codex_version(&path.to_string_lossy(), app));
+        .and_then(|path| {
+            codex_update::get_runtime_command_package_version(path)
+                .or_else(|| read_codex_version(&path.to_string_lossy(), app))
+        });
     let installed = version.is_some();
 
     let auth_path = private_auth_path(app).ok();
@@ -266,7 +269,10 @@ async fn auto_update_codex(app: &AppHandle) -> Result<(), String> {
     let update_status = codex_update::check_update_status(app, current_status.version.clone()).await;
 
     if !update_status.update_available {
-        eprintln!("[Codex] 已是最新版本: {:?}", current_status.version);
+        eprintln!(
+            "[Codex] 桌宠私有运行时已是最新版本: {:?}",
+            update_status.current_version
+        );
         return Ok(());
     }
 

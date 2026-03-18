@@ -62,7 +62,7 @@ fn get_local_install_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(local_data.join("codex").join(platform_dir))
 }
 
-fn get_installed_package_version(install_dir: &Path) -> Option<String> {
+pub fn get_installed_package_version(install_dir: &Path) -> Option<String> {
     let package_json = install_dir
         .join("node_modules")
         .join("@openai")
@@ -71,6 +71,33 @@ fn get_installed_package_version(install_dir: &Path) -> Option<String> {
     let content = fs::read_to_string(package_json).ok()?;
     let package: InstalledPackageInfo = serde_json::from_str(&content).ok()?;
     Some(package.version)
+}
+
+pub fn get_runtime_command_package_version(command_path: &Path) -> Option<String> {
+    for ancestor in command_path.ancestors() {
+        let direct_candidate = ancestor
+            .join("@openai")
+            .join("codex")
+            .join("package.json");
+        if let Ok(content) = fs::read_to_string(&direct_candidate) {
+            if let Ok(package) = serde_json::from_str::<InstalledPackageInfo>(&content) {
+                return Some(package.version);
+            }
+        }
+
+        let nested_candidate = ancestor
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("package.json");
+        if let Ok(content) = fs::read_to_string(&nested_candidate) {
+            if let Ok(package) = serde_json::from_str::<InstalledPackageInfo>(&content) {
+                return Some(package.version);
+            }
+        }
+    }
+
+    None
 }
 
 /// 从 npm registry 获取最新版本
