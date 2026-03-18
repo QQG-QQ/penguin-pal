@@ -1,55 +1,132 @@
 // 修复 whisper-rs-sys 构建路径问题
-// Ninja 生成器输出在 build/，但 whisper-rs-sys 期望 build/Release/
-import { existsSync, mkdirSync, copyFileSync, readdirSync, statSync } from 'fs'
-import { join } from 'path'
+// 在 Windows + Ninja 下，whisper/ggml 静态库有时只出现在子目录中，
+// 但 rustc 只会在 build.rs 导出的搜索目录本身找库文件。
+import { existsSync, mkdirSync, copyFileSync, readdirSync } from 'fs'
+import { basename, join } from 'path'
 import { fileURLToPath } from 'url'
 import { dirname } from 'path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const targetDir = join(__dirname, '..', 'src-tauri', 'target', 'release', 'build')
+const srcTauri = join(__dirname, '..', 'src-tauri')
+const buildRoots = [
+  join(srcTauri, 'target', 'debug', 'build'),
+  join(srcTauri, 'target', 'release', 'build'),
+]
+const libraryNames = new Set([
+  'whisper.lib',
+  'ggml.lib',
+  'ggml-base.lib',
+  'ggml-cpu.lib',
+  'libwhisper.a',
+  'libggml.a',
+  'libggml-base.a',
+  'libggml-cpu.a',
+])
+const candidateOutputDirs = ['.', 'Release', 'RelWithDebInfo', 'Debug']
 
-function findWhisperOutDir() {
-  if (!existsSync(targetDir)) return null
+function walkFiles(dir, results = []) {
+  if (!existsSync(dir)) return results
 
-  const dirs = readdirSync(targetDir)
-  for (const dir of dirs) {
-    if (dir.startsWith('whisper-rs-sys-')) {
-      const outDir = join(targetDir, dir, 'out', 'build')
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      walkFiles(fullPath, results)
+    } else {
+      results.push(fullPath)
+    }
+  }
+
+  return results
+}
+
+function findWhisperOutDirs() {
+  const outDirs = []
+
+  for (const buildRoot of buildRoots) {
+    if (!existsSync(buildRoot)) {
+      continue
+    }
+
+    const dirs = readdirSync(buildRoot)
+    for (const dir of dirs) {
+      if (!dir.startsWith('whisper-rs-sys-')) {
+        continue
+      }
+
+      const outDir = join(buildRoot, dir, 'out', 'build')
       if (existsSync(outDir)) {
-        return outDir
+        outDirs.push(outDir)
       }
     }
   }
-  return null
+
+  return outDirs
+}
+
+function discoverLibraries(outDir) {
+  const libraries = new Map()
+  for (const file of walkFiles(outDir)) {
+    const name = basename(file)
+    if (!libraryNames.has(name)) {
+      continue
+    }
+
+    if (!libraries.has(name)) {
+      libraries.set(name, file)
+    }
+  }
+
+  return libraries
+}
+
+function mirrorLibraries(outDir, libraries) {
+  let copied = 0
+
+  for (const [name, source] of libraries.entries()) {
+    for (const relativeDir of candidateOutputDirs) {
+      const targetDir = relativeDir === '.'
+        ? outDir
+        : join(outDir, relativeDir)
+      const targetFile = join(targetDir, name)
+
+      if (targetFile === source || existsSync(targetFile)) {
+        continue
+      }
+
+      mkdirSync(targetDir, { recursive: true })
+      copyFileSync(source, targetFile)
+      copied += 1
+      console.log(`[whisper-fix] Copied ${name} -> ${targetFile}`)
+    }
+  }
+
+  return copied
 }
 
 function fixWhisperPath() {
-  const outDir = findWhisperOutDir()
-  if (!outDir) {
+  const outDirs = findWhisperOutDirs()
+  if (outDirs.length === 0) {
     console.log('[whisper-fix] No whisper-rs-sys build dir found, skipping')
     return
   }
 
-  const whisperLib = join(outDir, 'whisper.lib')
-  const releaseDir = join(outDir, 'Release')
-  const releaseLib = join(releaseDir, 'whisper.lib')
+  let totalCopied = 0
 
-  // 检查是否需要修复
-  if (!existsSync(whisperLib)) {
-    console.log('[whisper-fix] whisper.lib not found in build dir, skipping')
-    return
+  for (const outDir of outDirs) {
+    const libraries = discoverLibraries(outDir)
+    if (libraries.size === 0) {
+      console.log(`[whisper-fix] No whisper/ggml static libs found under ${outDir}, skipping`)
+      continue
+    }
+
+    totalCopied += mirrorLibraries(outDir, libraries)
   }
 
-  if (existsSync(releaseLib)) {
-    console.log('[whisper-fix] Release/whisper.lib already exists, skipping')
-    return
+  if (totalCopied === 0) {
+    console.log('[whisper-fix] No path fix needed')
+  } else {
+    console.log(`[whisper-fix] Fixed ${totalCopied} library path entries`)
   }
-
-  // 创建 Release 目录并复制文件
-  console.log('[whisper-fix] Fixing whisper-rs-sys output path...')
-  mkdirSync(releaseDir, { recursive: true })
-  copyFileSync(whisperLib, releaseLib)
-  console.log('[whisper-fix] Created Release/whisper.lib')
 }
 
 fixWhisperPath()
