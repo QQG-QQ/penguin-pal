@@ -14,6 +14,16 @@ CMAKE_MAKE_PROGRAM = { value = ".ninja/ninja.exe", relative = true }
 # 显式把 CMake 安装库目录也落到 OUT_DIR 根，避免静态库被装进 out/lib 后找不到。
 CMAKE_INSTALL_LIBDIR = "."
 
+# upstream whisper-rs-sys 会递归加入 OUT_DIR/build/**，而当前 Windows + Ninja
+# 实际把 whisper.lib 产在 OUT_DIR/build 根目录。把静态库统一导向 build/Release，
+# 让裸 cargo build 也能直接命中它已经添加的 -L .../out/build/Release。
+CMAKE_ARCHIVE_OUTPUT_DIRECTORY = "Release"
+CMAKE_LIBRARY_OUTPUT_DIRECTORY = "Release"
+CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE = "Release"
+CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE = "Release"
+CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO = "Release"
+CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO = "Release"
+
 # 继续显式对齐到 Rust 默认的动态 MSVC CRT (/MD, /MDd)。
 CMAKE_POLICY_DEFAULT_CMP0091 = "NEW"
 CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
