@@ -20,6 +20,11 @@ const deps = [
     checkFile: join(srcTauri, '.cmake', 'bin', 'cmake.exe'),
     setupScript: join(srcTauri, 'setup-cmake.ps1'),
   },
+  {
+    name: 'Ninja',
+    checkFile: join(srcTauri, '.ninja', 'ninja.exe'),
+    setupScript: join(srcTauri, 'setup-ninja.ps1'),
+  },
 ]
 
 async function installDep(dep) {
@@ -54,7 +59,7 @@ async function main() {
   const missing = deps.filter(dep => !existsSync(dep.checkFile))
 
   if (missing.length === 0) {
-    console.log('[OK] All build dependencies installed (LLVM, CMake)')
+    console.log('[OK] All build dependencies installed (LLVM, CMake, Ninja)')
     process.exit(0)
   }
 
