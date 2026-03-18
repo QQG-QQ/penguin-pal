@@ -1,5 +1,5 @@
 // Tauri 构建脚本
-// 1. 在 Windows 上确保 LLVM/CMake 已就绪
+// 1. 在 Windows 上确保 LLVM/CMake/Ninja 已就绪
 // 2. 交给上游 whisper-rs-sys + CMake 正常构建
 // 3. 执行 tauri dev/build
 import { spawn } from 'child_process'
@@ -27,7 +27,7 @@ async function main() {
   const tauriArgs = args.length > 0 ? args : ['build']
 
   if (process.platform === 'win32') {
-    console.log('[build] Step 1: Checking local LLVM/CMake...')
+    console.log('[build] Step 1: Checking local LLVM/CMake/Ninja...')
     const ensureCode = await run('node', ['./scripts/ensure-llvm.mjs'])
     if (ensureCode !== 0) {
       process.exit(1)

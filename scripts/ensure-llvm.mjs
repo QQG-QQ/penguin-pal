@@ -1,4 +1,4 @@
-// 检测并安装构建依赖 (LLVM + CMake)
+// 检测并安装构建依赖 (LLVM + CMake + Ninja)
 import { existsSync } from 'fs'
 import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
@@ -9,7 +9,7 @@ const projectRoot = join(__dirname, '..')
 const srcTauri = join(projectRoot, 'src-tauri')
 
 if (process.platform !== 'win32') {
-  console.log('[skip] local LLVM/CMake bootstrap only runs on Windows')
+  console.log('[skip] local LLVM/CMake/Ninja bootstrap only runs on Windows')
   process.exit(0)
 }
 
@@ -24,6 +24,11 @@ const deps = [
     name: 'CMake',
     checkFile: join(srcTauri, '.cmake', 'bin', 'cmake.exe'),
     setupScript: join(srcTauri, 'setup-cmake.ps1'),
+  },
+  {
+    name: 'Ninja',
+    checkFile: join(srcTauri, '.ninja', 'ninja.exe'),
+    setupScript: join(srcTauri, 'setup-ninja.ps1'),
   },
 ]
 
@@ -59,7 +64,7 @@ async function main() {
   const missing = deps.filter(dep => !existsSync(dep.checkFile))
 
   if (missing.length === 0) {
-    console.log('[OK] All local build dependencies installed (LLVM, CMake)')
+    console.log('[OK] All local build dependencies installed (LLVM, CMake, Ninja)')
     console.log('[INFO] Whisper still requires Visual Studio Build Tools (Desktop C++) and Windows SDK')
     process.exit(0)
   }

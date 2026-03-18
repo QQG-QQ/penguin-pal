@@ -5,9 +5,11 @@ LIBCLANG_PATH = { value = ".llvm/bin", relative = true }
 # CMake 路径，指向项目本地安装的 CMake。
 CMAKE = { value = ".cmake/bin/cmake.exe", relative = true }
 
-# 不再强制 Ninja 和静态 CRT。
-# whisper-rs/whisper.cpp 在 Windows/MSVC 下更稳定的路径是：
-# 1. 让 CMake 自行选择 Visual Studio 生成器
-# 2. 显式对齐到 Rust 默认的动态 MSVC CRT (/MD, /MDd)
+# VS 2026 Build Tools 会让 cmake-rs 推断出当前 CMake 不支持的
+# "Visual Studio 18 2026" 生成器，因此这里显式退回 Ninja。
+CMAKE_GENERATOR = "Ninja"
+CMAKE_MAKE_PROGRAM = { value = ".ninja/ninja.exe", relative = true }
+
+# 继续显式对齐到 Rust 默认的动态 MSVC CRT (/MD, /MDd)。
 CMAKE_POLICY_DEFAULT_CMP0091 = "NEW"
 CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
