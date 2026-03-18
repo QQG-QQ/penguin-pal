@@ -29,6 +29,7 @@ pub enum AudioCommand {
 pub struct AudioRecorder {
     command_tx: mpsc::Sender<AudioCommand>,
     samples: Arc<Mutex<Vec<f32>>>,
+    #[allow(dead_code)]
     is_recording: Arc<Mutex<bool>>,
     worker_handle: Option<thread::JoinHandle<()>>,
 }
@@ -164,6 +165,7 @@ impl AudioRecorder {
         Ok(samples)
     }
 
+    #[allow(dead_code)]
     pub fn is_recording(&self) -> bool {
         *self.is_recording.lock()
     }

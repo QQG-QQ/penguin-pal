@@ -112,6 +112,7 @@ impl TranscriberService {
         result
     }
 
+    #[allow(dead_code)]
     pub fn is_model_downloaded(&self, model: WhisperModel) -> bool {
         self.model_manager.is_downloaded(model)
     }

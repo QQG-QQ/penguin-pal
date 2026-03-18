@@ -25,6 +25,7 @@ impl ModelManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn models_dir(&self) -> &PathBuf {
         &self.models_dir
     }
@@ -49,10 +50,12 @@ impl ModelManager {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn is_downloading(&self) -> bool {
         self.downloading.lock().is_some()
     }
 
+    #[allow(dead_code)]
     pub fn current_download(&self) -> Option<WhisperModel> {
         *self.downloading.lock()
     }
