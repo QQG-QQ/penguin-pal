@@ -2,6 +2,7 @@
 //!
 //! 从 npm registry 检查最新版本并更新本地 Codex 运行时
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,11 @@ struct DistTags {
     latest: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct InstalledPackageInfo {
+    version: String,
+}
+
 /// 获取本地 Codex 安装目录
 fn get_local_install_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let local_data = app
@@ -54,6 +60,17 @@ fn get_local_install_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let platform_dir = "unix";
 
     Ok(local_data.join("codex").join(platform_dir))
+}
+
+fn get_installed_package_version(install_dir: &Path) -> Option<String> {
+    let package_json = install_dir
+        .join("node_modules")
+        .join("@openai")
+        .join("codex")
+        .join("package.json");
+    let content = fs::read_to_string(package_json).ok()?;
+    let package: InstalledPackageInfo = serde_json::from_str(&content).ok()?;
+    Some(package.version)
 }
 
 /// 从 npm registry 获取最新版本
@@ -81,12 +98,15 @@ pub async fn fetch_latest_version() -> Result<String, String> {
 /// 检查更新状态
 pub async fn check_update_status(app: &AppHandle, current_version: Option<String>) -> CodexUpdateStatus {
     let install_dir = get_local_install_dir(app).ok();
+    let installed_private_version = install_dir
+        .as_ref()
+        .and_then(|path| get_installed_package_version(path));
 
     let latest_version = match fetch_latest_version().await {
         Ok(v) => Some(v),
         Err(e) => {
             return CodexUpdateStatus {
-                current_version: current_version.clone(),
+                current_version: installed_private_version.or(current_version.clone()),
                 latest_version: None,
                 update_available: false,
                 install_path: install_dir.map(|p| p.to_string_lossy().to_string()),
@@ -95,27 +115,32 @@ pub async fn check_update_status(app: &AppHandle, current_version: Option<String
         }
     };
 
-    let update_available = match (&current_version, &latest_version) {
+    let effective_current_version = installed_private_version.clone().or(current_version.clone());
+    let update_available = match (installed_private_version.as_deref(), latest_version.as_deref()) {
+        (None, Some(_)) => true,
         (Some(current), Some(latest)) => {
-            // 简单版本比较（假设版本格式为 x.y.z）
             compare_versions(current, latest)
         }
-        (None, Some(_)) => true, // 未安装，需要安装
         _ => false,
     };
 
-    let message = if update_available {
+    let message = if installed_private_version.is_none() {
+        format!(
+            "桌宠私有 Codex 运行时未安装，将安装 {}。",
+            latest_version.as_deref().unwrap_or("最新版本")
+        )
+    } else if update_available {
         format!(
             "有新版本可用: {} -> {}",
-            current_version.as_deref().unwrap_or("未安装"),
+            effective_current_version.as_deref().unwrap_or("未安装"),
             latest_version.as_deref().unwrap_or("未知")
         )
     } else {
-        "已是最新版本".to_string()
+        "桌宠私有 Codex 运行时已是最新版本".to_string()
     };
 
     CodexUpdateStatus {
-        current_version,
+        current_version: effective_current_version,
         latest_version,
         update_available,
         install_path: install_dir.map(|p| p.to_string_lossy().to_string()),
@@ -125,11 +150,6 @@ pub async fn check_update_status(app: &AppHandle, current_version: Option<String
 
 /// 比较版本号，返回 true 如果 latest > current
 fn compare_versions(current: &str, latest: &str) -> bool {
-    // 移除前缀 v 或 V（如果有）
-    let current = current.trim_start_matches(|c| c == 'v' || c == 'V');
-    let latest = latest.trim_start_matches(|c| c == 'v' || c == 'V');
-
-    // 提取版本号部分（处理 "OpenAI Codex (v0.113.0)" 格式）
     let current = extract_version_number(current);
     let latest = extract_version_number(latest);
 
@@ -156,16 +176,34 @@ fn compare_versions(current: &str, latest: &str) -> bool {
 }
 
 /// 从版本字符串提取版本号
-fn extract_version_number(version: &str) -> &str {
-    // 处理 "OpenAI Codex (v0.113.0)" 格式
-    if let Some(start) = version.find('(') {
-        if let Some(end) = version.find(')') {
-            let inner = &version[start + 1..end];
-            return inner.trim_start_matches(|c| c == 'v' || c == 'V');
+fn extract_version_number(version: &str) -> String {
+    let trimmed = version.trim();
+    let mut extracted = String::new();
+    let mut started = false;
+
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            started = true;
+            extracted.push(ch);
+            continue;
+        }
+
+        if started && ch == '.' {
+            extracted.push(ch);
+            continue;
+        }
+
+        if started {
+            break;
         }
     }
-    // 处理普通格式
-    version.trim()
+
+    let normalized = extracted.trim_matches('.').to_string();
+    if !normalized.is_empty() {
+        normalized
+    } else {
+        trimmed.trim_start_matches(|c| c == 'v' || c == 'V').to_string()
+    }
 }
 
 /// 检查 npm 是否可用
@@ -194,9 +232,9 @@ fn check_npm_available() -> bool {
 /// 执行 Codex 更新
 pub fn install_or_update_codex(
     install_dir: &Path,
+    target_version: Option<&str>,
     progress_callback: impl Fn(&str),
 ) -> Result<String, String> {
-    // 确保目录存在
     std::fs::create_dir_all(install_dir)
         .map_err(|e| format!("创建安装目录失败: {}", e))?;
 
@@ -204,50 +242,65 @@ pub fn install_or_update_codex(
         return Err("npm 不可用。请先安装 Node.js 和 npm。".to_string());
     }
 
-    progress_callback("正在安装/更新 Codex...");
+    let package_spec = build_package_spec(target_version);
+    let progress_message = format!("正在安装/更新 Codex ({package_spec})...");
+    progress_callback(&progress_message);
 
-    // 使用 npm install 安装到指定目录
     #[cfg(target_os = "windows")]
     let output = {
         use std::os::windows::process::CommandExt;
-        Command::new("cmd")
-            .args([
-                "/C", "npm", "install",
-                CODEX_PACKAGE_NAME,
-                "--prefix", &install_dir.to_string_lossy(),
-            ])
+        let mut command = Command::new("cmd");
+        command
+            .arg("/C")
+            .arg("npm")
+            .arg("install")
+            .arg(&package_spec)
+            .arg("--prefix")
+            .arg(install_dir)
+            .arg("--save-exact")
+            .arg("--no-fund")
+            .arg("--no-audit")
             .creation_flags(CREATE_NO_WINDOW)
-            .current_dir(install_dir)
-            .output()
+            .current_dir(install_dir);
+        command.output()
     };
 
     #[cfg(not(target_os = "windows"))]
     let output = {
-        Command::new("sh")
-            .args([
-                "-c",
-                &format!(
-                    "npm install {} --prefix '{}'",
-                    CODEX_PACKAGE_NAME,
-                    install_dir.to_string_lossy()
-                ),
-            ])
-            .current_dir(install_dir)
-            .output()
+        let mut command = Command::new("npm");
+        command
+            .arg("install")
+            .arg(&package_spec)
+            .arg("--prefix")
+            .arg(install_dir)
+            .arg("--save-exact")
+            .arg("--no-fund")
+            .arg("--no-audit")
+            .current_dir(install_dir);
+        command.output()
     };
 
     match output {
         Ok(out) => {
             if out.status.success() {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                progress_callback("Codex 更新完成");
-                Ok(format!("更新成功: {}", stdout.trim()))
+                let installed_version = get_installed_package_version(install_dir)
+                    .unwrap_or_else(|| "未知版本".to_string());
+                let completion_message = format!("Codex 更新完成: {installed_version}");
+                progress_callback(&completion_message);
+                Ok(completion_message)
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 Err(format!("npm install 失败: {}", stderr.trim()))
             }
         }
         Err(e) => Err(format!("执行 npm 命令失败: {}", e)),
+    }
+}
+
+fn build_package_spec(target_version: Option<&str>) -> String {
+    match target_version.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(version) => format!("{CODEX_PACKAGE_NAME}@{version}"),
+        None => CODEX_PACKAGE_NAME.to_string(),
     }
 }
 
@@ -268,5 +321,13 @@ mod tests {
         assert_eq!(extract_version_number("0.113.0"), "0.113.0");
         assert_eq!(extract_version_number("v0.113.0"), "0.113.0");
         assert_eq!(extract_version_number("OpenAI Codex (v0.113.0)"), "0.113.0");
+        assert_eq!(extract_version_number("OpenAI Codex 0.113.0"), "0.113.0");
+        assert_eq!(extract_version_number("codex-cli version 1.2.3-dev"), "1.2.3");
+    }
+
+    #[test]
+    fn test_build_package_spec() {
+        assert_eq!(build_package_spec(None), "@openai/codex");
+        assert_eq!(build_package_spec(Some("0.114.0")), "@openai/codex@0.114.0");
     }
 }

@@ -1,18 +1,13 @@
-[build]
-rustflags = ["-C", "target-feature=+crt-static"]
-
 [env]
-# LLVM/libclang 路径，指向项目本地安装的 LLVM
-# relative = true 是相对于 Cargo.toml 所在目录 (src-tauri/)
+# LLVM/libclang 路径，指向项目本地安装的 LLVM。
 LIBCLANG_PATH = { value = ".llvm/bin", relative = true }
 
-# CMake 路径，指向项目本地安装的 CMake
+# CMake 路径，指向项目本地安装的 CMake。
 CMAKE = { value = ".cmake/bin/cmake.exe", relative = true }
 
-# 使用 Ninja 构建
-CMAKE_GENERATOR = "Ninja"
-CMAKE_MAKE_PROGRAM = { value = ".ninja/ninja.exe", relative = true }
-
-# 强制 CMake 输出到与 Visual Studio 相同的路径结构
-CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE = "Release"
-CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE = "Release"
+# 不再强制 Ninja 和静态 CRT。
+# whisper-rs/whisper.cpp 在 Windows/MSVC 下更稳定的路径是：
+# 1. 让 CMake 自行选择 Visual Studio 生成器
+# 2. 显式对齐到 Rust 默认的动态 MSVC CRT (/MD, /MDd)
+CMAKE_POLICY_DEFAULT_CMP0091 = "NEW"
+CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"

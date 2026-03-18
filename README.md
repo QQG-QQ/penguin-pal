@@ -29,6 +29,7 @@
 - Node.js 20+
 - Rust stable（建议 1.78+）
 - Windows 10 1903+（目标平台）
+- Visual Studio Build Tools（Desktop C++）+ Windows SDK
 - LLVM/Clang + CMake（whisper-rs 依赖，首次构建时自动安装）
 
 ### 安装依赖
@@ -43,7 +44,7 @@ npm install
 npm run tauri dev
 ```
 
-首次运行会自动下载并安装 LLVM 和 CMake 到 `src-tauri/` 下（约 450MB），请耐心等待。
+首次运行会自动下载并安装 LLVM 和 CMake 到 `src-tauri/` 下（约 450MB），请耐心等待。MSVC 编译器和 Windows SDK 仍需通过 Visual Studio Build Tools 预先安装。
 
 如果 PowerShell 的执行策略拦截了 `npx`，可改用：
 
@@ -134,7 +135,7 @@ penguin-pal/
 
 ## 构建依赖
 
-whisper-rs 需要 LLVM/Clang 和 CMake 编译。项目已配置自动安装：
+whisper-rs 需要 LLVM/Clang、CMake、MSVC C++ 工具链和 Windows SDK。项目已配置本地自动安装 LLVM/CMake：
 
 - `npm run tauri dev`：自动检测并安装 LLVM 和 CMake
 - `cargo build`：需先运行 `setup-llvm.ps1` 和 `setup-cmake.ps1`

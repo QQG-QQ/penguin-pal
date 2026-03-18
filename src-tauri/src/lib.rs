@@ -229,6 +229,7 @@ async fn update_codex(app: AppHandle) -> Result<codex_update::CodexUpdateStatus,
         .path()
         .app_local_data_dir()
         .map_err(|e| format!("获取本地数据目录失败: {}", e))?;
+    let target_version = codex_update::fetch_latest_version().await.ok();
 
     #[cfg(target_os = "windows")]
     let platform_dir = if cfg!(target_arch = "aarch64") {
@@ -243,9 +244,13 @@ async fn update_codex(app: AppHandle) -> Result<codex_update::CodexUpdateStatus,
     let codex_install_dir = install_dir.join("codex").join(platform_dir);
 
     // 执行更新
-    codex_update::install_or_update_codex(&codex_install_dir, |msg| {
-        eprintln!("[Codex Update] {}", msg);
-    })?;
+    codex_update::install_or_update_codex(
+        &codex_install_dir,
+        target_version.as_deref(),
+        |msg| {
+            eprintln!("[Codex Update] {}", msg);
+        },
+    )?;
 
     // 返回更新后的状态
     let status = inspect_codex_cli_status(&app);
@@ -290,9 +295,13 @@ async fn auto_update_codex(app: &AppHandle) -> Result<(), String> {
     let codex_install_dir = install_dir.join("codex").join(platform_dir);
 
     // 执行更新
-    match codex_update::install_or_update_codex(&codex_install_dir, |msg| {
-        eprintln!("[Codex Update] {}", msg);
-    }) {
+    match codex_update::install_or_update_codex(
+        &codex_install_dir,
+        update_status.latest_version.as_deref(),
+        |msg| {
+            eprintln!("[Codex Update] {}", msg);
+        },
+    ) {
         Ok(result) => {
             eprintln!("[Codex] 自动更新完成: {}", result);
             Ok(())

@@ -8,6 +8,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
 const srcTauri = join(projectRoot, 'src-tauri')
 
+if (process.platform !== 'win32') {
+  console.log('[skip] local LLVM/CMake bootstrap only runs on Windows')
+  process.exit(0)
+}
+
 // 依赖检测配置
 const deps = [
   {
@@ -19,11 +24,6 @@ const deps = [
     name: 'CMake',
     checkFile: join(srcTauri, '.cmake', 'bin', 'cmake.exe'),
     setupScript: join(srcTauri, 'setup-cmake.ps1'),
-  },
-  {
-    name: 'Ninja',
-    checkFile: join(srcTauri, '.ninja', 'ninja.exe'),
-    setupScript: join(srcTauri, 'setup-ninja.ps1'),
   },
 ]
 
@@ -59,7 +59,8 @@ async function main() {
   const missing = deps.filter(dep => !existsSync(dep.checkFile))
 
   if (missing.length === 0) {
-    console.log('[OK] All build dependencies installed (LLVM, CMake, Ninja)')
+    console.log('[OK] All local build dependencies installed (LLVM, CMake)')
+    console.log('[INFO] Whisper still requires Visual Studio Build Tools (Desktop C++) and Windows SDK')
     process.exit(0)
   }
 
@@ -74,7 +75,8 @@ async function main() {
     }
   }
 
-  console.log('[OK] All dependencies installed')
+  console.log('[OK] All local dependencies installed')
+  console.log('[INFO] Whisper still requires Visual Studio Build Tools (Desktop C++) and Windows SDK')
 }
 
 main()

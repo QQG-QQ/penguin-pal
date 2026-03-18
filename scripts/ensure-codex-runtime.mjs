@@ -7,6 +7,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
 const runtimeRoot = join(repoRoot, 'src-tauri', '.codex-runtime', 'windows-x64')
 const codexCmd = join(runtimeRoot, 'node_modules', '.bin', 'codex.cmd')
+const requestedVersion = process.env.PENGUINPAL_CODEX_VERSION?.trim()
+const packageSpec = requestedVersion ? `@openai/codex@${requestedVersion}` : '@openai/codex@latest'
 
 if (process.platform !== 'win32') {
   console.log('[skip] embedded dev Codex bootstrap only runs on Windows')
@@ -36,7 +38,7 @@ if (!existsSync(runtimePkg)) {
   )
 }
 
-console.log('[info] Installing private Codex runtime into src-tauri/.codex-runtime/windows-x64')
+console.log(`[info] Installing private Codex runtime into src-tauri/.codex-runtime/windows-x64 (${packageSpec})`)
 const npmExecPath = process.env.npm_execpath
 if (!npmExecPath) {
   console.error('[error] npm_execpath is missing. Please run this via npm/npx on Windows.')
@@ -45,7 +47,7 @@ if (!npmExecPath) {
 
 const install = spawnSync(
   process.execPath,
-  [npmExecPath, 'install', '--no-fund', '--no-audit', '@openai/codex@latest'],
+  [npmExecPath, 'install', '--no-fund', '--no-audit', '--save-exact', packageSpec],
   {
     cwd: runtimeRoot,
     stdio: 'inherit',

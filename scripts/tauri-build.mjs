@@ -1,15 +1,13 @@
-// 智能 Tauri 构建脚本
-// 1. 确保依赖安装
-// 2. 预编译触发 whisper-rs-sys 构建
-// 3. 修复路径问题
-// 4. 完整构建
+// Tauri 构建脚本
+// 1. 在 Windows 上确保 LLVM/CMake 已就绪
+// 2. 交给上游 whisper-rs-sys + CMake 正常构建
+// 3. 执行 tauri dev/build
 import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
-const srcTauri = join(projectRoot, 'src-tauri')
 
 function run(cmd, args, cwd = projectRoot) {
   return new Promise((resolve) => {
@@ -28,23 +26,15 @@ async function main() {
   const args = process.argv.slice(2)
   const tauriArgs = args.length > 0 ? args : ['build']
 
-  // 1. 确保依赖
-  console.log('[build] Step 1: Checking dependencies...')
-  const ensureCode = await run('node', ['./scripts/ensure-llvm.mjs'])
-  if (ensureCode !== 0) {
-    process.exit(1)
+  if (process.platform === 'win32') {
+    console.log('[build] Step 1: Checking local LLVM/CMake...')
+    const ensureCode = await run('node', ['./scripts/ensure-llvm.mjs'])
+    if (ensureCode !== 0) {
+      process.exit(1)
+    }
   }
 
-  // 2. 预编译（可能失败，没关系）
-  console.log('[build] Step 2: Pre-compiling to generate whisper-rs-sys...')
-  await run('cargo', ['build', '--release'], srcTauri)
-
-  // 3. 修复路径
-  console.log('[build] Step 3: Fixing whisper-rs-sys path...')
-  await run('node', ['./scripts/fix-whisper-path.mjs'])
-
-  // 4. 完整构建
-  console.log('[build] Step 4: Running tauri', tauriArgs.join(' '), '...')
+  console.log('[build] Step 2: Running tauri', tauriArgs.join(' '), '...')
   const tauriCode = await run('npx', ['tauri', ...tauriArgs])
   process.exit(tauriCode)
 }
