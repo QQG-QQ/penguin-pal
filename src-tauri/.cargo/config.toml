@@ -9,8 +9,10 @@ LIBCLANG_PATH = { value = ".llvm/bin", relative = true }
 # CMake 路径，指向项目本地安装的 CMake
 CMAKE = { value = ".cmake/bin/cmake.exe", relative = true }
 
-# 使用 Ninja 作为 CMake 生成器（避免 VS 版本兼容问题）
+# 使用 Ninja 构建
 CMAKE_GENERATOR = "Ninja"
-
-# Ninja 可执行文件路径
 CMAKE_MAKE_PROGRAM = { value = ".ninja/ninja.exe", relative = true }
+
+# 强制 CMake 输出到与 Visual Studio 相同的路径结构
+CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE = "Release"
+CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE = "Release"

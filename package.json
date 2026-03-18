@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "prepare:codex-runtime": "powershell -ExecutionPolicy Bypass -File .\\scripts\\prepare-embedded-codex-runtime.ps1",
     "prepare:llvm": "node ./scripts/ensure-llvm.mjs",
-    "tauri": "node ./scripts/ensure-llvm.mjs && tauri"
+    "tauri": "node ./scripts/tauri-build.mjs",
+    "tauri:dev": "node ./scripts/tauri-build.mjs dev",
+    "tauri:build": "node ./scripts/tauri-build.mjs build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
