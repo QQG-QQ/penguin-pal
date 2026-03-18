@@ -66,8 +66,15 @@ pub fn delete_registry_value(_app: &AppHandle, path: &str, name: &str) -> Contro
 }
 
 fn run_reg(args: &[&str]) -> ControlResult<String> {
-    let output = Command::new("reg")
-        .args(args)
+    let mut cmd = Command::new("reg");
+    cmd.args(args);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd
         .output()
         .map_err(|error| {
             ControlError::backend(

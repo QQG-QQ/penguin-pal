@@ -306,6 +306,12 @@ fn run_codex_exec(command: &str, home_root: &Path, prompt: &str) -> Result<Strin
     let mut child = {
         let mut cmd = Command::new(command);
         apply_private_env(&mut cmd, home_root);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
         cmd
     }
         .arg("exec")

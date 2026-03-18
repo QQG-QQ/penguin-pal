@@ -31,8 +31,11 @@ pub fn execute_action(app: &AppHandle, action_id: &str) -> Result<String, String
 
 #[cfg(target_os = "windows")]
 fn launch_windows_binary(binary: &str, args: &[&str], success_message: &str) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
     Command::new(binary)
         .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|error| error.to_string())?;
     Ok(success_message.to_string())
