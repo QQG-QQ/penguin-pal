@@ -252,6 +252,58 @@ async fn update_codex(app: AppHandle) -> Result<codex_update::CodexUpdateStatus,
     Ok(codex_update::check_update_status(&app, status.version).await)
 }
 
+/// 自动检查并更新 Codex（启动时调用）
+async fn auto_update_codex(app: &AppHandle) -> Result<(), String> {
+    // 获取当前版本
+    let current_status = inspect_codex_cli_status(app);
+
+    // 检查是否有更新
+    let update_status = codex_update::check_update_status(app, current_status.version.clone()).await;
+
+    if !update_status.update_available {
+        eprintln!("[Codex] 已是最新版本: {:?}", current_status.version);
+        return Ok(());
+    }
+
+    eprintln!(
+        "[Codex] 发现新版本: {:?} -> {:?}，开始自动更新...",
+        current_status.version,
+        update_status.latest_version
+    );
+
+    // 获取安装目录
+    let install_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("获取本地数据目录失败: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    let platform_dir = if cfg!(target_arch = "aarch64") {
+        "windows-arm64"
+    } else {
+        "windows-x64"
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let platform_dir = "unix";
+
+    let codex_install_dir = install_dir.join("codex").join(platform_dir);
+
+    // 执行更新
+    match codex_update::install_or_update_codex(&codex_install_dir, |msg| {
+        eprintln!("[Codex Update] {}", msg);
+    }) {
+        Ok(result) => {
+            eprintln!("[Codex] 自动更新完成: {}", result);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("[Codex] 自动更新失败: {}", e);
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 fn get_control_service_status(app: AppHandle) -> Result<ControlServiceStatus, String> {
     control_router::service_status(&app).map_err(|error| error.to_string())
@@ -1694,6 +1746,14 @@ pub fn run() {
             if let Err(error) = initialize_codex_config(&app.handle()) {
                 eprintln!("Codex config initialization failed: {error}");
             }
+
+            // 异步检查并自动更新 Codex
+            let app_handle_for_update = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = auto_update_codex(&app_handle_for_update).await {
+                    eprintln!("Codex auto-update failed: {e}");
+                }
+            });
 
             let control_service_status = match control::http::start(app.handle().clone()) {
                 Ok(address) => {
