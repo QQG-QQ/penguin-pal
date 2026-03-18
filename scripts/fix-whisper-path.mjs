@@ -1,6 +1,6 @@
 // 修复 whisper-rs-sys 构建路径问题
-// 在 Windows + Ninja 下，whisper/ggml 静态库有时只出现在子目录中，
-// 但 rustc 只会在 build.rs 导出的搜索目录本身找库文件。
+// 在 Windows + Ninja 下，whisper/ggml 静态库有时会落在 out/lib 或 build 子目录里，
+// 但上游 build.rs 实际只搜 OUT_DIR 根目录和 OUT_DIR/build/**。
 import { existsSync, mkdirSync, copyFileSync, readdirSync } from 'fs'
 import { basename, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -22,7 +22,7 @@ const libraryNames = new Set([
   'libggml-base.a',
   'libggml-cpu.a',
 ])
-const candidateOutputDirs = ['.', 'Release', 'RelWithDebInfo', 'Debug']
+const buildSubdirs = ['.', 'Release', 'RelWithDebInfo', 'Debug']
 
 function walkFiles(dir, results = []) {
   if (!existsSync(dir)) return results
@@ -39,8 +39,8 @@ function walkFiles(dir, results = []) {
   return results
 }
 
-function findWhisperOutDirs() {
-  const outDirs = []
+function findWhisperOutEntries() {
+  const outEntries = []
 
   for (const buildRoot of buildRoots) {
     if (!existsSync(buildRoot)) {
@@ -53,19 +53,22 @@ function findWhisperOutDirs() {
         continue
       }
 
-      const outDir = join(buildRoot, dir, 'out', 'build')
-      if (existsSync(outDir)) {
-        outDirs.push(outDir)
+      const outRoot = join(buildRoot, dir, 'out')
+      const buildDir = join(outRoot, 'build')
+      if (!existsSync(outRoot)) {
+        continue
       }
+
+      outEntries.push({ outRoot, buildDir })
     }
   }
 
-  return outDirs
+  return outEntries
 }
 
-function discoverLibraries(outDir) {
+function discoverLibraries(rootDir) {
   const libraries = new Map()
-  for (const file of walkFiles(outDir)) {
+  for (const file of walkFiles(rootDir)) {
     const name = basename(file)
     if (!libraryNames.has(name)) {
       continue
@@ -79,14 +82,27 @@ function discoverLibraries(outDir) {
   return libraries
 }
 
-function mirrorLibraries(outDir, libraries) {
+function buildTargets(outRoot, buildDir) {
+  const targets = [outRoot]
+
+  if (existsSync(buildDir)) {
+    targets.push(buildDir)
+    for (const subdir of buildSubdirs) {
+      if (subdir === '.') {
+        continue
+      }
+      targets.push(join(buildDir, subdir))
+    }
+  }
+
+  return targets
+}
+
+function mirrorLibraries(targetDirs, libraries) {
   let copied = 0
 
   for (const [name, source] of libraries.entries()) {
-    for (const relativeDir of candidateOutputDirs) {
-      const targetDir = relativeDir === '.'
-        ? outDir
-        : join(outDir, relativeDir)
+    for (const targetDir of targetDirs) {
       const targetFile = join(targetDir, name)
 
       if (targetFile === source || existsSync(targetFile)) {
@@ -104,22 +120,22 @@ function mirrorLibraries(outDir, libraries) {
 }
 
 function fixWhisperPath() {
-  const outDirs = findWhisperOutDirs()
-  if (outDirs.length === 0) {
+  const outEntries = findWhisperOutEntries()
+  if (outEntries.length === 0) {
     console.log('[whisper-fix] No whisper-rs-sys build dir found, skipping')
     return
   }
 
   let totalCopied = 0
 
-  for (const outDir of outDirs) {
-    const libraries = discoverLibraries(outDir)
+  for (const { outRoot, buildDir } of outEntries) {
+    const libraries = discoverLibraries(outRoot)
     if (libraries.size === 0) {
-      console.log(`[whisper-fix] No whisper/ggml static libs found under ${outDir}, skipping`)
+      console.log(`[whisper-fix] No whisper/ggml static libs found under ${outRoot}, skipping`)
       continue
     }
 
-    totalCopied += mirrorLibraries(outDir, libraries)
+    totalCopied += mirrorLibraries(buildTargets(outRoot, buildDir), libraries)
   }
 
   if (totalCopied === 0) {

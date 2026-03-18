@@ -1,8 +1,9 @@
 // Tauri 构建脚本
 // 1. 在 Windows 上确保 LLVM/CMake/Ninja 已就绪
-// 2. 预编译触发 whisper-rs-sys 生成原生库
-// 3. 修复 Ninja 下的 whisper/ggml 产物路径
-// 4. 执行 tauri dev/build
+// 2. 清理 whisper-rs-sys 旧缓存，确保新的 CMake 配置生效
+// 3. 预编译触发 whisper-rs-sys 生成原生库
+// 4. 修复 Ninja 下的 whisper/ggml 产物路径
+// 5. 执行 tauri dev/build
 import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
@@ -34,21 +35,24 @@ async function main() {
       process.exit(1)
     }
 
+    console.log('[build] Step 2: Cleaning stale whisper-rs-sys artifacts...')
+    await run('cargo', ['clean', '-p', 'whisper-rs-sys'], join(projectRoot, 'src-tauri'))
+
     const prebuildArgs = tauriArgs[0] === 'build'
       ? ['build', '--release']
       : ['build']
 
-    console.log('[build] Step 2: Pre-compiling whisper-rs-sys artifacts...')
+    console.log('[build] Step 3: Pre-compiling whisper-rs-sys artifacts...')
     await run('cargo', prebuildArgs, join(projectRoot, 'src-tauri'))
 
-    console.log('[build] Step 3: Fixing whisper-rs-sys output paths...')
+    console.log('[build] Step 4: Fixing whisper-rs-sys output paths...')
     const fixCode = await run('node', ['./scripts/fix-whisper-path.mjs'])
     if (fixCode !== 0) {
       process.exit(1)
     }
   }
 
-  console.log('[build] Step 4: Running tauri', tauriArgs.join(' '), '...')
+  console.log('[build] Step 5: Running tauri', tauriArgs.join(' '), '...')
   const tauriCode = await run('npx', ['tauri', ...tauriArgs])
   process.exit(tauriCode)
 }
