@@ -323,3 +323,37 @@ export interface BubbleWindowState {
   faceRight: number
   faceBottom: number
 }
+
+// ============================================================================
+// Whisper 语音识别类型
+// ============================================================================
+
+export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium' | 'large'
+export type RecordingState = 'idle' | 'recording' | 'processing'
+
+export interface ModelInfo {
+  model: WhisperModel
+  label: string
+  sizeBytes: number
+  downloaded: boolean
+}
+
+export interface WhisperStatus {
+  modelLoaded: boolean
+  currentModel: WhisperModel | null
+  availableModels: ModelInfo[]
+  recordingState: RecordingState
+}
+
+export interface TranscriptionResult {
+  text: string
+  language: string | null
+  durationMs: number
+}
+
+export interface DownloadProgress {
+  model: WhisperModel
+  downloadedBytes: number
+  totalBytes: number
+  progressPercent: number
+}

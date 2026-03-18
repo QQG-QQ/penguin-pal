@@ -14,13 +14,19 @@ import type {
   ControlPendingRequest,
   ControlServiceStatus,
   ControlToolInvokeResponse,
+  DownloadProgress,
+  ModelInfo,
   OAuthFlowResult,
   OAuthState,
   ProviderConfigInput,
   ProviderKind,
+  RecordingState,
   ReplyHistoryEntry,
+  TranscriptionResult,
   VisionChannelConfig,
-  VisionProviderStatus
+  VisionProviderStatus,
+  WhisperModel,
+  WhisperStatus
 } from '../types/assistant'
 
 const providerModels: Record<ProviderKind, string> = {
@@ -1457,4 +1463,111 @@ export const startMainWindowDrag = async (): Promise<void> => {
   }
 
   await safeInvoke<void>('start_main_window_drag')
+}
+
+// ============================================================================
+// Whisper 语音识别 API
+// ============================================================================
+
+export const getWhisperStatus = async (): Promise<WhisperStatus> => {
+  try {
+    return await safeInvoke<WhisperStatus>('get_whisper_status')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return {
+      modelLoaded: false,
+      currentModel: null,
+      availableModels: [],
+      recordingState: 'idle'
+    }
+  }
+}
+
+export const getWhisperModels = async (): Promise<ModelInfo[]> => {
+  try {
+    return await safeInvoke<ModelInfo[]>('get_whisper_models')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return []
+  }
+}
+
+export const downloadWhisperModel = async (
+  model: WhisperModel,
+  onProgress?: (progress: DownloadProgress) => void
+): Promise<string> => {
+  if (!isTauriRuntime()) {
+    throw new Error('Whisper 功能需要桌宠运行时')
+  }
+
+  const { Channel } = await import('@tauri-apps/api/core')
+  const progressChannel = new Channel<DownloadProgress>()
+
+  if (onProgress) {
+    progressChannel.onmessage = onProgress
+  }
+
+  return safeInvoke<string>('download_whisper_model', {
+    model,
+    progress: progressChannel
+  })
+}
+
+export const loadWhisperModel = async (model: WhisperModel): Promise<WhisperStatus> => {
+  try {
+    return await safeInvoke<WhisperStatus>('load_whisper_model', { model })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('加载 Whisper 模型需要桌宠运行时')
+  }
+}
+
+export const unloadWhisperModel = async (): Promise<WhisperStatus> => {
+  try {
+    return await safeInvoke<WhisperStatus>('unload_whisper_model')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return {
+      modelLoaded: false,
+      currentModel: null,
+      availableModels: [],
+      recordingState: 'idle'
+    }
+  }
+}
+
+export const deleteWhisperModel = async (model: WhisperModel): Promise<WhisperStatus> => {
+  try {
+    return await safeInvoke<WhisperStatus>('delete_whisper_model', { model })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('删除 Whisper 模型需要桌宠运行时')
+  }
+}
+
+export const startWhisperRecording = async (): Promise<RecordingState> => {
+  try {
+    return await safeInvoke<RecordingState>('start_whisper_recording')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('Whisper 录音需要桌宠运行时')
+  }
+}
+
+export const stopWhisperRecording = async (): Promise<TranscriptionResult> => {
+  try {
+    return await safeInvoke<TranscriptionResult>('stop_whisper_recording')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('Whisper 录音需要桌宠运行时')
+  }
+}
+
+export const getWhisperRecordingState = async (): Promise<RecordingState> => {
+  try {
+    return await safeInvoke<RecordingState>('get_whisper_recording_state')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return 'idle'
+  }
 }

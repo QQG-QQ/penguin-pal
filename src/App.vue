@@ -24,11 +24,14 @@ import {
   closeSettingsWindow,
   confirmControlPending,
   confirmDesktopAction,
+  deleteWhisperModel,
+  downloadWhisperModel,
   getAssistantSnapshot,
   getControlServiceStatus,
   getInputHistory,
   getTodayReplyHistory,
   getCodexCliStatus,
+  getWhisperStatus,
   hideAssistantWindow,
   invokeControlTool,
   isBubbleWindowView,
@@ -39,6 +42,7 @@ import {
   listenForBubbleWindowState,
   listenForSettingsSectionChange,
   listenForTodayReplyHistory,
+  loadWhisperModel,
   openSettingsWindow,
   publishTodayReplyHistory,
   publishBubbleWindowState,
@@ -50,6 +54,7 @@ import {
   sendChatMessage,
   startCodexCliLogin,
   listControlPending,
+  unloadWhisperModel,
   type SettingsSection
 } from './lib/assistant'
 import type {
@@ -65,11 +70,14 @@ import type {
   ControlPendingRequest,
   ControlToolInvokeResponse,
   DesktopAction,
+  DownloadProgress,
   PetLayoutMetrics,
   PetMode,
   ProviderConfigInput,
   ProviderKind,
-  ReplyHistoryEntry
+  ReplyHistoryEntry,
+  WhisperModel,
+  WhisperStatus
 } from './types/assistant'
 
 const providerDefaults: Record<ProviderKind, string> = {
@@ -266,6 +274,14 @@ const savingSettings = ref(false)
 const authBusy = ref(false)
 const oauthNotice = ref('')
 const codexStatus = ref<CodexCliStatus>(emptyCodexStatus())
+const whisperStatus = ref<WhisperStatus>({
+  modelLoaded: false,
+  currentModel: null,
+  availableModels: [],
+  recordingState: 'idle'
+})
+const whisperDownloading = ref(false)
+const whisperDownloadProgress = ref<DownloadProgress | null>(null)
 const pendingApproval = ref<ActionApprovalRequest | null>(null)
 const controlPendingRequest = ref<ControlPendingRequest | null>(null)
 const pendingCommandConfirmation = ref<PendingCommandConfirmation | null>(null)
@@ -2300,6 +2316,66 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
   }
 }
 
+const refreshWhisperStatus = async () => {
+  try {
+    whisperStatus.value = await getWhisperStatus()
+  } catch {
+    // 静默处理错误
+  }
+}
+
+const handleWhisperDownload = async (model: WhisperModel) => {
+  if (whisperDownloading.value) return
+
+  whisperDownloading.value = true
+  whisperDownloadProgress.value = {
+    model,
+    downloadedBytes: 0,
+    totalBytes: 0,
+    progressPercent: 0
+  }
+
+  try {
+    await downloadWhisperModel(model, (progress) => {
+      whisperDownloadProgress.value = progress
+    })
+    await refreshWhisperStatus()
+    announce(`Whisper ${model} 模型下载完成`)
+  } catch (error) {
+    announce(resolveErrorMessage(error, '模型下载失败'), 'guarded')
+  } finally {
+    whisperDownloading.value = false
+    whisperDownloadProgress.value = null
+  }
+}
+
+const handleWhisperLoad = async (model: WhisperModel) => {
+  try {
+    whisperStatus.value = await loadWhisperModel(model)
+    announce(`已加载 Whisper ${model} 模型`)
+  } catch (error) {
+    announce(resolveErrorMessage(error, '加载模型失败'), 'guarded')
+  }
+}
+
+const handleWhisperUnload = async () => {
+  try {
+    whisperStatus.value = await unloadWhisperModel()
+    announce('已卸载 Whisper 模型')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '卸载模型失败'), 'guarded')
+  }
+}
+
+const handleWhisperDelete = async (model: WhisperModel) => {
+  try {
+    whisperStatus.value = await deleteWhisperModel(model)
+    announce(`已删除 Whisper ${model} 模型`)
+  } catch (error) {
+    announce(resolveErrorMessage(error, '删除模型失败'), 'guarded')
+  }
+}
+
 const handleInputFocus = () => {
   composerVisible.value = true
   textInputFocused.value = true
@@ -2424,6 +2500,7 @@ onMounted(() => {
   void refreshTodayReplyHistory()
   void loadSnapshot()
   void refreshCodexLoginStatus(true)
+  void refreshWhisperStatus()
   void refreshMicrophoneAvailability(!isSettingsView.value).then(() => {
     scheduleAutoListening(420)
   })
@@ -2475,11 +2552,18 @@ onBeforeUnmount(() => {
       :permission-level="snapshot.permissionLevel"
       :ai-constraints="snapshot.aiConstraints"
       :today-reply-history="todayReplyHistory"
+      :whisper-status="whisperStatus"
+      :whisper-downloading="whisperDownloading"
+      :whisper-download-progress="whisperDownloadProgress"
       @close="closeDrawer"
       @save="saveSettings"
       @section-change="drawerSection = $event"
       @oauth-start="beginOAuthLogin"
       @codex-refresh="refreshCodexLoginStatus()"
+      @whisper-download="handleWhisperDownload"
+      @whisper-load="handleWhisperLoad"
+      @whisper-unload="handleWhisperUnload"
+      @whisper-delete="handleWhisperDelete"
       @trigger-action="handleActionTrigger"
       @clear-today-history="clearTodayHistoryRecords"
     />

@@ -1,6 +1,11 @@
+mod model_manager;
 mod recorder;
+mod transcriber;
 mod tts;
+pub mod types;
 mod whisper;
+
+pub use transcriber::TranscriberService;
 
 use crate::app_state::AudioProfile;
 

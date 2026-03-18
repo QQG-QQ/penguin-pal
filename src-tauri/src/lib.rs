@@ -39,6 +39,7 @@ use crate::{
         PetMode, ProviderConfigInput, RuntimeState, ShellPermissionSettings,
         DEFAULT_OAUTH_REDIRECT_URL,
     },
+    audio::{types as audio_types, TranscriberService},
     codex_runtime::{apply_private_env, initialize_codex_config, private_auth_path, resolve_for_app},
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
@@ -996,6 +997,82 @@ fn grant_basic_shell_access(app: AppHandle) -> Result<PermissionStatusResponse, 
     get_shell_permissions(app)
 }
 
+// ============================================================================
+// Whisper 语音识别命令
+// ============================================================================
+
+#[tauri::command]
+fn get_whisper_status(
+    transcriber: State<'_, TranscriberService>,
+) -> Result<audio_types::WhisperStatus, String> {
+    Ok(transcriber.get_status())
+}
+
+#[tauri::command]
+fn get_whisper_models(
+    transcriber: State<'_, TranscriberService>,
+) -> Result<Vec<audio_types::ModelInfo>, String> {
+    Ok(transcriber.get_available_models())
+}
+
+#[tauri::command]
+async fn download_whisper_model(
+    transcriber: State<'_, TranscriberService>,
+    model: audio_types::WhisperModel,
+    progress: tauri::ipc::Channel<audio_types::DownloadProgress>,
+) -> Result<String, String> {
+    let path = transcriber.download_model(model, progress).await?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn load_whisper_model(
+    transcriber: State<'_, TranscriberService>,
+    model: audio_types::WhisperModel,
+) -> Result<audio_types::WhisperStatus, String> {
+    transcriber.load_model(model)?;
+    Ok(transcriber.get_status())
+}
+
+#[tauri::command]
+fn unload_whisper_model(
+    transcriber: State<'_, TranscriberService>,
+) -> Result<audio_types::WhisperStatus, String> {
+    transcriber.unload_model();
+    Ok(transcriber.get_status())
+}
+
+#[tauri::command]
+fn delete_whisper_model(
+    transcriber: State<'_, TranscriberService>,
+    model: audio_types::WhisperModel,
+) -> Result<audio_types::WhisperStatus, String> {
+    transcriber.delete_model(model)?;
+    Ok(transcriber.get_status())
+}
+
+#[tauri::command]
+fn start_whisper_recording(
+    transcriber: State<'_, TranscriberService>,
+) -> Result<audio_types::RecordingState, String> {
+    transcriber.start_recording()?;
+    Ok(transcriber.get_recording_state())
+}
+
+#[tauri::command]
+fn stop_whisper_recording(
+    transcriber: State<'_, TranscriberService>,
+) -> Result<audio_types::TranscriptionResult, String> {
+    transcriber.stop_recording()
+}
+
+#[tauri::command]
+fn get_whisper_recording_state(
+    transcriber: State<'_, TranscriberService>,
+) -> Result<audio_types::RecordingState, String> {
+    Ok(transcriber.get_recording_state())
+}
+
 #[tauri::command]
 async fn send_chat_message(
     app: AppHandle,
@@ -1378,6 +1455,20 @@ pub fn run() {
             app.manage(Mutex::new(runtime));
             app.manage(ControlServiceState::new());
             app.manage(AgentTaskState::new());
+
+            // 初始化 Whisper 语音识别服务
+            let app_data_dir = app.path().app_data_dir()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            match TranscriberService::new(app_data_dir) {
+                Ok(transcriber) => {
+                    app.manage(transcriber);
+                    eprintln!("Whisper transcriber service initialized");
+                }
+                Err(e) => {
+                    eprintln!("Failed to initialize Whisper transcriber: {}", e);
+                }
+            }
+
             let _ = history::prepare_storage(&app.handle());
 
             // 初始化 Codex 配置目录结构
@@ -1494,7 +1585,17 @@ pub fn run() {
             get_shell_permissions,
             grant_shell_permission,
             revoke_shell_permission,
-            grant_basic_shell_access
+            grant_basic_shell_access,
+            // Whisper 语音识别
+            get_whisper_status,
+            get_whisper_models,
+            download_whisper_model,
+            load_whisper_model,
+            unload_whisper_model,
+            delete_whisper_model,
+            start_whisper_recording,
+            stop_whisper_recording,
+            get_whisper_recording_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

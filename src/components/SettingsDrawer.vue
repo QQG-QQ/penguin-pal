@@ -6,11 +6,14 @@ import type {
   AiConstraintProfile,
   CodexCliStatus,
   DesktopAction,
+  DownloadProgress,
   ProviderConfigInput,
   ProviderKind,
   ReplyHistoryEntry,
   VisionChannelKind,
-  VisionProviderStatus
+  VisionProviderStatus,
+  WhisperModel,
+  WhisperStatus
 } from '../types/assistant'
 
 const props = defineProps<{
@@ -27,6 +30,9 @@ const props = defineProps<{
   permissionLevel: number
   aiConstraints: AiConstraintProfile
   todayReplyHistory: ReplyHistoryEntry[]
+  whisperStatus: WhisperStatus
+  whisperDownloading: boolean
+  whisperDownloadProgress: DownloadProgress | null
 }>()
 
 const emit = defineEmits<{
@@ -37,6 +43,10 @@ const emit = defineEmits<{
   codexRefresh: []
   triggerAction: [action: DesktopAction]
   clearTodayHistory: []
+  whisperDownload: [model: WhisperModel]
+  whisperLoad: [model: WhisperModel]
+  whisperUnload: []
+  whisperDelete: [model: WhisperModel]
 }>()
 
 const cloneDraft = (value: ProviderConfigInput): ProviderConfigInput =>
@@ -491,6 +501,103 @@ const formatHistoryTime = (timestamp: number) =>
           </p>
           <p v-else>
             已启用的权限将在保存后生效。高风险操作仍需用户确认。
+          </p>
+        </div>
+      </section>
+
+      <section class="oauth-shell full-row">
+        <div class="oauth-header">
+          <div>
+            <strong>本地 Whisper 语音识别</strong>
+            <p>使用本地 Whisper 模型进行语音转写，无需外网。</p>
+          </div>
+          <span class="oauth-status">{{ whisperStatus.modelLoaded ? '已加载' : '未加载' }}</span>
+        </div>
+
+        <div class="whisper-models">
+          <article
+            v-for="model in whisperStatus.availableModels"
+            :key="model.model"
+            class="whisper-model-card"
+          >
+            <div class="whisper-model-info">
+              <strong>{{ model.label }}</strong>
+              <span
+                class="whisper-model-status"
+                :class="{
+                  downloaded: model.downloaded,
+                  loaded: whisperStatus.currentModel === model.model
+                }"
+              >
+                {{
+                  whisperStatus.currentModel === model.model
+                    ? '已加载'
+                    : model.downloaded
+                      ? '已下载'
+                      : '未下载'
+                }}
+              </span>
+            </div>
+
+            <div
+              v-if="whisperDownloading && whisperDownloadProgress?.model === model.model"
+              class="whisper-progress"
+            >
+              <div
+                class="whisper-progress-bar"
+                :style="{ width: `${whisperDownloadProgress.progressPercent}%` }"
+              />
+              <span>{{ Math.round(whisperDownloadProgress.progressPercent) }}%</span>
+            </div>
+
+            <div class="whisper-model-actions">
+              <template v-if="!model.downloaded">
+                <button
+                  type="button"
+                  class="ghost-button"
+                  :disabled="whisperDownloading"
+                  @click="emit('whisperDownload', model.model)"
+                >
+                  {{ whisperDownloading && whisperDownloadProgress?.model === model.model ? '下载中...' : '下载' }}
+                </button>
+              </template>
+
+              <template v-else-if="whisperStatus.currentModel === model.model">
+                <button
+                  type="button"
+                  class="ghost-button"
+                  @click="emit('whisperUnload')"
+                >
+                  卸载
+                </button>
+              </template>
+
+              <template v-else>
+                <button
+                  type="button"
+                  class="ghost-button"
+                  @click="emit('whisperLoad', model.model)"
+                >
+                  加载
+                </button>
+                <button
+                  type="button"
+                  class="ghost-button"
+                  @click="emit('whisperDelete', model.model)"
+                >
+                  删除
+                </button>
+              </template>
+            </div>
+          </article>
+        </div>
+
+        <div class="oauth-meta full-row">
+          <p v-if="whisperStatus.modelLoaded">
+            当前已加载 {{ whisperStatus.currentModel }} 模型。语音输入会自动使用本地 Whisper 转写。
+          </p>
+          <p v-else>
+            请下载并加载一个 Whisper 模型以启用本地语音识别。推荐使用 Base 模型（142MB）。
           </p>
         </div>
       </section>
@@ -983,6 +1090,75 @@ textarea {
 
 .action-pane {
   margin-top: 18px;
+}
+
+.whisper-models {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.whisper-model-card {
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  display: grid;
+  gap: 10px;
+}
+
+.whisper-model-info {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.whisper-model-status {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(17, 68, 92, 0.08);
+  color: #476775;
+  font-size: 12px;
+}
+
+.whisper-model-status.downloaded {
+  background: rgba(22, 160, 133, 0.12);
+  color: #0d7a64;
+}
+
+.whisper-model-status.loaded {
+  background: rgba(11, 106, 138, 0.15);
+  color: #0b6988;
+}
+
+.whisper-model-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.whisper-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 24px;
+  background: rgba(17, 68, 92, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+  padding-right: 10px;
+}
+
+.whisper-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #0b6a8a, #16a085);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+.whisper-progress span {
+  font-size: 12px;
+  color: #365667;
+  white-space: nowrap;
 }
 
 @media (max-width: 780px) {
