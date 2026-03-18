@@ -129,7 +129,7 @@ impl ShellAgentExecutor {
     }
 
     /// 获取当前权限摘要，用于 AI 回复
-    pub fn get_permission_summary(&self) -> String {
+    pub fn get_permission_summary(&mut self) -> String {
         let permissions = [
             ("shell:execute", "基本执行"),
             ("shell:modify", "文件修改"),
