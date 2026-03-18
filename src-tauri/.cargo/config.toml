@@ -12,5 +12,5 @@ CMAKE = { value = ".cmake/bin/cmake.exe", relative = true }
 # 使用 Ninja 作为 CMake 生成器（避免 VS 版本兼容问题）
 CMAKE_GENERATOR = "Ninja"
 
-# Ninja 路径添加到 PATH
-PATH = { value = ".ninja", relative = true, extend = true }
+# Ninja 可执行文件路径
+CMAKE_MAKE_PROGRAM = { value = ".ninja/ninja.exe", relative = true }
