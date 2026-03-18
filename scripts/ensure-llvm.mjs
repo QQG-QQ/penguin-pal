@@ -1,4 +1,4 @@
-// 检测并安装 LLVM 依赖
+// 检测并安装构建依赖 (LLVM + CMake)
 import { existsSync } from 'fs'
 import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
@@ -6,31 +6,70 @@ import { dirname, join } from 'path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
-const llvmBin = join(projectRoot, 'src-tauri', '.llvm', 'bin')
-const libclangDll = join(llvmBin, 'libclang.dll')
+const srcTauri = join(projectRoot, 'src-tauri')
 
-if (existsSync(libclangDll)) {
-  console.log('[OK] LLVM 已安装')
-  process.exit(0)
+// 依赖检测配置
+const deps = [
+  {
+    name: 'LLVM',
+    checkFile: join(srcTauri, '.llvm', 'bin', 'libclang.dll'),
+    setupScript: join(srcTauri, 'setup-llvm.ps1'),
+  },
+  {
+    name: 'CMake',
+    checkFile: join(srcTauri, '.cmake', 'bin', 'cmake.exe'),
+    setupScript: join(srcTauri, 'setup-cmake.ps1'),
+  },
+]
+
+async function installDep(dep) {
+  return new Promise((resolve, reject) => {
+    console.log(`[INFO] ${dep.name} not installed, installing...`)
+    console.log(`[INFO] This may take a few minutes, please wait...`)
+
+    const ps = spawn('powershell', [
+      '-ExecutionPolicy', 'Bypass',
+      '-File', dep.setupScript
+    ], {
+      stdio: 'inherit',
+      cwd: srcTauri
+    })
+
+    ps.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`${dep.name} installation failed`))
+      } else {
+        console.log(`[OK] ${dep.name} installed`)
+        resolve()
+      }
+    })
+
+    ps.on('error', (err) => {
+      reject(new Error(`Failed to run ${dep.name} installer: ${err.message}`))
+    })
+  })
 }
 
-console.log('[INFO] LLVM 未安装，正在安装...')
-console.log('[INFO] 这可能需要几分钟，请耐心等待...')
+async function main() {
+  const missing = deps.filter(dep => !existsSync(dep.checkFile))
 
-const setupScript = join(projectRoot, 'src-tauri', 'setup-llvm.ps1')
-
-const ps = spawn('powershell', [
-  '-ExecutionPolicy', 'Bypass',
-  '-File', setupScript
-], {
-  stdio: 'inherit',
-  cwd: join(projectRoot, 'src-tauri')
-})
-
-ps.on('close', (code) => {
-  if (code !== 0) {
-    console.error('[ERROR] LLVM 安装失败')
-    process.exit(1)
+  if (missing.length === 0) {
+    console.log('[OK] All build dependencies installed (LLVM, CMake)')
+    process.exit(0)
   }
-  console.log('[OK] LLVM 安装完成')
-})
+
+  console.log(`[INFO] Missing dependencies: ${missing.map(d => d.name).join(', ')}`)
+
+  for (const dep of missing) {
+    try {
+      await installDep(dep)
+    } catch (err) {
+      console.error(`[ERROR] ${err.message}`)
+      process.exit(1)
+    }
+  }
+
+  console.log('[OK] All dependencies installed')
+}
+
+main()

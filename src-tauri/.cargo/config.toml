@@ -5,3 +5,6 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # LLVM/libclang 路径，指向项目本地安装的 LLVM
 # relative = true 是相对于 Cargo.toml 所在目录 (src-tauri/)
 LIBCLANG_PATH = { value = ".llvm/bin", relative = true }
+
+# CMake 路径，指向项目本地安装的 CMake
+CMAKE = { value = ".cmake/bin/cmake.exe", relative = true }

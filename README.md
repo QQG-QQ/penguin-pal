@@ -29,7 +29,7 @@
 - Node.js 20+
 - Rust stable（建议 1.78+）
 - Windows 10 1903+（目标平台）
-- LLVM/Clang（whisper-rs 依赖，首次构建时自动安装）
+- LLVM/Clang + CMake（whisper-rs 依赖，首次构建时自动安装）
 
 ### 安装依赖
 
@@ -43,7 +43,7 @@ npm install
 npm run tauri dev
 ```
 
-首次运行会自动下载并安装 LLVM 到 `src-tauri/.llvm/`（约 400MB），请耐心等待。
+首次运行会自动下载并安装 LLVM 和 CMake 到 `src-tauri/` 下（约 450MB），请耐心等待。
 
 如果 PowerShell 的执行策略拦截了 `npx`，可改用：
 
@@ -56,8 +56,9 @@ npx.cmd tauri dev
 ```bash
 cd src-tauri
 
-# 首次需要安装 LLVM
+# 首次需要安装 LLVM 和 CMake
 powershell -ExecutionPolicy Bypass -File setup-llvm.ps1
+powershell -ExecutionPolicy Bypass -File setup-cmake.ps1
 
 # 编译
 cargo build
@@ -85,7 +86,9 @@ penguin-pal/
 │  │  ├─ tray.rs              # 托盘逻辑
 │  │  └─ window.rs            # 窗口行为
 │  ├─ .llvm/                  # LLVM 本地安装 (自动下载，已 gitignore)
+│  ├─ .cmake/                 # CMake 本地安装 (自动下载，已 gitignore)
 │  ├─ setup-llvm.ps1          # LLVM 安装脚本
+│  ├─ setup-cmake.ps1         # CMake 安装脚本
 │  └─ tauri.conf.json         # Tauri 配置
 ├─ src/                       # Vue 前端
 │  ├─ App.vue                 # 主界面
@@ -131,9 +134,11 @@ penguin-pal/
 
 ## 构建依赖
 
-whisper-rs 需要 LLVM/Clang 编译。项目已配置自动安装：
+whisper-rs 需要 LLVM/Clang 和 CMake 编译。项目已配置自动安装：
 
-- `npm run tauri dev`：自动检测并安装 LLVM
-- `cargo build`：需先运行 `setup-llvm.ps1`
+- `npm run tauri dev`：自动检测并安装 LLVM 和 CMake
+- `cargo build`：需先运行 `setup-llvm.ps1` 和 `setup-cmake.ps1`
 
-LLVM 安装位置：`src-tauri/.llvm/`（约 1.2GB，已加入 .gitignore）
+安装位置（已加入 .gitignore）：
+- LLVM：`src-tauri/.llvm/`（约 400MB）
+- CMake：`src-tauri/.cmake/`（约 50MB）

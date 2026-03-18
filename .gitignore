@@ -10,6 +10,9 @@ src-tauri/target/
 # LLVM 本地安装 (whisper-rs 依赖)
 src-tauri/.llvm/
 
+# CMake 本地安装 (whisper-rs 依赖)
+src-tauri/.cmake/
+
 # Local artifacts and temp
 artifacts/
 *.tmp
