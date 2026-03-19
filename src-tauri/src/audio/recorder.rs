@@ -33,7 +33,7 @@ pub enum AudioCommand {
     Shutdown,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SelectedInputConfig {
     config: StreamConfig,
     sample_format: SampleFormat,

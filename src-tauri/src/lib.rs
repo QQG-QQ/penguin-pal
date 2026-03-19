@@ -125,7 +125,6 @@ fn register_whisper_input_shortcut(app: &AppHandle, shortcut: &str) -> Result<()
             let state = match event.state {
                 ShortcutState::Pressed => "pressed",
                 ShortcutState::Released => "released",
-                _ => return,
             };
 
             let payload = serde_json::json!({
