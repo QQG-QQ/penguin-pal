@@ -12,8 +12,9 @@ use std::sync::Mutex;
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::types::{
-    now_millis, EpisodicMemory, MetaMemory, MetaPreference, PolicyMemory, ProceduralMemory,
-    ProfileMemory, SemanticEntry, SemanticMemory, MEMORY_SCHEMA_VERSION,
+    generate_id, now_millis, EpisodicMemory, MemoryStatus, MetaMemory, MetaPreference,
+    PolicyMemory, ProceduralMemory, ProfileMemory, SemanticEntry, SemanticMemory,
+    MEMORY_SCHEMA_VERSION,
 };
 
 /// Memory 存储目录名
@@ -301,34 +302,125 @@ impl MemoryStore {
     /// 更新或插入 Semantic Entry
     pub fn upsert_semantic_entry(&self, entry: SemanticEntry) -> Result<(), String> {
         self.update_semantic(|semantic| {
+            let mut entry = with_semantic_defaults(entry);
+
             if let Some(existing) = semantic.entries.iter_mut().find(|candidate| {
-                normalize_key(&candidate.topic) == normalize_key(&entry.topic)
-                    && candidate.source_type == entry.source_type
+                semantic_identity_key(candidate) == semantic_identity_key(&entry)
+                    && semantic_knowledge_key(candidate) == semantic_knowledge_key(&entry)
+                    && candidate.status != MemoryStatus::Archived
+                    && candidate.status != MemoryStatus::Deprecated
             }) {
-                existing.knowledge = choose_richer_text(&existing.knowledge, &entry.knowledge);
-                existing.confidence = existing.confidence.max(entry.confidence);
-                existing.updated_at = now_millis();
-                existing.explicit = existing.explicit || entry.explicit;
-                existing.mention_count = existing.mention_count.saturating_add(entry.mention_count.max(1));
-                if entry.ttl.is_none() || existing.explicit {
-                    existing.ttl = None;
-                } else if let Some(incoming_ttl) = entry.ttl {
-                    existing.ttl = Some(existing.ttl.map(|ttl| ttl.max(incoming_ttl)).unwrap_or(incoming_ttl));
+                merge_semantic_entry(existing, &entry);
+            } else if let Some(existing_index) = semantic.entries.iter().position(|candidate| {
+                semantic_identity_key(candidate) == semantic_identity_key(&entry)
+                    && candidate.status != MemoryStatus::Archived
+                    && candidate.status != MemoryStatus::Deprecated
+            }) {
+                let should_keep_existing =
+                    semantic.entries[existing_index].explicit && !entry.explicit;
+
+                if should_keep_existing {
+                    let existing = &mut semantic.entries[existing_index];
+                    existing.updated_at = existing.updated_at.max(entry.updated_at);
+                } else if entry.explicit {
+                    let previous = &mut semantic.entries[existing_index];
+                    previous.status = MemoryStatus::Deprecated;
+                    previous.conflict_group = None;
+                    previous.updated_at = now_millis();
+                    semantic.entries.push(entry);
+                } else {
+                    let group = semantic.entries[existing_index]
+                        .conflict_group
+                        .clone()
+                        .unwrap_or_else(|| generate_id("semantic_conflict"));
+                    let previous = &mut semantic.entries[existing_index];
+                    previous.status = MemoryStatus::Conflicted;
+                    previous.conflict_group = Some(group.clone());
+                    previous.updated_at = now_millis();
+                    entry.status = MemoryStatus::Conflicted;
+                    entry.conflict_group = Some(group);
+                    semantic.entries.push(entry);
                 }
-                merge_unique_strings(&mut existing.tags, &entry.tags);
             } else {
                 semantic.entries.push(entry);
             }
 
             if semantic.entries.len() > 200 {
                 semantic.entries.sort_by(|a, b| {
-                    b.updated_at
-                        .cmp(&a.updated_at)
-                        .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+                    status_rank(&a.status)
+                        .cmp(&status_rank(&b.status))
+                        .then_with(|| {
+                            b.updated_at
+                                .cmp(&a.updated_at)
+                                .then_with(|| {
+                                    b.confidence
+                                        .partial_cmp(&a.confidence)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                        })
                 });
                 semantic.entries.truncate(200);
             }
         })
+    }
+
+    /// 删除指定 Semantic Entry
+    pub fn delete_semantic_entry(&self, id: &str) -> Result<bool, String> {
+        let mut removed = false;
+        self.update_semantic(|semantic| {
+            let before = semantic.entries.len();
+            semantic.entries.retain(|entry| entry.id != id);
+            removed = before != semantic.entries.len();
+        })?;
+        Ok(removed)
+    }
+
+    /// 提升候选 Semantic Entry 为稳定长期记忆
+    pub fn promote_semantic_entry(&self, id: &str) -> Result<bool, String> {
+        let mut promoted = false;
+        self.update_semantic(|semantic| {
+            if let Some(entry) = semantic.entries.iter_mut().find(|entry| entry.id == id) {
+                entry.explicit = true;
+                entry.mention_count = entry.mention_count.max(2);
+                entry.confidence = entry.confidence.max(0.75);
+                entry.ttl = None;
+                entry.status = MemoryStatus::Active;
+                entry.conflict_group = None;
+                entry.updated_at = now_millis();
+                if !entry.tags.iter().any(|tag| tag == "promoted") {
+                    entry.tags.push("promoted".to_string());
+                }
+                promoted = true;
+            }
+        })?;
+        Ok(promoted)
+    }
+
+    /// 解决 Semantic 冲突，保留指定条目
+    pub fn resolve_semantic_conflict(
+        &self,
+        group: &str,
+        keep_id: &str,
+    ) -> Result<bool, String> {
+        let mut resolved = false;
+        self.update_semantic(|semantic| {
+            for entry in &mut semantic.entries {
+                if entry.conflict_group.as_deref() != Some(group) {
+                    continue;
+                }
+                entry.conflict_group = None;
+                entry.updated_at = now_millis();
+                if entry.id == keep_id {
+                    entry.status = MemoryStatus::Active;
+                    entry.mention_count = entry.mention_count.max(2);
+                    entry.ttl = None;
+                } else {
+                    entry.status = MemoryStatus::Deprecated;
+                }
+                resolved = true;
+            }
+        })?;
+        Ok(resolved)
     }
 
     /// 删除匹配的 Semantic Entries
@@ -375,31 +467,105 @@ impl MemoryStore {
     /// 更新或插入 Meta Preference
     pub fn upsert_meta_preference(&self, preference: MetaPreference) -> Result<(), String> {
         let mut meta = self.load_meta()?;
+        let preference = with_meta_defaults(preference);
         if let Some(existing) = meta.preferences.iter_mut().find(|item| {
-            item.category == preference.category && item.preference == preference.preference
+            item.category == preference.category
+                && item.preference == preference.preference
+                && meta_value_key(&item.value) == meta_value_key(&preference.value)
+                && item.status != MemoryStatus::Archived
+                && item.status != MemoryStatus::Deprecated
         }) {
-            existing.value = preference.value;
-            existing.confidence = preference.confidence;
+            existing.confidence = existing.confidence.max(preference.confidence);
             existing.updated_at = now_millis();
             existing.explicit = existing.explicit || preference.explicit;
             existing.ttl = match (existing.ttl, preference.ttl) {
                 (None, _) | (_, None) => None,
                 (Some(current), Some(incoming)) => Some(current.max(incoming)),
             };
+        } else if let Some(existing_index) = meta.preferences.iter().position(|item| {
+            item.category == preference.category
+                && item.preference == preference.preference
+                && item.status != MemoryStatus::Archived
+                && item.status != MemoryStatus::Deprecated
+        }) {
+            if preference.explicit {
+                let previous = &mut meta.preferences[existing_index];
+                previous.status = MemoryStatus::Deprecated;
+                previous.conflict_group = None;
+                previous.updated_at = now_millis();
+                meta.preferences.push(preference);
+            } else {
+                let group = meta.preferences[existing_index]
+                    .conflict_group
+                    .clone()
+                    .unwrap_or_else(|| generate_id("meta_conflict"));
+                let previous = &mut meta.preferences[existing_index];
+                previous.status = MemoryStatus::Conflicted;
+                previous.conflict_group = Some(group.clone());
+                previous.updated_at = now_millis();
+                let mut incoming = preference;
+                incoming.status = MemoryStatus::Conflicted;
+                incoming.conflict_group = Some(group);
+                meta.preferences.push(incoming);
+            }
         } else {
             meta.preferences.push(preference);
         }
 
         if meta.preferences.len() > 64 {
             meta.preferences.sort_by(|a, b| {
-                b.updated_at
-                    .cmp(&a.updated_at)
-                    .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+                status_rank(&a.status)
+                    .cmp(&status_rank(&b.status))
+                    .then_with(|| {
+                        b.updated_at
+                            .cmp(&a.updated_at)
+                            .then_with(|| {
+                                b.confidence
+                                    .partial_cmp(&a.confidence)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                    })
             });
             meta.preferences.truncate(64);
         }
 
         self.save_meta(&meta)
+    }
+
+    /// 删除指定 Meta Preference
+    pub fn delete_meta_preference(&self, id: &str) -> Result<bool, String> {
+        let mut meta = self.load_meta()?;
+        let before = meta.preferences.len();
+        meta.preferences.retain(|entry| entry.id != id);
+        let removed = before != meta.preferences.len();
+        if removed {
+            self.save_meta(&meta)?;
+        }
+        Ok(removed)
+    }
+
+    /// 解决 Meta 冲突，保留指定条目
+    pub fn resolve_meta_conflict(&self, group: &str, keep_id: &str) -> Result<bool, String> {
+        let mut meta = self.load_meta()?;
+        let mut resolved = false;
+        for entry in &mut meta.preferences {
+            if entry.conflict_group.as_deref() != Some(group) {
+                continue;
+            }
+            entry.conflict_group = None;
+            entry.updated_at = now_millis();
+            if entry.id == keep_id {
+                entry.status = MemoryStatus::Active;
+                entry.ttl = None;
+            } else {
+                entry.status = MemoryStatus::Deprecated;
+            }
+            resolved = true;
+        }
+        if resolved {
+            self.save_meta(&meta)?;
+        }
+        Ok(resolved)
     }
 
     // ========================================================================
@@ -528,12 +694,18 @@ impl MemoryStore {
         // 4. 从 Semantic 转换
         let semantic = self.load_semantic()?;
         for entry in semantic.entries {
+            if entry.status != MemoryStatus::Active {
+                continue;
+            }
             entries.push(entry.to_memory_entry());
         }
 
         // 5. 从 Meta 转换
         let meta = self.load_meta()?;
         for entry in meta.preferences {
+            if entry.status != MemoryStatus::Active {
+                continue;
+            }
             entries.push(entry.to_memory_entry());
         }
 
@@ -575,4 +747,75 @@ fn semantic_entry_matches(entry: &SemanticEntry, query: &str) -> bool {
             .iter()
             .map(|tag| normalize_key(tag))
             .any(|tag| tag.contains(query))
+}
+
+fn semantic_identity_key(entry: &SemanticEntry) -> String {
+    if !entry.memory_key.trim().is_empty() {
+        normalize_key(&entry.memory_key)
+    } else {
+        format!("{}::{}", normalize_key(&entry.topic), entry.source_type)
+    }
+}
+
+fn semantic_knowledge_key(entry: &SemanticEntry) -> String {
+    normalize_key(&entry.knowledge)
+}
+
+fn meta_value_key(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => normalize_key(text),
+        _ => normalize_key(&value.to_string()),
+    }
+}
+
+fn with_semantic_defaults(mut entry: SemanticEntry) -> SemanticEntry {
+    if entry.memory_key.trim().is_empty() {
+        entry.memory_key = entry.topic.clone();
+    }
+    if entry.mention_count == 0 {
+        entry.mention_count = 1;
+    }
+    if matches!(entry.status, MemoryStatus::Active) && entry.conflict_group.is_some() {
+        entry.status = MemoryStatus::Conflicted;
+    }
+    entry
+}
+
+fn with_meta_defaults(mut preference: MetaPreference) -> MetaPreference {
+    if matches!(preference.status, MemoryStatus::Active) && preference.conflict_group.is_some() {
+        preference.status = MemoryStatus::Conflicted;
+    }
+    preference
+}
+
+fn merge_semantic_entry(existing: &mut SemanticEntry, incoming: &SemanticEntry) {
+    existing.knowledge = choose_richer_text(&existing.knowledge, &incoming.knowledge);
+    existing.confidence = existing.confidence.max(incoming.confidence);
+    existing.updated_at = now_millis();
+    existing.explicit = existing.explicit || incoming.explicit;
+    existing.mention_count = existing
+        .mention_count
+        .saturating_add(incoming.mention_count.max(1));
+    if incoming.ttl.is_none() || existing.explicit {
+        existing.ttl = None;
+    } else if let Some(incoming_ttl) = incoming.ttl {
+        existing.ttl = Some(
+            existing
+                .ttl
+                .map(|ttl| ttl.max(incoming_ttl))
+                .unwrap_or(incoming_ttl),
+        );
+    }
+    existing.status = MemoryStatus::Active;
+    existing.conflict_group = None;
+    merge_unique_strings(&mut existing.tags, &incoming.tags);
+}
+
+fn status_rank(status: &MemoryStatus) -> u8 {
+    match status {
+        MemoryStatus::Active => 0,
+        MemoryStatus::Conflicted => 1,
+        MemoryStatus::Archived => 2,
+        MemoryStatus::Deprecated => 3,
+    }
 }

@@ -44,6 +44,11 @@ pub use types::{
     SemanticEntry,
     MetaMemory,
     MetaPreference,
+    ManagedMemoryKind,
+    ManagedMemoryRecord,
+    MemoryManagementStats,
+    MemoryConflictGroup,
+    MemoryManagementSnapshot,
     // 辅助类型
     LanguageStyle,
     FrequentPath,

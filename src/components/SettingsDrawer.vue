@@ -7,6 +7,10 @@ import type {
   CodexCliStatus,
   DesktopAction,
   DownloadProgress,
+  ManagedMemoryKind,
+  MemoryConflictGroup,
+  MemoryManagementSnapshot,
+  ManagedMemoryRecord,
   ProviderConfigInput,
   ProviderKind,
   ReplyHistoryEntry,
@@ -31,6 +35,8 @@ const props = defineProps<{
   permissionLevel: number
   aiConstraints: AiConstraintProfile
   todayReplyHistory: ReplyHistoryEntry[]
+  memoryDashboard: MemoryManagementSnapshot
+  memoryBusy: boolean
   whisperStatus: WhisperStatus
   whisperDownloading: boolean
   whisperDownloadProgress: DownloadProgress | null
@@ -42,6 +48,10 @@ const emit = defineEmits<{
   sectionChange: [section: 'settings' | 'actions']
   oauthStart: [input: ProviderConfigInput]
   codexRefresh: []
+  memoryRefresh: []
+  memoryDelete: [kind: ManagedMemoryKind, id: string]
+  memoryPromote: [id: string]
+  memoryResolve: [kind: ManagedMemoryKind, group: string, keepId: string]
   triggerAction: [action: DesktopAction]
   clearTodayHistory: []
   whisperDownload: [model: WhisperModel]
@@ -360,6 +370,34 @@ const formatHistoryTime = (timestamp: number) =>
     minute: '2-digit',
     second: '2-digit'
   })
+
+const formatMemoryTime = (timestamp: number) =>
+  new Date(timestamp).toLocaleString([], {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+
+const memoryStatusLabel = (status: ManagedMemoryRecord['status']) => {
+  switch (status) {
+    case 'active':
+      return '活跃'
+    case 'archived':
+      return '归档'
+    case 'deprecated':
+      return '废弃'
+    case 'conflicted':
+      return '冲突'
+    default:
+      return status
+  }
+}
+
+const memoryKindLabel = (kind: ManagedMemoryKind) => (kind === 'semantic' ? '语义记忆' : '交互偏好')
+
+const conflictActionLabel = (group: MemoryConflictGroup) =>
+  group.memoryType === 'semantic' ? '保留这条事实' : '保留这条偏好'
 
 onBeforeUnmount(() => {
   stopShortcutCapture()
@@ -1006,6 +1044,220 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
+      <section class="memory-shell full-row">
+        <div class="memory-header">
+          <div>
+            <strong>长期记忆管理</strong>
+            <p>这里会区分稳定长期记忆、候选记忆和冲突记忆。显式“记住”会直接进入长期记忆，隐式事实通常需要重复出现后才会提升。</p>
+          </div>
+          <button
+            type="button"
+            class="ghost-button"
+            :disabled="memoryBusy"
+            @click="emit('memoryRefresh')"
+          >
+            {{ memoryBusy ? '刷新中...' : '刷新记忆' }}
+          </button>
+        </div>
+
+        <div class="memory-stats">
+          <article class="memory-stat-card">
+            <strong>{{ memoryDashboard.stats.stableCount }}</strong>
+            <span>稳定长期记忆</span>
+          </article>
+          <article class="memory-stat-card">
+            <strong>{{ memoryDashboard.stats.candidateCount }}</strong>
+            <span>候选记忆</span>
+          </article>
+          <article class="memory-stat-card">
+            <strong>{{ memoryDashboard.stats.conflictCount }}</strong>
+            <span>冲突组</span>
+          </article>
+          <article class="memory-stat-card">
+            <strong>{{ memoryDashboard.stats.semanticCount }}</strong>
+            <span>语义总量</span>
+          </article>
+          <article class="memory-stat-card">
+            <strong>{{ memoryDashboard.stats.metaCount }}</strong>
+            <span>偏好总量</span>
+          </article>
+        </div>
+
+        <div class="memory-grid">
+          <article class="memory-panel">
+            <div class="memory-panel-header">
+              <div>
+                <h3>稳定长期记忆</h3>
+                <p>这些条目当前会参与检索和 prompt 注入。</p>
+              </div>
+            </div>
+
+            <div v-if="!memoryDashboard.stableRecords.length" class="memory-empty">
+              还没有稳定长期记忆。
+            </div>
+
+            <div v-else class="memory-list">
+              <article
+                v-for="record in memoryDashboard.stableRecords"
+                :key="record.id"
+                class="memory-entry"
+              >
+                <div class="memory-entry-top">
+                  <div>
+                    <strong>{{ record.title }}</strong>
+                    <p>{{ record.summary }}</p>
+                  </div>
+                  <span class="constraint-status">{{ memoryKindLabel(record.memoryType) }}</span>
+                </div>
+                <p class="memory-detail">{{ record.detail }}</p>
+                <div class="memory-meta-row">
+                  <span>状态：{{ memoryStatusLabel(record.status) }}</span>
+                  <span>置信度：{{ Math.round(record.confidence * 100) }}%</span>
+                  <span>更新：{{ formatMemoryTime(record.updatedAt) }}</span>
+                </div>
+                <div v-if="record.tags.length" class="memory-tags">
+                  <span v-for="tag in record.tags" :key="tag" class="memory-tag">{{ tag }}</span>
+                </div>
+                <div class="compact-actions">
+                  <button
+                    type="button"
+                    class="ghost-button"
+                    :disabled="memoryBusy"
+                    @click="emit('memoryDelete', record.memoryType, record.id)"
+                  >
+                    删除
+                  </button>
+                </div>
+              </article>
+            </div>
+          </article>
+
+          <article class="memory-panel">
+            <div class="memory-panel-header">
+              <div>
+                <h3>候选记忆</h3>
+                <p>这类条目通常是对话中推断出的隐式事实，默认不会立即长期生效。</p>
+              </div>
+            </div>
+
+            <div v-if="!memoryDashboard.candidateRecords.length" class="memory-empty">
+              当前没有候选记忆。
+            </div>
+
+            <div v-else class="memory-list">
+              <article
+                v-for="record in memoryDashboard.candidateRecords"
+                :key="record.id"
+                class="memory-entry"
+              >
+                <div class="memory-entry-top">
+                  <div>
+                    <strong>{{ record.title }}</strong>
+                    <p>{{ record.summary }}</p>
+                  </div>
+                  <span class="constraint-status">候选</span>
+                </div>
+                <p class="memory-detail">{{ record.detail }}</p>
+                <div class="memory-meta-row">
+                  <span>提及次数：{{ record.mentionCount }}</span>
+                  <span>置信度：{{ Math.round(record.confidence * 100) }}%</span>
+                  <span v-if="record.expiresAt">过期：{{ formatMemoryTime(record.expiresAt) }}</span>
+                </div>
+                <div v-if="record.tags.length" class="memory-tags">
+                  <span v-for="tag in record.tags" :key="tag" class="memory-tag">{{ tag }}</span>
+                </div>
+                <div class="compact-actions">
+                  <button
+                    type="button"
+                    class="ghost-button"
+                    :disabled="memoryBusy"
+                    @click="emit('memoryPromote', record.id)"
+                  >
+                    提升为长期记忆
+                  </button>
+                  <button
+                    type="button"
+                    class="ghost-button"
+                    :disabled="memoryBusy"
+                    @click="emit('memoryDelete', record.memoryType, record.id)"
+                  >
+                    删除
+                  </button>
+                </div>
+              </article>
+            </div>
+          </article>
+        </div>
+
+        <div class="memory-panel">
+          <div class="memory-panel-header">
+            <div>
+              <h3>冲突记忆</h3>
+              <p>当系统发现同一类事实上下文互相冲突时，会先暂停自动采用，等待你明确选择保留哪一条。</p>
+            </div>
+          </div>
+
+          <div v-if="!memoryDashboard.conflicts.length" class="memory-empty">
+            当前没有待处理的冲突记忆。
+          </div>
+
+          <div v-else class="memory-conflicts">
+            <article
+              v-for="group in memoryDashboard.conflicts"
+              :key="group.id"
+              class="memory-conflict-group"
+            >
+              <div class="memory-entry-top">
+                <div>
+                  <strong>{{ group.title }}</strong>
+                  <p>{{ memoryKindLabel(group.memoryType) }} · 冲突组 {{ group.id }}</p>
+                </div>
+                <span class="constraint-status">待裁决</span>
+              </div>
+
+              <div class="memory-list">
+                <article
+                  v-for="record in group.entries"
+                  :key="record.id"
+                  class="memory-entry conflicted"
+                >
+                  <div class="memory-entry-top">
+                    <div>
+                      <strong>{{ record.title }}</strong>
+                      <p>{{ record.summary }}</p>
+                    </div>
+                    <span class="constraint-status">{{ memoryStatusLabel(record.status) }}</span>
+                  </div>
+                  <p class="memory-detail">{{ record.detail }}</p>
+                  <div class="memory-meta-row">
+                    <span>来源：{{ record.source }}</span>
+                    <span>更新：{{ formatMemoryTime(record.updatedAt) }}</span>
+                  </div>
+                  <div class="compact-actions">
+                    <button
+                      type="button"
+                      class="ghost-button"
+                      :disabled="memoryBusy"
+                      @click="emit('memoryResolve', group.memoryType, group.id, record.id)"
+                    >
+                      {{ conflictActionLabel(group) }}
+                    </button>
+                    <button
+                      type="button"
+                      class="ghost-button"
+                      :disabled="memoryBusy"
+                      @click="emit('memoryDelete', record.memoryType, record.id)"
+                    >
+                      删除这条
+                    </button>
+                  </div>
+                </article>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <section class="history-shell full-row">
         <div class="history-header">
           <div>
@@ -1222,6 +1474,147 @@ textarea {
   background: rgba(255, 255, 255, 0.72);
   display: grid;
   gap: 14px;
+}
+
+.memory-shell {
+  padding: 18px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.78);
+  display: grid;
+  gap: 16px;
+}
+
+.memory-header,
+.memory-panel-header,
+.memory-meta-row,
+.memory-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.memory-header p,
+.memory-panel-header p,
+.memory-detail {
+  margin: 6px 0 0;
+  line-height: 1.5;
+  font-size: 12px;
+}
+
+.memory-stats {
+  flex-wrap: wrap;
+}
+
+.memory-stat-card {
+  min-width: 120px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(17, 68, 92, 0.06);
+  display: grid;
+  gap: 4px;
+}
+
+.memory-stat-card strong {
+  font-size: 22px;
+}
+
+.memory-stat-card span {
+  color: #476775;
+  font-size: 12px;
+}
+
+.memory-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.memory-panel {
+  padding: 16px;
+  border-radius: 20px;
+  background: rgba(17, 59, 79, 0.06);
+  display: grid;
+  gap: 14px;
+}
+
+.memory-panel h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.memory-empty {
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(17, 68, 92, 0.06);
+  color: #476775;
+  font-size: 13px;
+}
+
+.memory-list,
+.memory-conflicts {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-entry {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+  display: grid;
+  gap: 8px;
+}
+
+.memory-entry.conflicted {
+  background: rgba(255, 244, 226, 0.94);
+}
+
+.memory-entry-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.memory-entry-top p {
+  margin: 6px 0 0;
+  line-height: 1.5;
+  font-size: 12px;
+}
+
+.memory-detail {
+  color: #476775;
+}
+
+.memory-meta-row {
+  flex-wrap: wrap;
+  color: #4a6a78;
+  font-size: 12px;
+}
+
+.memory-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.memory-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(11, 106, 138, 0.1);
+  color: #0b6988;
+  font-size: 12px;
+}
+
+.memory-conflict-group {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(17, 68, 92, 0.06);
 }
 
 .history-header {
@@ -1483,7 +1876,8 @@ textarea {
 
   .panel-grid,
   .oauth-grid,
-  .constraint-grid {
+  .constraint-grid,
+  .memory-grid {
     grid-template-columns: 1fr;
   }
 }

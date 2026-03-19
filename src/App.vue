@@ -24,11 +24,13 @@ import {
   closeSettingsWindow,
   confirmControlPending,
   confirmDesktopAction,
+  deleteManagedMemory,
   deleteWhisperModel,
   downloadWhisperModel,
   getAssistantSnapshot,
   getControlServiceStatus,
   getInputHistory,
+  getMemoryManagementSnapshot,
   getTodayReplyHistory,
   getCodexCliStatus,
   getWhisperStatus,
@@ -52,6 +54,7 @@ import {
   publishAssistantSnapshot,
   readWindowView,
   readRequestedSettingsSection,
+  resolveMemoryConflict,
   requestDesktopAction,
   saveProviderConfig,
   sendChatMessage,
@@ -60,6 +63,7 @@ import {
   listControlPending,
   stopWhisperRecording,
   unloadWhisperModel,
+  promoteMemoryCandidate,
   type SettingsSection
 } from './lib/assistant'
 import type {
@@ -76,6 +80,8 @@ import type {
   ControlToolInvokeResponse,
   DesktopAction,
   DownloadProgress,
+  ManagedMemoryKind,
+  MemoryManagementSnapshot,
   PetLayoutMetrics,
   PetMode,
   ProviderConfigInput,
@@ -226,6 +232,23 @@ const emptyCodexStatus = (): CodexCliStatus => ({
   message: '尚未检测 Codex CLI 登录状态。'
 })
 
+const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
+  stats: {
+    profileCount: 0,
+    episodicCount: 0,
+    proceduralCount: 0,
+    policyCount: 0,
+    semanticCount: 0,
+    metaCount: 0,
+    stableCount: 0,
+    candidateCount: 0,
+    conflictCount: 0
+  },
+  stableRecords: [],
+  candidateRecords: [],
+  conflicts: []
+})
+
 const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   kind: state.provider.kind,
   model: state.provider.model || providerDefaults[state.provider.kind],
@@ -287,6 +310,8 @@ const savingSettings = ref(false)
 const authBusy = ref(false)
 const oauthNotice = ref('')
 const codexStatus = ref<CodexCliStatus>(emptyCodexStatus())
+const memoryDashboard = ref<MemoryManagementSnapshot>(emptyMemoryManagementSnapshot())
+const memoryBusy = ref(false)
 const whisperStatus = ref<WhisperStatus>({
   modelLoaded: false,
   currentModel: null,
@@ -556,6 +581,10 @@ const applyTodayReplyHistory = async (entries: ReplyHistoryEntry[], publish = tr
 
 const refreshTodayReplyHistory = async (publish = true) => {
   await applyTodayReplyHistory(await getTodayReplyHistory(), publish)
+}
+
+const refreshMemoryDashboard = async () => {
+  memoryDashboard.value = await getMemoryManagementSnapshot()
 }
 
 const clampDuration = (value: number, min: number, max: number) =>
@@ -1858,6 +1887,7 @@ const loadSnapshot = async () => {
   try {
     const loaded = await getAssistantSnapshot()
     applySnapshot(loaded)
+    await refreshMemoryDashboard()
   } catch (error) {
     announce(
       error instanceof Error ? error.message : '加载助手状态失败，已保留本地默认配置。',
@@ -2202,6 +2232,7 @@ const sendMessage = async (value = messageDraft.value) => {
     pushInputHistoryLocally(content)
     applySnapshot(response.snapshot)
     await refreshTodayReplyHistory()
+    await refreshMemoryDashboard()
     setAgentTaskProgress(
       response.agent && response.agent.route !== 'chat' ? (response.agent.task ?? null) : null
     )
@@ -2559,6 +2590,58 @@ const refreshWhisperStatus = async () => {
   }
 }
 
+const handleMemoryRefresh = async () => {
+  memoryBusy.value = true
+  try {
+    await refreshMemoryDashboard()
+    announce('记忆管理面板已刷新。', 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '刷新记忆管理面板失败'), 'guarded')
+  } finally {
+    memoryBusy.value = false
+  }
+}
+
+const handleMemoryDelete = async (kind: ManagedMemoryKind, id: string) => {
+  memoryBusy.value = true
+  try {
+    memoryDashboard.value = await deleteManagedMemory(kind, id)
+    announce('记忆条目已删除。', 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '删除记忆失败'), 'guarded')
+  } finally {
+    memoryBusy.value = false
+  }
+}
+
+const handleMemoryPromote = async (id: string) => {
+  memoryBusy.value = true
+  try {
+    memoryDashboard.value = await promoteMemoryCandidate(id)
+    announce('候选记忆已提升为长期记忆。', 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '提升候选记忆失败'), 'guarded')
+  } finally {
+    memoryBusy.value = false
+  }
+}
+
+const handleMemoryResolve = async (
+  kind: ManagedMemoryKind,
+  group: string,
+  keepId: string
+) => {
+  memoryBusy.value = true
+  try {
+    memoryDashboard.value = await resolveMemoryConflict(kind, group, keepId)
+    announce('记忆冲突已处理。', 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '处理记忆冲突失败'), 'guarded')
+  } finally {
+    memoryBusy.value = false
+  }
+}
+
 const handleWhisperPushToTalkEvent = async (event: WhisperPushToTalkEvent) => {
   if (isSettingsView.value || isBubbleView.value) {
     return
@@ -2761,6 +2844,7 @@ watch(
   (nextLength, previousLength) => {
     if (nextLength !== previousLength) {
       void refreshTodayReplyHistory()
+      void refreshMemoryDashboard()
     }
   }
 )
@@ -2793,6 +2877,7 @@ onMounted(() => {
   void loadInputHistory()
   void refreshTodayReplyHistory()
   void loadSnapshot()
+  void refreshMemoryDashboard()
   void refreshCodexLoginStatus(true)
   void refreshWhisperStatus()
   void refreshMicrophoneAvailability(!isSettingsView.value).then(() => {
@@ -2853,6 +2938,8 @@ onBeforeUnmount(() => {
       :permission-level="snapshot.permissionLevel"
       :ai-constraints="snapshot.aiConstraints"
       :today-reply-history="todayReplyHistory"
+      :memory-dashboard="memoryDashboard"
+      :memory-busy="memoryBusy"
       :whisper-status="whisperStatus"
       :whisper-downloading="whisperDownloading"
       :whisper-download-progress="whisperDownloadProgress"
@@ -2861,6 +2948,10 @@ onBeforeUnmount(() => {
       @section-change="drawerSection = $event"
       @oauth-start="beginOAuthLogin"
       @codex-refresh="refreshCodexLoginStatus()"
+      @memory-refresh="handleMemoryRefresh"
+      @memory-delete="handleMemoryDelete"
+      @memory-promote="handleMemoryPromote"
+      @memory-resolve="handleMemoryResolve"
       @whisper-download="handleWhisperDownload"
       @whisper-load="handleWhisperLoad"
       @whisper-unload="handleWhisperUnload"

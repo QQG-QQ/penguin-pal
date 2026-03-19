@@ -4,8 +4,9 @@
 
 use super::store::MemoryStore;
 use super::types::{
-    now_millis, EpisodicEntry, FrequentPath, KeyEntity, MetaPreference, ProceduralEntry,
-    RuntimeContextDigest, SemanticEntry, StableWindowFeatures, WriteBackRequest,
+    now_millis, EpisodicEntry, FrequentPath, KeyEntity, MemoryStatus, MetaPreference,
+    ProceduralEntry, RuntimeContextDigest, SemanticEntry, StableWindowFeatures,
+    WriteBackRequest,
 };
 use serde_json::json;
 
@@ -286,28 +287,29 @@ pub fn write_back_conversation_turn(
             updated_at: now_millis(),
             explicit: true,
             ttl: None,
+            status: MemoryStatus::Active,
+            conflict_group: None,
         })?;
     }
 
     if let Some(content) = extract_remember_content(user_input) {
         let now = now_millis();
-        store.upsert_semantic_entry(SemanticEntry {
-            id: format!("sem-{}", now),
-            topic: summarize_topic(&content),
-            knowledge: content.clone(),
-            source_type: "user_fact".to_string(),
-            confidence: 0.95,
-            created_at: now,
-            updated_at: now,
-            tags: vec![
+        store.upsert_semantic_entry(build_semantic_entry(
+            now,
+            semantic_memory_key_for_explicit_content(&content),
+            summarize_topic(&content),
+            content.clone(),
+            "user_fact".to_string(),
+            0.95,
+            vec![
                 "conversation".to_string(),
                 "explicit_memory".to_string(),
                 "user_fact".to_string(),
             ],
-            explicit: true,
-            mention_count: 1,
-            ttl: None,
-        })?;
+            true,
+            1,
+            None,
+        ))?;
         store.upsert_meta_preference(MetaPreference {
             id: format!("meta-{}", now + 1),
             category: "retention".to_string(),
@@ -318,6 +320,8 @@ pub fn write_back_conversation_turn(
             updated_at: now,
             explicit: true,
             ttl: None,
+            status: MemoryStatus::Active,
+            conflict_group: None,
         })?;
     }
 
@@ -331,23 +335,22 @@ pub fn write_back_conversation_turn(
 
     if let Some(alias) = extract_user_alias(user_input) {
         let now = now_millis();
-        store.upsert_semantic_entry(SemanticEntry {
-            id: format!("sem-{}", now),
-            topic: "用户称呼".to_string(),
-            knowledge: format!("用户希望被称呼为 {}", alias),
-            source_type: "user_preference".to_string(),
-            confidence: 0.9,
-            created_at: now,
-            updated_at: now,
-            tags: vec![
+        store.upsert_semantic_entry(build_semantic_entry(
+            now,
+            "user_alias".to_string(),
+            "用户称呼".to_string(),
+            format!("用户希望被称呼为 {}", alias),
+            "user_preference".to_string(),
+            0.9,
+            vec![
                 "conversation".to_string(),
                 "user_alias".to_string(),
                 "user_preference".to_string(),
             ],
-            explicit: true,
-            mention_count: 1,
-            ttl: None,
-        })?;
+            true,
+            1,
+            None,
+        ))?;
         store.upsert_meta_preference(MetaPreference {
             id: format!("meta-{}", now + 2),
             category: "conversation".to_string(),
@@ -358,24 +361,25 @@ pub fn write_back_conversation_turn(
             updated_at: now,
             explicit: true,
             ttl: None,
+            status: MemoryStatus::Active,
+            conflict_group: None,
         })?;
     }
 
     if let Some(candidate) = extract_candidate_user_fact(user_input) {
         let now = now_millis();
-        store.upsert_semantic_entry(SemanticEntry {
-            id: format!("sem-{}", now),
-            topic: candidate.topic,
-            knowledge: candidate.knowledge,
-            source_type: candidate.source_type,
-            confidence: candidate.confidence,
-            created_at: now,
-            updated_at: now,
-            tags: candidate.tags,
-            explicit: false,
-            mention_count: 1,
-            ttl: Some(now + 30 * 24 * 3600 * 1000),
-        })?;
+        store.upsert_semantic_entry(build_semantic_entry(
+            now,
+            candidate.memory_key,
+            candidate.topic,
+            candidate.knowledge,
+            candidate.source_type,
+            candidate.confidence,
+            candidate.tags,
+            false,
+            1,
+            Some(now + 30 * 24 * 3600 * 1000),
+        ))?;
     }
 
     Ok(())
@@ -554,6 +558,8 @@ fn update_profile_language_preference(store: &MemoryStore, language: &str) -> Re
         updated_at: now,
         explicit: true,
         ttl: None,
+        status: MemoryStatus::Active,
+        conflict_group: None,
     })
 }
 
@@ -576,6 +582,8 @@ fn update_profile_reply_style(store: &MemoryStore, style: &str) -> Result<(), St
         updated_at: now,
         explicit: true,
         ttl: None,
+        status: MemoryStatus::Active,
+        conflict_group: None,
     })
 }
 
@@ -601,6 +609,7 @@ fn strip_prefix_ci<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 struct CandidateSemanticFact {
+    memory_key: String,
     topic: String,
     knowledge: String,
     source_type: String,
@@ -623,6 +632,7 @@ fn extract_candidate_user_fact(input: &str) -> Option<CandidateSemanticFact> {
         let content = clean_memory_content(content);
         if !content.is_empty() {
             return Some(CandidateSemanticFact {
+                memory_key: format!("user_like::{}", normalize_memory_key(&content)),
                 topic: format!("用户偏好：{}", summarize_topic(&content)),
                 knowledge: format!("用户喜欢 {}", content),
                 source_type: "user_fact_candidate".to_string(),
@@ -637,6 +647,7 @@ fn extract_candidate_user_fact(input: &str) -> Option<CandidateSemanticFact> {
             let content = clean_memory_content(content);
             if !content.is_empty() {
                 return Some(CandidateSemanticFact {
+                    memory_key: format!("user_tooling::{}", normalize_memory_key(&content)),
                     topic: format!("用户常用：{}", summarize_topic(&content)),
                     knowledge: format!("用户常用 {}", content),
                     source_type: "user_fact_candidate".to_string(),
@@ -652,6 +663,7 @@ fn extract_candidate_user_fact(input: &str) -> Option<CandidateSemanticFact> {
             let content = clean_memory_content(content);
             if !content.is_empty() {
                 return Some(CandidateSemanticFact {
+                    memory_key: "user_project_path".to_string(),
                     topic: format!("用户目录：{}", summarize_topic(&content)),
                     knowledge: format!("用户的目录信息为 {}", content),
                     source_type: "user_fact_candidate".to_string(),
@@ -663,4 +675,56 @@ fn extract_candidate_user_fact(input: &str) -> Option<CandidateSemanticFact> {
     }
 
     None
+}
+
+fn build_semantic_entry(
+    now: u64,
+    memory_key: String,
+    topic: String,
+    knowledge: String,
+    source_type: String,
+    confidence: f64,
+    tags: Vec<String>,
+    explicit: bool,
+    mention_count: u32,
+    ttl: Option<u64>,
+) -> SemanticEntry {
+    SemanticEntry {
+        id: format!("sem-{}", now),
+        memory_key,
+        topic,
+        knowledge,
+        source_type,
+        confidence,
+        created_at: now,
+        updated_at: now,
+        tags,
+        explicit,
+        mention_count,
+        ttl,
+        status: MemoryStatus::Active,
+        conflict_group: None,
+    }
+}
+
+fn semantic_memory_key_for_explicit_content(content: &str) -> String {
+    if content.contains("项目目录") || content.contains("工作目录") {
+        return "user_project_path".to_string();
+    }
+    if content.contains("喜欢") {
+        return format!("user_like::{}", normalize_memory_key(content));
+    }
+    if content.contains("常用") || content.contains("主要用") {
+        return format!("user_tooling::{}", normalize_memory_key(content));
+    }
+    format!("user_fact::{}", normalize_memory_key(content))
+}
+
+fn normalize_memory_key(input: &str) -> String {
+    input
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .collect()
 }

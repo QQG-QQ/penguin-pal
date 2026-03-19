@@ -4,7 +4,7 @@
 
 use super::types::{
     now_millis, EpisodicEntry, EpisodicMemory, EpisodeSummary, MemoryQuery, MemorySummary,
-    MemoryType, MetaMemory, MetaPreference, MetaSummary, PolicyMemory, PolicySuggestion,
+    MemoryStatus, MemoryType, MetaMemory, MetaPreference, MetaSummary, PolicyMemory, PolicySuggestion,
     PolicySummary, ProceduralEntry, ProceduralMemory, ProcedureSummary, ProfileHints,
     ProfileMemory, SemanticEntry, SemanticMemory, SemanticSummary,
 };
@@ -196,6 +196,9 @@ pub fn retrieve_semantic(
     let mut results: Vec<(SemanticEntry, f64)> = Vec::new();
 
     for entry in &semantic.entries {
+        if entry.status != MemoryStatus::Active {
+            continue;
+        }
         if entry.ttl.map(|ttl| now_millis() > ttl).unwrap_or(false) {
             continue;
         }
@@ -234,6 +237,7 @@ pub fn retrieve_meta(meta: &MetaMemory, query: &MemoryQuery) -> Vec<MetaPreferen
 
     meta.preferences
         .iter()
+        .filter(|entry| entry.status == MemoryStatus::Active)
         .filter(|entry| entry.ttl.map(|ttl| now_millis() <= ttl).unwrap_or(true))
         .filter(|entry| entry.confidence >= 0.4)
         .filter(|entry| {

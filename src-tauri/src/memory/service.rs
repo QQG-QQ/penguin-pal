@@ -6,13 +6,16 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::BTreeMap;
 
 use super::core_policy::{self, CorePolicyCheck};
 use super::retrieval::{build_memory_summary, render_memory_summary_for_prompt};
 use super::store::MemoryStore;
 use super::types::{
-    now_millis, MemoryQuery, MemorySummary, MetaMemory, PolicySuggestion, ProceduralEntry,
-    ProfileMemory, SemanticMemory, WriteBackRequest,
+    now_millis, ManagedMemoryKind, ManagedMemoryRecord, MemoryConflictGroup,
+    MemoryManagementSnapshot, MemoryManagementStats, MemoryQuery, MemoryStatus, MemorySummary,
+    MetaMemory, MetaPreference, PolicySuggestion, ProceduralEntry, ProfileMemory,
+    SemanticEntry, SemanticMemory, WriteBackRequest,
 };
 use super::write_back;
 
@@ -86,6 +89,153 @@ impl MemoryService {
     pub fn render_for_prompt(&self, query: &MemoryQuery) -> Result<String, String> {
         let summary = self.retrieve(query)?;
         Ok(render_memory_summary_for_prompt(&summary))
+    }
+
+    /// 获取记忆管理视图快照
+    pub fn management_snapshot(&self) -> Result<MemoryManagementSnapshot, String> {
+        let profile = self.store.load_profile()?;
+        let episodic = self.store.load_episodic()?;
+        let procedural = self.store.load_procedural()?;
+        let policy = self.store.load_policy()?;
+        let semantic = self.store.load_semantic()?;
+        let meta = self.store.load_meta()?;
+
+        let mut stable_records = Vec::new();
+        let mut candidate_records = Vec::new();
+        let mut semantic_conflicts: BTreeMap<String, Vec<ManagedMemoryRecord>> = BTreeMap::new();
+        let mut meta_conflicts: BTreeMap<String, Vec<ManagedMemoryRecord>> = BTreeMap::new();
+
+        for entry in &semantic.entries {
+            let record = managed_semantic_record(entry);
+            match entry.status {
+                MemoryStatus::Active => {
+                    if entry.explicit || entry.mention_count >= 2 {
+                        stable_records.push(record);
+                    } else {
+                        candidate_records.push(record);
+                    }
+                }
+                MemoryStatus::Conflicted => {
+                    if let Some(group) = &entry.conflict_group {
+                        semantic_conflicts
+                            .entry(group.clone())
+                            .or_default()
+                            .push(record);
+                    }
+                }
+                MemoryStatus::Archived | MemoryStatus::Deprecated => {}
+            }
+        }
+
+        for entry in &meta.preferences {
+            let record = managed_meta_record(entry);
+            match entry.status {
+                MemoryStatus::Active => stable_records.push(record),
+                MemoryStatus::Conflicted => {
+                    if let Some(group) = &entry.conflict_group {
+                        meta_conflicts.entry(group.clone()).or_default().push(record);
+                    }
+                }
+                MemoryStatus::Archived | MemoryStatus::Deprecated => {}
+            }
+        }
+
+        stable_records.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        candidate_records.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        let mut conflicts = Vec::new();
+        for (group, mut entries) in semantic_conflicts {
+            entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            let title = entries
+                .first()
+                .map(|entry| entry.title.clone())
+                .unwrap_or_else(|| "语义记忆冲突".to_string());
+            conflicts.push(MemoryConflictGroup {
+                id: group,
+                memory_type: ManagedMemoryKind::Semantic,
+                title,
+                entries,
+            });
+        }
+        for (group, mut entries) in meta_conflicts {
+            entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            let title = entries
+                .first()
+                .map(|entry| entry.title.clone())
+                .unwrap_or_else(|| "交互偏好冲突".to_string());
+            conflicts.push(MemoryConflictGroup {
+                id: group,
+                memory_type: ManagedMemoryKind::Meta,
+                title,
+                entries,
+            });
+        }
+        conflicts.sort_by(|a, b| a.title.cmp(&b.title));
+
+        Ok(MemoryManagementSnapshot {
+            stats: MemoryManagementStats {
+                profile_count: profile.preferred_apps.len()
+                    + profile.common_workdirs.len()
+                    + profile.frequently_used_paths.len(),
+                episodic_count: episodic.entries.len(),
+                procedural_count: procedural.procedures.len(),
+                policy_count: policy.suggestions.len(),
+                semantic_count: semantic.entries.len(),
+                meta_count: meta.preferences.len(),
+                stable_count: stable_records.len(),
+                candidate_count: candidate_records.len(),
+                conflict_count: conflicts.len(),
+            },
+            stable_records,
+            candidate_records,
+            conflicts,
+        })
+    }
+
+    pub fn delete_managed_memory(
+        &self,
+        kind: ManagedMemoryKind,
+        id: &str,
+    ) -> Result<MemoryManagementSnapshot, String> {
+        let removed = match kind {
+            ManagedMemoryKind::Semantic => self.store.delete_semantic_entry(id)?,
+            ManagedMemoryKind::Meta => self.store.delete_meta_preference(id)?,
+        };
+
+        if !removed {
+            return Err("未找到要删除的记忆条目".to_string());
+        }
+
+        self.management_snapshot()
+    }
+
+    pub fn promote_memory_candidate(
+        &self,
+        id: &str,
+    ) -> Result<MemoryManagementSnapshot, String> {
+        if !self.store.promote_semantic_entry(id)? {
+            return Err("未找到可提升的候选记忆".to_string());
+        }
+
+        self.management_snapshot()
+    }
+
+    pub fn resolve_memory_conflict(
+        &self,
+        kind: ManagedMemoryKind,
+        group: &str,
+        keep_id: &str,
+    ) -> Result<MemoryManagementSnapshot, String> {
+        let resolved = match kind {
+            ManagedMemoryKind::Semantic => self.store.resolve_semantic_conflict(group, keep_id)?,
+            ManagedMemoryKind::Meta => self.store.resolve_meta_conflict(group, keep_id)?,
+        };
+
+        if !resolved {
+            return Err("未找到需要处理的冲突记忆".to_string());
+        }
+
+        self.management_snapshot()
     }
 
     // ========================================================================
@@ -286,13 +436,31 @@ impl MemoryService {
             std::collections::HashMap::new();
 
         for entry in semantic.entries.drain(..) {
-            let key = format!("{}::{}", normalize_key(&entry.topic), entry.source_type);
+            let identity = if entry.memory_key.trim().is_empty() {
+                normalize_key(&entry.topic)
+            } else {
+                normalize_key(&entry.memory_key)
+            };
+            let key = format!(
+                "{}::{}::{}::{:?}",
+                identity,
+                entry.source_type,
+                normalize_key(&entry.knowledge),
+                entry.status
+            );
             if let Some(existing) = merged.get_mut(&key) {
                 if entry.knowledge.len() > existing.knowledge.len() {
                     existing.knowledge = entry.knowledge.clone();
                 }
                 existing.confidence = existing.confidence.max(entry.confidence);
                 existing.updated_at = existing.updated_at.max(entry.updated_at);
+                existing.mention_count = existing.mention_count.max(entry.mention_count);
+                existing.explicit = existing.explicit || entry.explicit;
+                if existing.ttl.is_none() || entry.ttl.is_none() {
+                    existing.ttl = None;
+                } else if let Some(incoming_ttl) = entry.ttl {
+                    existing.ttl = Some(existing.ttl.unwrap_or(incoming_ttl).max(incoming_ttl));
+                }
                 for tag in entry.tags {
                     if !existing.tags.iter().any(|existing_tag| existing_tag == &tag) {
                         existing.tags.push(tag);
@@ -320,6 +488,59 @@ impl MemoryService {
             self.store.save_semantic(&semantic)?;
         }
         Ok(pruned_count)
+    }
+}
+
+fn managed_semantic_record(entry: &SemanticEntry) -> ManagedMemoryRecord {
+    ManagedMemoryRecord {
+        id: entry.id.clone(),
+        memory_type: ManagedMemoryKind::Semantic,
+        title: entry.topic.clone(),
+        summary: entry.knowledge.clone(),
+        detail: format!(
+            "来源：{} · {}",
+            entry.source_type,
+            if entry.explicit { "显式记忆" } else { "候选记忆" }
+        ),
+        confidence: entry.confidence,
+        explicit: entry.explicit,
+        mention_count: entry.mention_count,
+        status: entry.status,
+        source: entry.source_type.clone(),
+        updated_at: entry.updated_at,
+        expires_at: entry.ttl,
+        tags: entry.tags.clone(),
+        conflict_group: entry.conflict_group.clone(),
+    }
+}
+
+fn managed_meta_record(entry: &MetaPreference) -> ManagedMemoryRecord {
+    ManagedMemoryRecord {
+        id: entry.id.clone(),
+        memory_type: ManagedMemoryKind::Meta,
+        title: format!("{} / {}", entry.category, entry.preference),
+        summary: meta_value_to_string(&entry.value),
+        detail: if entry.explicit {
+            "显式交互偏好".to_string()
+        } else {
+            "系统交互偏好".to_string()
+        },
+        confidence: entry.confidence,
+        explicit: entry.explicit,
+        mention_count: 1,
+        status: entry.status,
+        source: entry.category.clone(),
+        updated_at: entry.updated_at,
+        expires_at: entry.ttl,
+        tags: vec!["meta".to_string(), entry.category.clone()],
+        conflict_group: entry.conflict_group.clone(),
+    }
+}
+
+fn meta_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        _ => value.to_string(),
     }
 }
 

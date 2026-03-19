@@ -116,6 +116,7 @@ mod tests {
         store
             .upsert_semantic_entry(SemanticEntry {
                 id: "sem-1".to_string(),
+                memory_key: "reply_preference".to_string(),
                 topic: "用户偏好".to_string(),
                 knowledge: "用户喜欢简洁回答".to_string(),
                 source_type: "user_fact".to_string(),
@@ -126,6 +127,8 @@ mod tests {
                 explicit: true,
                 mention_count: 1,
                 ttl: None,
+                status: MemoryStatus::Active,
+                conflict_group: None,
             })
             .unwrap();
         store
@@ -139,6 +142,8 @@ mod tests {
                 updated_at: now_millis(),
                 explicit: true,
                 ttl: None,
+                status: MemoryStatus::Active,
+                conflict_group: None,
             })
             .unwrap();
 
@@ -312,6 +317,7 @@ mod tests {
             entries: vec![
                 SemanticEntry {
                     id: "sem-1".to_string(),
+                    memory_key: "preferred_language".to_string(),
                     topic: "用户回复偏好".to_string(),
                     knowledge: "用户希望默认使用中文并简洁回复".to_string(),
                     source_type: "user_fact".to_string(),
@@ -322,9 +328,12 @@ mod tests {
                     explicit: true,
                     mention_count: 1,
                     ttl: None,
+                    status: MemoryStatus::Active,
+                    conflict_group: None,
                 },
                 SemanticEntry {
                     id: "sem-2".to_string(),
+                    memory_key: "whisper_model_path".to_string(),
                     topic: "项目结构".to_string(),
                     knowledge: "Whisper 模型位于 appdata 目录".to_string(),
                     source_type: "project_structure".to_string(),
@@ -335,6 +344,8 @@ mod tests {
                     explicit: true,
                     mention_count: 1,
                     ttl: None,
+                    status: MemoryStatus::Active,
+                    conflict_group: None,
                 },
             ],
         };
@@ -557,6 +568,194 @@ mod tests {
 
         let retrieved = retrieval::retrieve_semantic(&semantic, &query);
         assert_eq!(retrieved.len(), 1);
+    }
+
+    #[test]
+    fn test_store_semantic_candidate_conflict_creates_group() {
+        let (_temp, store) = temp_store();
+
+        let now = now_millis();
+        store
+            .upsert_semantic_entry(SemanticEntry {
+                id: "sem-a".to_string(),
+                memory_key: "user_project_path".to_string(),
+                topic: "用户目录".to_string(),
+                knowledge: "用户的目录信息为 D:/work/demo-a".to_string(),
+                source_type: "user_fact_candidate".to_string(),
+                confidence: 0.5,
+                created_at: now,
+                updated_at: now,
+                tags: vec!["candidate".to_string()],
+                explicit: false,
+                mention_count: 1,
+                ttl: Some(now + 1000),
+                status: MemoryStatus::Active,
+                conflict_group: None,
+            })
+            .unwrap();
+        store
+            .upsert_semantic_entry(SemanticEntry {
+                id: "sem-b".to_string(),
+                memory_key: "user_project_path".to_string(),
+                topic: "用户目录".to_string(),
+                knowledge: "用户的目录信息为 D:/work/demo-b".to_string(),
+                source_type: "user_fact_candidate".to_string(),
+                confidence: 0.55,
+                created_at: now + 1,
+                updated_at: now + 1,
+                tags: vec!["candidate".to_string()],
+                explicit: false,
+                mention_count: 1,
+                ttl: Some(now + 1000),
+                status: MemoryStatus::Active,
+                conflict_group: None,
+            })
+            .unwrap();
+
+        let semantic = store.load_semantic().unwrap();
+        assert_eq!(semantic.entries.len(), 2);
+        assert!(semantic
+            .entries
+            .iter()
+            .all(|entry| entry.status == MemoryStatus::Conflicted));
+        let conflict_group = semantic.entries[0].conflict_group.clone();
+        assert!(conflict_group.is_some());
+        assert!(semantic
+            .entries
+            .iter()
+            .all(|entry| entry.conflict_group == conflict_group));
+    }
+
+    #[test]
+    fn test_store_promote_candidate_memory() {
+        let (_temp, store) = temp_store();
+
+        write_back::write_back_conversation_turn(&store, "我喜欢用 VS Code。", "收到。").unwrap();
+        let semantic = store.load_semantic().unwrap();
+        let candidate = semantic.entries[0].clone();
+        assert!(!candidate.explicit);
+
+        assert!(store.promote_semantic_entry(&candidate.id).unwrap());
+
+        let semantic = store.load_semantic().unwrap();
+        let promoted = semantic.entries.iter().find(|entry| entry.id == candidate.id).unwrap();
+        assert!(promoted.explicit);
+        assert!(promoted.mention_count >= 2);
+        assert!(promoted.ttl.is_none());
+        assert_eq!(promoted.status, MemoryStatus::Active);
+    }
+
+    #[test]
+    fn test_store_meta_explicit_update_deprecates_previous_value() {
+        let (_temp, store) = temp_store();
+        let now = now_millis();
+
+        store
+            .upsert_meta_preference(MetaPreference {
+                id: "meta-old".to_string(),
+                category: "reply".to_string(),
+                preference: "preferred_language".to_string(),
+                value: serde_json::json!("zh-CN"),
+                confidence: 0.9,
+                created_at: now,
+                updated_at: now,
+                explicit: true,
+                ttl: None,
+                status: MemoryStatus::Active,
+                conflict_group: None,
+            })
+            .unwrap();
+        store
+            .upsert_meta_preference(MetaPreference {
+                id: "meta-new".to_string(),
+                category: "reply".to_string(),
+                preference: "preferred_language".to_string(),
+                value: serde_json::json!("en-US"),
+                confidence: 0.95,
+                created_at: now + 1,
+                updated_at: now + 1,
+                explicit: true,
+                ttl: None,
+                status: MemoryStatus::Active,
+                conflict_group: None,
+            })
+            .unwrap();
+
+        let meta = store.load_meta().unwrap();
+        assert_eq!(meta.preferences.len(), 2);
+        assert_eq!(
+            meta.preferences
+                .iter()
+                .find(|entry| entry.id == "meta-old")
+                .unwrap()
+                .status,
+            MemoryStatus::Deprecated
+        );
+        assert_eq!(
+            meta.preferences
+                .iter()
+                .find(|entry| entry.id == "meta-new")
+                .unwrap()
+                .status,
+            MemoryStatus::Active
+        );
+    }
+
+    #[test]
+    fn test_store_resolve_semantic_conflict_keeps_one_active() {
+        let (_temp, store) = temp_store();
+        let now = now_millis();
+
+        store
+            .upsert_semantic_entry(SemanticEntry {
+                id: "sem-a".to_string(),
+                memory_key: "user_project_path".to_string(),
+                topic: "用户目录".to_string(),
+                knowledge: "用户的目录信息为 D:/work/demo-a".to_string(),
+                source_type: "user_fact_candidate".to_string(),
+                confidence: 0.5,
+                created_at: now,
+                updated_at: now,
+                tags: vec!["candidate".to_string()],
+                explicit: false,
+                mention_count: 1,
+                ttl: Some(now + 1000),
+                status: MemoryStatus::Active,
+                conflict_group: None,
+            })
+            .unwrap();
+        store
+            .upsert_semantic_entry(SemanticEntry {
+                id: "sem-b".to_string(),
+                memory_key: "user_project_path".to_string(),
+                topic: "用户目录".to_string(),
+                knowledge: "用户的目录信息为 D:/work/demo-b".to_string(),
+                source_type: "user_fact_candidate".to_string(),
+                confidence: 0.55,
+                created_at: now + 1,
+                updated_at: now + 1,
+                tags: vec!["candidate".to_string()],
+                explicit: false,
+                mention_count: 1,
+                ttl: Some(now + 1000),
+                status: MemoryStatus::Active,
+                conflict_group: None,
+            })
+            .unwrap();
+
+        let semantic = store.load_semantic().unwrap();
+        let group = semantic.entries[0].conflict_group.clone().unwrap();
+        assert!(store.resolve_semantic_conflict(&group, "sem-b").unwrap());
+
+        let semantic = store.load_semantic().unwrap();
+        assert_eq!(
+            semantic.entries.iter().find(|entry| entry.id == "sem-b").unwrap().status,
+            MemoryStatus::Active
+        );
+        assert_eq!(
+            semantic.entries.iter().find(|entry| entry.id == "sem-a").unwrap().status,
+            MemoryStatus::Deprecated
+        );
     }
 
     // ========================================================================

@@ -2096,6 +2096,60 @@ fn get_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, Str
 }
 
 #[tauri::command]
+fn get_memory_management_snapshot(
+    app: AppHandle,
+) -> Result<memory::MemoryManagementSnapshot, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+    memory_service.management_snapshot()
+}
+
+#[tauri::command]
+fn delete_managed_memory(
+    app: AppHandle,
+    kind: memory::ManagedMemoryKind,
+    id: String,
+) -> Result<memory::MemoryManagementSnapshot, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+    memory_service.delete_managed_memory(kind, &id)
+}
+
+#[tauri::command]
+fn promote_memory_candidate(
+    app: AppHandle,
+    id: String,
+) -> Result<memory::MemoryManagementSnapshot, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+    memory_service.promote_memory_candidate(&id)
+}
+
+#[tauri::command]
+fn resolve_memory_conflict(
+    app: AppHandle,
+    kind: memory::ManagedMemoryKind,
+    group: String,
+    keep_id: String,
+) -> Result<memory::MemoryManagementSnapshot, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+    memory_service.resolve_memory_conflict(kind, &group, &keep_id)
+}
+
+#[tauri::command]
 fn clear_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, String> {
     history::clear_today_reply_history(&app)
 }
@@ -2278,6 +2332,10 @@ pub fn run() {
             clear_conversation,
             get_input_history,
             get_today_reply_history,
+            get_memory_management_snapshot,
+            delete_managed_memory,
+            promote_memory_candidate,
+            resolve_memory_conflict,
             clear_today_reply_history,
             // Shell Agent 权限管理
             get_shell_permissions,

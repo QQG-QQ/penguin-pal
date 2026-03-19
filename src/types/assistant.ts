@@ -260,6 +260,52 @@ export interface ReplyHistoryEntry {
   assistantReply: string
 }
 
+export type ManagedMemoryKind = 'semantic' | 'meta'
+export type MemoryStatus = 'active' | 'archived' | 'deprecated' | 'conflicted'
+
+export interface ManagedMemoryRecord {
+  id: string
+  memoryType: ManagedMemoryKind
+  title: string
+  summary: string
+  detail: string
+  confidence: number
+  explicit: boolean
+  mentionCount: number
+  status: MemoryStatus
+  source: string
+  updatedAt: number
+  expiresAt: number | null
+  tags: string[]
+  conflictGroup: string | null
+}
+
+export interface MemoryConflictGroup {
+  id: string
+  memoryType: ManagedMemoryKind
+  title: string
+  entries: ManagedMemoryRecord[]
+}
+
+export interface MemoryManagementStats {
+  profileCount: number
+  episodicCount: number
+  proceduralCount: number
+  policyCount: number
+  semanticCount: number
+  metaCount: number
+  stableCount: number
+  candidateCount: number
+  conflictCount: number
+}
+
+export interface MemoryManagementSnapshot {
+  stats: MemoryManagementStats
+  stableRecords: ManagedMemoryRecord[]
+  candidateRecords: ManagedMemoryRecord[]
+  conflicts: MemoryConflictGroup[]
+}
+
 export interface ControlServiceStatus {
   running: boolean
   baseUrl: string | null

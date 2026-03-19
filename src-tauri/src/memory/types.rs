@@ -469,6 +469,8 @@ impl Default for SemanticMemory {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticEntry {
     pub id: String,
+    #[serde(default)]
+    pub memory_key: String,
     pub topic: String,
     pub knowledge: String,
     pub source_type: String,  // project_structure, tool_usage, config_file, api_doc
@@ -482,6 +484,10 @@ pub struct SemanticEntry {
     pub mention_count: u32,
     #[serde(default)]
     pub ttl: Option<u64>,
+    #[serde(default)]
+    pub status: MemoryStatus,
+    #[serde(default)]
+    pub conflict_group: Option<String>,
 }
 
 impl SemanticEntry {
@@ -505,7 +511,7 @@ impl SemanticEntry {
             scope: MemoryScope::Project,
             tags: self.tags.clone(),
             related_memories: Vec::new(),
-            status: MemoryStatus::Active,
+            status: self.status,
             privacy: PrivacyLevel::Public,
             ttl: self.ttl,
             retrieval_keys: vec![self.topic.clone(), self.source_type.clone()],
@@ -545,6 +551,10 @@ pub struct MetaPreference {
     pub explicit: bool,
     #[serde(default)]
     pub ttl: Option<u64>,
+    #[serde(default)]
+    pub status: MemoryStatus,
+    #[serde(default)]
+    pub conflict_group: Option<String>,
 }
 
 impl MetaPreference {
@@ -568,7 +578,7 @@ impl MetaPreference {
             scope: MemoryScope::Global,
             tags: vec!["meta".to_string(), self.category.clone()],
             related_memories: Vec::new(),
-            status: MemoryStatus::Active,
+            status: self.status,
             privacy: PrivacyLevel::Public,
             ttl: self.ttl,
             retrieval_keys: vec![self.category.clone(), self.preference.clone()],
@@ -691,4 +701,66 @@ pub fn generate_id(prefix: &str) -> String {
 
 fn default_mention_count() -> u32 {
     1
+}
+
+// ============================================================================
+// Memory Management View Types
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ManagedMemoryKind {
+    Semantic,
+    Meta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedMemoryRecord {
+    pub id: String,
+    pub memory_type: ManagedMemoryKind,
+    pub title: String,
+    pub summary: String,
+    pub detail: String,
+    pub confidence: f64,
+    pub explicit: bool,
+    pub mention_count: u32,
+    pub status: MemoryStatus,
+    pub source: String,
+    pub updated_at: u64,
+    pub expires_at: Option<u64>,
+    pub tags: Vec<String>,
+    pub conflict_group: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryManagementStats {
+    pub profile_count: usize,
+    pub episodic_count: usize,
+    pub procedural_count: usize,
+    pub policy_count: usize,
+    pub semantic_count: usize,
+    pub meta_count: usize,
+    pub stable_count: usize,
+    pub candidate_count: usize,
+    pub conflict_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryConflictGroup {
+    pub id: String,
+    pub memory_type: ManagedMemoryKind,
+    pub title: String,
+    pub entries: Vec<ManagedMemoryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryManagementSnapshot {
+    pub stats: MemoryManagementStats,
+    pub stable_records: Vec<ManagedMemoryRecord>,
+    pub candidate_records: Vec<ManagedMemoryRecord>,
+    pub conflicts: Vec<MemoryConflictGroup>,
 }

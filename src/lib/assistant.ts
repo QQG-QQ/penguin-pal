@@ -16,6 +16,8 @@ import type {
   ControlServiceStatus,
   ControlToolInvokeResponse,
   DownloadProgress,
+  ManagedMemoryKind,
+  MemoryManagementSnapshot,
   ModelInfo,
   OAuthFlowResult,
   OAuthState,
@@ -699,6 +701,23 @@ const fallbackControlServiceStatus = (): ControlServiceStatus => ({
   baseUrl: null,
   toolCount: 0,
   message: '当前不是桌宠运行时，本地控制层不可用。'
+})
+
+const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
+  stats: {
+    profileCount: 0,
+    episodicCount: 0,
+    proceduralCount: 0,
+    policyCount: 0,
+    semanticCount: 0,
+    metaCount: 0,
+    stableCount: 0,
+    candidateCount: 0,
+    conflictCount: 0
+  },
+  stableRecords: [],
+  candidateRecords: [],
+  conflicts: []
 })
 
 const normalizeControlResponseMessage = (payload: unknown) => {
@@ -1404,6 +1423,53 @@ export const getTodayReplyHistory = async (): Promise<ReplyHistoryEntry[]> => {
   } catch (error) {
     rethrowIfDesktopRuntime(error)
     return readFallbackTodayReplyHistoryFile().entries
+  }
+}
+
+export const getMemoryManagementSnapshot = async (): Promise<MemoryManagementSnapshot> => {
+  try {
+    return await safeInvoke<MemoryManagementSnapshot>('get_memory_management_snapshot')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return emptyMemoryManagementSnapshot()
+  }
+}
+
+export const deleteManagedMemory = async (
+  kind: ManagedMemoryKind,
+  id: string
+): Promise<MemoryManagementSnapshot> => {
+  try {
+    return await safeInvoke<MemoryManagementSnapshot>('delete_managed_memory', { kind, id })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('删除记忆需要桌宠运行时')
+  }
+}
+
+export const promoteMemoryCandidate = async (id: string): Promise<MemoryManagementSnapshot> => {
+  try {
+    return await safeInvoke<MemoryManagementSnapshot>('promote_memory_candidate', { id })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('提升候选记忆需要桌宠运行时')
+  }
+}
+
+export const resolveMemoryConflict = async (
+  kind: ManagedMemoryKind,
+  group: string,
+  keepId: string
+): Promise<MemoryManagementSnapshot> => {
+  try {
+    return await safeInvoke<MemoryManagementSnapshot>('resolve_memory_conflict', {
+      kind,
+      group,
+      keepId
+    })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('处理记忆冲突需要桌宠运行时')
   }
 }
 
