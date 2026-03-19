@@ -1874,6 +1874,11 @@ async fn send_chat_message(
         snapshot_from_runtime(&runtime)
     };
 
+    if let Ok(app_data) = app.path().app_data_dir() {
+        let memory_service = crate::memory::MemoryService::new(&app_data);
+        let _ = memory_service.write_conversation_turn(trimmed, &reply_message.content);
+    }
+
     // 如果请求退出应用，延迟一小段时间后退出（让 UI 有时间显示告别语）
     if should_exit {
         let app_clone = app.clone();

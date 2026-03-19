@@ -4,8 +4,9 @@
 
 use super::types::{
     now_millis, EpisodicEntry, EpisodicMemory, EpisodeSummary, MemoryQuery, MemorySummary,
-    PolicyMemory, PolicySuggestion, PolicySummary, ProceduralEntry, ProceduralMemory,
-    ProcedureSummary, ProfileHints, ProfileMemory,
+    MemoryType, MetaMemory, MetaPreference, MetaSummary, PolicyMemory, PolicySuggestion,
+    PolicySummary, ProceduralEntry, ProceduralMemory, ProcedureSummary, ProfileHints,
+    ProfileMemory, SemanticEntry, SemanticMemory, SemanticSummary,
 };
 
 /// 检索相关的 Episodic Memory
@@ -13,9 +14,19 @@ pub fn retrieve_episodes(
     episodic: &EpisodicMemory,
     query: &MemoryQuery,
 ) -> Vec<(EpisodicEntry, f64)> {
+    if !allows_memory_type(query, MemoryType::Episodic) {
+        return Vec::new();
+    }
+
     let mut results: Vec<(EpisodicEntry, f64)> = Vec::new();
 
     for entry in &episodic.entries {
+        if let Some(min_confidence) = query.min_confidence {
+            let inferred_confidence = if entry.final_status == "completed" { 0.85 } else { 0.6 };
+            if inferred_confidence < min_confidence {
+                continue;
+            }
+        }
         let score = compute_episode_relevance(entry, query);
         if score > 0.1 {
             results.push((entry.clone(), score));
@@ -88,9 +99,18 @@ pub fn retrieve_procedures(
     procedural: &ProceduralMemory,
     query: &MemoryQuery,
 ) -> Vec<(ProceduralEntry, f64)> {
+    if !allows_memory_type(query, MemoryType::Procedural) {
+        return Vec::new();
+    }
+
     let mut results: Vec<(ProceduralEntry, f64)> = Vec::new();
 
     for entry in &procedural.procedures {
+        if let Some(min_confidence) = query.min_confidence {
+            if entry.confidence < min_confidence {
+                continue;
+            }
+        }
         let score = compute_procedure_relevance(entry, query);
         if score > 0.1 {
             results.push((entry.clone(), score));
@@ -164,12 +184,79 @@ pub fn retrieve_policies(policy: &PolicyMemory, scope_prefix: &str) -> Vec<Polic
         .collect()
 }
 
+/// 检索相关的 Semantic Memory
+pub fn retrieve_semantic(
+    semantic: &SemanticMemory,
+    query: &MemoryQuery,
+) -> Vec<(SemanticEntry, f64)> {
+    if !allows_memory_type(query, MemoryType::Semantic) {
+        return Vec::new();
+    }
+
+    let mut results: Vec<(SemanticEntry, f64)> = Vec::new();
+
+    for entry in &semantic.entries {
+        if entry.ttl.map(|ttl| now_millis() > ttl).unwrap_or(false) {
+            continue;
+        }
+        if !entry.explicit && entry.mention_count < 2 {
+            continue;
+        }
+        if let Some(min_confidence) = query.min_confidence {
+            if entry.confidence < min_confidence {
+                continue;
+            }
+        }
+        let score = compute_semantic_relevance(entry, query);
+        if score > 0.08 {
+            results.push((entry.clone(), score));
+        }
+    }
+
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let limit = if query.limit > 0 { query.limit.min(3) } else { 3 };
+    results.truncate(limit);
+    results
+}
+
+/// 检索相关的 Meta Preferences
+pub fn retrieve_meta(meta: &MetaMemory, query: &MemoryQuery) -> Vec<MetaPreference> {
+    if !allows_memory_type(query, MemoryType::Meta) {
+        return Vec::new();
+    }
+
+    let goal = query.goal.as_deref().unwrap_or_default().to_lowercase();
+    let wants_memory_controls = goal.contains("记住")
+        || goal.contains("忘")
+        || goal.contains("默认")
+        || goal.contains("回复")
+        || goal.contains("称呼");
+
+    meta.preferences
+        .iter()
+        .filter(|entry| entry.ttl.map(|ttl| now_millis() <= ttl).unwrap_or(true))
+        .filter(|entry| entry.confidence >= 0.4)
+        .filter(|entry| {
+            wants_memory_controls
+                || matches!(entry.category.as_str(), "retention" | "reply" | "conversation")
+        })
+        .cloned()
+        .take(4)
+        .collect()
+}
+
+fn allows_memory_type(query: &MemoryQuery, memory_type: MemoryType) -> bool {
+    query.memory_types.is_empty() || query.memory_types.contains(&memory_type)
+}
+
 /// 构建 Memory Summary (用于 prompt 注入)
 pub fn build_memory_summary(
     profile: &ProfileMemory,
     episodic: &EpisodicMemory,
     procedural: &ProceduralMemory,
     policy: &PolicyMemory,
+    semantic: &SemanticMemory,
+    meta: &MetaMemory,
     query: &MemoryQuery,
 ) -> MemorySummary {
     // 1. 检索相关 episodes
@@ -218,7 +305,11 @@ pub fn build_memory_summary(
 
     // 3. 检索适用的 policies
     let scope_prefix = query.app_name.as_deref().unwrap_or("global");
-    let policies = retrieve_policies(policy, scope_prefix);
+    let policies = if allows_memory_type(query, MemoryType::Policy) {
+        retrieve_policies(policy, scope_prefix)
+    } else {
+        Vec::new()
+    };
     let active_policies: Vec<PolicySummary> = policies
         .into_iter()
         .filter(|s| s.approved || s.confidence > 0.7)
@@ -230,7 +321,28 @@ pub fn build_memory_summary(
         })
         .collect();
 
-    // 4. Profile hints
+    // 4. 检索 semantic context
+    let semantic_context: Vec<SemanticSummary> = retrieve_semantic(semantic, query)
+        .into_iter()
+        .map(|(entry, score)| SemanticSummary {
+            topic: entry.topic,
+            knowledge: entry.knowledge,
+            relevance_score: score,
+        })
+        .collect();
+
+    // 5. 检索 meta preferences
+    let meta_preferences: Vec<MetaSummary> = retrieve_meta(meta, query)
+        .into_iter()
+        .map(|entry| MetaSummary {
+            category: entry.category,
+            preference: entry.preference,
+            value: meta_value_to_string(&entry.value),
+            confidence: entry.confidence,
+        })
+        .collect();
+
+    // 6. Profile hints
     let profile_hints = ProfileHints {
         preferred_apps: profile
             .preferred_apps
@@ -250,7 +362,8 @@ pub fn build_memory_summary(
         relevant_episodes,
         relevant_procedures,
         active_policies,
-        semantic_context: Vec::new(),
+        semantic_context,
+        meta_preferences,
         profile_hints,
     }
 }
@@ -298,6 +411,28 @@ pub fn render_memory_summary_for_prompt(summary: &MemorySummary) -> String {
         }
     }
 
+    // Semantic context
+    if !summary.semantic_context.is_empty() {
+        lines.push("\n### 语义记忆".to_string());
+        for item in &summary.semantic_context {
+            lines.push(format!(
+                "- {}: {} (相关度 {:.2})",
+                item.topic, item.knowledge, item.relevance_score
+            ));
+        }
+    }
+
+    // Meta preferences
+    if !summary.meta_preferences.is_empty() {
+        lines.push("\n### 记忆与回复偏好".to_string());
+        for item in &summary.meta_preferences {
+            lines.push(format!(
+                "- [{}] {} = {} (置信度 {:.2})",
+                item.category, item.preference, item.value, item.confidence
+            ));
+        }
+    }
+
     // Active policies
     if !summary.active_policies.is_empty() {
         lines.push("\n### 适用策略建议".to_string());
@@ -310,6 +445,55 @@ pub fn render_memory_summary_for_prompt(summary: &MemorySummary) -> String {
     }
 
     lines.join("\n")
+}
+
+fn compute_semantic_relevance(entry: &SemanticEntry, query: &MemoryQuery) -> f64 {
+    let mut score = 0.0;
+
+    if let Some(ref goal) = query.goal {
+        score += text_similarity(&entry.topic, goal) * 0.4;
+        score += text_similarity(&entry.knowledge, goal) * 0.25;
+    }
+
+    if let Some(ref intent) = query.intent {
+        score += text_similarity(&entry.source_type, intent) * 0.1;
+        let tag_matches = entry
+            .tags
+            .iter()
+            .filter(|tag| text_similarity(tag, intent) > 0.8)
+            .count();
+        if tag_matches > 0 {
+            score += 0.1;
+        }
+    }
+
+    if let Some(ref app_name) = query.app_name {
+        score += text_similarity(&entry.topic, app_name) * 0.15;
+        score += text_similarity(&entry.knowledge, app_name) * 0.1;
+    }
+
+    if !query.tags.is_empty() {
+        let tag_matches = query
+            .tags
+            .iter()
+            .filter(|tag| entry.tags.iter().any(|entry_tag| entry_tag == *tag))
+            .count();
+        if tag_matches > 0 {
+            score += 0.1 * tag_matches as f64 / query.tags.len() as f64;
+        }
+    }
+
+    let age_hours = (now_millis().saturating_sub(entry.updated_at)) as f64 / 3_600_000.0;
+    let recency_factor = 1.0 / (1.0 + age_hours / 168.0);
+    score *= 0.6 + 0.25 * entry.confidence + 0.15 * recency_factor;
+    score
+}
+
+fn meta_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        _ => value.to_string(),
+    }
 }
 
 /// 简单文本相似度 (基于词重叠 Jaccard 系数)
@@ -340,4 +524,3 @@ fn text_similarity(a: &str, b: &str) -> f64 {
         intersection as f64 / union as f64
     }
 }
-

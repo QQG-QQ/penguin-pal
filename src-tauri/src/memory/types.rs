@@ -476,6 +476,12 @@ pub struct SemanticEntry {
     pub created_at: u64,
     pub updated_at: u64,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub explicit: bool,
+    #[serde(default = "default_mention_count")]
+    pub mention_count: u32,
+    #[serde(default)]
+    pub ttl: Option<u64>,
 }
 
 impl SemanticEntry {
@@ -485,19 +491,23 @@ impl SemanticEntry {
             memory_type: MemoryType::Semantic,
             content: self.knowledge.clone(),
             summary: format!("[{}] {}", self.source_type, self.topic),
-            source: "system".to_string(),
+            source: if self.explicit {
+                "conversation_explicit".to_string()
+            } else {
+                "conversation_inferred".to_string()
+            },
             created_at: self.created_at,
             updated_at: self.updated_at,
-            importance: 0.6,
+            importance: if self.explicit { 0.8 } else { 0.45 },
             confidence: self.confidence,
             recency: 1.0,
-            frequency: 0,
+            frequency: self.mention_count,
             scope: MemoryScope::Project,
             tags: self.tags.clone(),
             related_memories: Vec::new(),
             status: MemoryStatus::Active,
             privacy: PrivacyLevel::Public,
-            ttl: None,
+            ttl: self.ttl,
             retrieval_keys: vec![self.topic.clone(), self.source_type.clone()],
         }
     }
@@ -531,6 +541,10 @@ pub struct MetaPreference {
     pub confidence: f64,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(default)]
+    pub explicit: bool,
+    #[serde(default)]
+    pub ttl: Option<u64>,
 }
 
 impl MetaPreference {
@@ -540,7 +554,11 @@ impl MetaPreference {
             memory_type: MemoryType::Meta,
             content: serde_json::to_string(self).unwrap_or_default(),
             summary: format!("[{}] {}", self.category, self.preference),
-            source: "system".to_string(),
+            source: if self.explicit {
+                "conversation_explicit".to_string()
+            } else {
+                "system".to_string()
+            },
             created_at: self.created_at,
             updated_at: self.updated_at,
             importance: 0.9,
@@ -552,7 +570,7 @@ impl MetaPreference {
             related_memories: Vec::new(),
             status: MemoryStatus::Active,
             privacy: PrivacyLevel::Public,
-            ttl: None,
+            ttl: self.ttl,
             retrieval_keys: vec![self.category.clone(), self.preference.clone()],
         }
     }
@@ -568,6 +586,7 @@ pub struct MemorySummary {
     pub relevant_procedures: Vec<ProcedureSummary>,
     pub active_policies: Vec<PolicySummary>,
     pub semantic_context: Vec<SemanticSummary>,
+    pub meta_preferences: Vec<MetaSummary>,
     pub profile_hints: ProfileHints,
 }
 
@@ -599,6 +618,14 @@ pub struct SemanticSummary {
     pub topic: String,
     pub knowledge: String,
     pub relevance_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaSummary {
+    pub category: String,
+    pub preference: String,
+    pub value: String,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -660,4 +687,8 @@ pub fn now_millis() -> u64 {
 /// 生成唯一 ID
 pub fn generate_id(prefix: &str) -> String {
     format!("{}_{}", prefix, now_millis())
+}
+
+fn default_mention_count() -> u32 {
+    1
 }

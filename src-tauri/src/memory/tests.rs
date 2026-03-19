@@ -109,6 +109,46 @@ mod tests {
         assert_eq!(procedural.procedures[0].confidence, 0.6);
     }
 
+    #[test]
+    fn test_store_semantic_and_meta_crud() {
+        let (_temp, store) = temp_store();
+
+        store
+            .upsert_semantic_entry(SemanticEntry {
+                id: "sem-1".to_string(),
+                topic: "用户偏好".to_string(),
+                knowledge: "用户喜欢简洁回答".to_string(),
+                source_type: "user_fact".to_string(),
+                confidence: 0.9,
+                created_at: now_millis(),
+                updated_at: now_millis(),
+                tags: vec!["conversation".to_string()],
+                explicit: true,
+                mention_count: 1,
+                ttl: None,
+            })
+            .unwrap();
+        store
+            .upsert_meta_preference(MetaPreference {
+                id: "meta-1".to_string(),
+                category: "reply".to_string(),
+                preference: "reply_style".to_string(),
+                value: serde_json::json!("concise"),
+                confidence: 0.8,
+                created_at: now_millis(),
+                updated_at: now_millis(),
+                explicit: true,
+                ttl: None,
+            })
+            .unwrap();
+
+        let semantic = store.load_semantic().unwrap();
+        let meta = store.load_meta().unwrap();
+        assert_eq!(semantic.entries.len(), 1);
+        assert_eq!(meta.preferences.len(), 1);
+        assert_eq!(semantic.entries[0].topic, "用户偏好");
+    }
+
     // ========================================================================
     // Core Policy Tests
     // ========================================================================
@@ -265,6 +305,50 @@ mod tests {
         assert!(results[0].0.goal.contains("记事本"));
     }
 
+    #[test]
+    fn test_retrieval_semantic_by_goal() {
+        let semantic = SemanticMemory {
+            schema_version: MEMORY_SCHEMA_VERSION.to_string(),
+            entries: vec![
+                SemanticEntry {
+                    id: "sem-1".to_string(),
+                    topic: "用户回复偏好".to_string(),
+                    knowledge: "用户希望默认使用中文并简洁回复".to_string(),
+                    source_type: "user_fact".to_string(),
+                    confidence: 0.95,
+                    created_at: now_millis(),
+                    updated_at: now_millis(),
+                    tags: vec!["conversation".to_string(), "preference".to_string()],
+                    explicit: true,
+                    mention_count: 1,
+                    ttl: None,
+                },
+                SemanticEntry {
+                    id: "sem-2".to_string(),
+                    topic: "项目结构".to_string(),
+                    knowledge: "Whisper 模型位于 appdata 目录".to_string(),
+                    source_type: "project_structure".to_string(),
+                    confidence: 0.8,
+                    created_at: now_millis(),
+                    updated_at: now_millis(),
+                    tags: vec!["project".to_string()],
+                    explicit: true,
+                    mention_count: 1,
+                    ttl: None,
+                },
+            ],
+        };
+
+        let query = MemoryQuery {
+            goal: Some("默认中文回复".to_string()),
+            ..Default::default()
+        };
+
+        let results = retrieval::retrieve_semantic(&semantic, &query);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0.topic, "用户回复偏好");
+    }
+
     // ========================================================================
     // Service Tests
     // ========================================================================
@@ -281,6 +365,8 @@ mod tests {
         let summary = service.retrieve(&query).unwrap();
         assert!(summary.relevant_episodes.is_empty());
         assert!(summary.relevant_procedures.is_empty());
+        assert!(summary.semantic_context.is_empty());
+        assert!(summary.meta_preferences.is_empty());
     }
 
     #[test]
@@ -375,6 +461,102 @@ mod tests {
         assert_eq!(procedural.procedures.len(), 1);
         assert!(procedural.procedures[0].confidence < 0.5); // Initial 0.5 - 0.1 = 0.4
         assert_eq!(procedural.procedures[0].failure_count, 1);
+    }
+
+    #[test]
+    fn test_write_back_conversation_explicit_remember() {
+        let (_temp, store) = temp_store();
+
+        write_back::write_back_conversation_turn(
+            &store,
+            "请记住我喜欢简洁一点的回复。",
+            "好的，我会记住。",
+        )
+        .unwrap();
+
+        let semantic = store.load_semantic().unwrap();
+        let meta = store.load_meta().unwrap();
+        assert_eq!(semantic.entries.len(), 1);
+        assert!(semantic.entries[0].knowledge.contains("喜欢简洁一点的回复"));
+        assert_eq!(meta.preferences.len(), 1);
+        assert_eq!(meta.preferences[0].category, "retention");
+    }
+
+    #[test]
+    fn test_write_back_conversation_updates_profile_preferences() {
+        let (_temp, store) = temp_store();
+
+        write_back::write_back_conversation_turn(
+            &store,
+            "以后默认用中文回复我，并且尽量简短一点。",
+            "好的。",
+        )
+        .unwrap();
+
+        let profile = store.load_profile().unwrap();
+        let meta = store.load_meta().unwrap();
+        assert_eq!(profile.language_style.preferred_language, "zh-CN");
+        assert_eq!(profile.language_style.reply_style, "concise");
+        assert_eq!(meta.preferences.len(), 2);
+    }
+
+    #[test]
+    fn test_write_back_conversation_forget_semantic_memory() {
+        let (_temp, store) = temp_store();
+
+        write_back::write_back_conversation_turn(
+            &store,
+            "记住：我的项目目录在 D:/work/demo",
+            "好。",
+        )
+        .unwrap();
+        write_back::write_back_conversation_turn(
+            &store,
+            "忘记我的项目目录在 D:/work/demo",
+            "好。",
+        )
+        .unwrap();
+
+        let semantic = store.load_semantic().unwrap();
+        assert!(semantic.entries.is_empty());
+    }
+
+    #[test]
+    fn test_write_back_conversation_candidate_requires_repeat_for_retrieval() {
+        let (_temp, store) = temp_store();
+
+        write_back::write_back_conversation_turn(
+            &store,
+            "我喜欢用 VS Code。",
+            "收到。",
+        )
+        .unwrap();
+
+        let semantic = store.load_semantic().unwrap();
+        assert_eq!(semantic.entries.len(), 1);
+        assert!(!semantic.entries[0].explicit);
+        assert_eq!(semantic.entries[0].mention_count, 1);
+
+        let query = MemoryQuery {
+            goal: Some("你记得我喜欢用什么编辑器吗".to_string()),
+            ..Default::default()
+        };
+        let retrieved = retrieval::retrieve_semantic(&semantic, &query);
+        assert!(retrieved.is_empty());
+
+        write_back::write_back_conversation_turn(
+            &store,
+            "我喜欢用 VS Code。",
+            "收到。",
+        )
+        .unwrap();
+
+        let semantic = store.load_semantic().unwrap();
+        assert_eq!(semantic.entries.len(), 1);
+        assert_eq!(semantic.entries[0].mention_count, 2);
+
+        let retrieved = retrieval::retrieve_semantic(&semantic, &query);
+        assert_eq!(retrieved.len(), 1);
     }
 
     // ========================================================================

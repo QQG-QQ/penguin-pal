@@ -397,13 +397,21 @@ pub fn handle_memory_request(app: &AppHandle) -> Result<AgentHandleResult, Strin
     let episodic = memory_service.store().load_episodic().unwrap_or_default();
     let procedural = memory_service.store().load_procedural().unwrap_or_default();
     let policy = memory_service.store().load_policy().unwrap_or_default();
+    let semantic = memory_service.load_semantic().unwrap_or_default();
+    let meta = memory_service.load_meta().unwrap_or_default();
 
     let input_history = history::get_input_history(app).unwrap_or_default();
     let reply_history = history::get_today_reply_history(app).unwrap_or_default();
     let recent_failures = testing::history::recent_failed_summary(app).unwrap_or_default();
+    let stable_semantic_count = semantic
+        .entries
+        .iter()
+        .filter(|entry| entry.explicit || entry.mention_count >= 2)
+        .count();
+    let candidate_semantic_count = semantic.entries.len().saturating_sub(stable_semantic_count);
 
     let mut lines = vec![
-        "## 持久化记忆系统 v1 状态".to_string(),
+        "## 持久化记忆系统 v2 状态".to_string(),
         format!("存储路径：{}/memory/", app_data.to_string_lossy()),
         "".to_string(),
         "### Profile Memory (用户偏好)".to_string(),
@@ -419,6 +427,14 @@ pub fn handle_memory_request(app: &AppHandle) -> Result<AgentHandleResult, Strin
         "".to_string(),
         "### Policy Memory (软建议)".to_string(),
         format!("- 策略建议：{} 条", policy.suggestions.len()),
+        "".to_string(),
+        "### Semantic Memory (语义知识)".to_string(),
+        format!("- 语义条目：{} 条", semantic.entries.len()),
+        format!("- 稳定长期记忆：{} 条", stable_semantic_count),
+        format!("- 候选记忆：{} 条", candidate_semantic_count),
+        "".to_string(),
+        "### Meta Memory (记忆偏好)".to_string(),
+        format!("- 偏好条目：{} 条", meta.preferences.len()),
         "".to_string(),
         "### 其他历史".to_string(),
         format!("- 输入历史：{} 条", input_history.len()),

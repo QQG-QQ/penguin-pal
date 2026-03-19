@@ -11,8 +11,8 @@ use super::core_policy::{self, CorePolicyCheck};
 use super::retrieval::{build_memory_summary, render_memory_summary_for_prompt};
 use super::store::MemoryStore;
 use super::types::{
-    now_millis, MemoryQuery, MemorySummary, PolicySuggestion, ProceduralEntry, ProfileMemory,
-    WriteBackRequest,
+    now_millis, MemoryQuery, MemorySummary, MetaMemory, PolicySuggestion, ProceduralEntry,
+    ProfileMemory, SemanticMemory, WriteBackRequest,
 };
 use super::write_back;
 
@@ -31,7 +31,7 @@ impl MemoryService {
 
     /// 获取 store 引用（用于直接访问）
     pub fn store(&self) -> &MemoryStore {
-        &self.store
+        self.store.as_ref()
     }
 
     // ========================================================================
@@ -48,6 +48,16 @@ impl MemoryService {
         self.store.save_profile(profile)
     }
 
+    /// 加载 Semantic Memory
+    pub fn load_semantic(&self) -> Result<SemanticMemory, String> {
+        self.store.load_semantic()
+    }
+
+    /// 加载 Meta Memory
+    pub fn load_meta(&self) -> Result<MetaMemory, String> {
+        self.store.load_meta()
+    }
+
     // ========================================================================
     // Retrieve / Rank
     // ========================================================================
@@ -58,12 +68,16 @@ impl MemoryService {
         let episodic = self.store.load_episodic()?;
         let procedural = self.store.load_procedural()?;
         let policy = self.store.load_policy()?;
+        let semantic = self.store.load_semantic()?;
+        let meta = self.store.load_meta()?;
 
         Ok(build_memory_summary(
             &profile,
             &episodic,
             &procedural,
             &policy,
+            &semantic,
+            &meta,
             query,
         ))
     }
@@ -81,6 +95,15 @@ impl MemoryService {
     /// 写回任务结果
     pub fn write_back(&self, request: WriteBackRequest) -> Result<(), String> {
         write_back::write_back_task_result(&self.store, request)
+    }
+
+    /// 写回普通对话中的长期记忆
+    pub fn write_conversation_turn(
+        &self,
+        user_input: &str,
+        assistant_reply: &str,
+    ) -> Result<(), String> {
+        write_back::write_back_conversation_turn(&self.store, user_input, assistant_reply)
     }
 
     /// 写回确认被拒绝的经验
@@ -246,12 +269,57 @@ impl MemoryService {
         let decay_count = self.decay_procedural_confidence(168).unwrap_or(0); // 一周阈值
         let merge_count = self.merge_procedural_duplicates().unwrap_or(0);
         let prune_count = self.prune_low_confidence_procedural(0.1).unwrap_or(0);
+        let semantic_merge_count = self.merge_semantic_duplicates().unwrap_or(0);
+        let semantic_prune_count = self.prune_low_confidence_semantic(0.2).unwrap_or(0);
 
         MaintenanceResult {
             decayed: decay_count,
-            merged: merge_count,
-            pruned: prune_count,
+            merged: merge_count + semantic_merge_count,
+            pruned: prune_count + semantic_prune_count,
         }
+    }
+
+    fn merge_semantic_duplicates(&self) -> Result<u32, String> {
+        let mut semantic = self.store.load_semantic()?;
+        let original_count = semantic.entries.len();
+        let mut merged: std::collections::HashMap<String, super::types::SemanticEntry> =
+            std::collections::HashMap::new();
+
+        for entry in semantic.entries.drain(..) {
+            let key = format!("{}::{}", normalize_key(&entry.topic), entry.source_type);
+            if let Some(existing) = merged.get_mut(&key) {
+                if entry.knowledge.len() > existing.knowledge.len() {
+                    existing.knowledge = entry.knowledge.clone();
+                }
+                existing.confidence = existing.confidence.max(entry.confidence);
+                existing.updated_at = existing.updated_at.max(entry.updated_at);
+                for tag in entry.tags {
+                    if !existing.tags.iter().any(|existing_tag| existing_tag == &tag) {
+                        existing.tags.push(tag);
+                    }
+                }
+            } else {
+                merged.insert(key, entry);
+            }
+        }
+
+        semantic.entries = merged.into_values().collect();
+        let merged_count = (original_count - semantic.entries.len()) as u32;
+        if merged_count > 0 {
+            self.store.save_semantic(&semantic)?;
+        }
+        Ok(merged_count)
+    }
+
+    fn prune_low_confidence_semantic(&self, threshold: f64) -> Result<u32, String> {
+        let mut semantic = self.store.load_semantic()?;
+        let original_count = semantic.entries.len();
+        semantic.entries.retain(|entry| entry.confidence >= threshold);
+        let pruned_count = (original_count - semantic.entries.len()) as u32;
+        if pruned_count > 0 {
+            self.store.save_semantic(&semantic)?;
+        }
+        Ok(pruned_count)
     }
 }
 
@@ -267,6 +335,14 @@ impl MaintenanceResult {
     pub fn total_changes(&self) -> u32 {
         self.decayed + self.merged + self.pruned
     }
+}
+
+fn normalize_key(input: &str) -> String {
+    input
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && ch.is_alphanumeric())
+        .collect()
 }
 
 

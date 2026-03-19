@@ -12,8 +12,8 @@ use std::sync::Mutex;
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::types::{
-    now_millis, EpisodicMemory, PolicyMemory, ProceduralMemory, ProfileMemory,
-    MEMORY_SCHEMA_VERSION,
+    now_millis, EpisodicMemory, MetaMemory, MetaPreference, PolicyMemory, ProceduralMemory,
+    ProfileMemory, SemanticEntry, SemanticMemory, MEMORY_SCHEMA_VERSION,
 };
 
 /// Memory 存储目录名
@@ -24,6 +24,8 @@ const PROFILE_FILE: &str = "profile.json";
 const EPISODIC_FILE: &str = "episodic.json";
 const PROCEDURAL_FILE: &str = "procedural.json";
 const POLICY_FILE: &str = "policy.json";
+const SEMANTIC_FILE: &str = "semantic.json";
+const META_FILE: &str = "meta.json";
 
 /// Memory Store 单例
 pub struct MemoryStore {
@@ -32,6 +34,8 @@ pub struct MemoryStore {
     episodic: Mutex<Option<EpisodicMemory>>,
     procedural: Mutex<Option<ProceduralMemory>>,
     policy: Mutex<Option<PolicyMemory>>,
+    semantic: Mutex<Option<SemanticMemory>>,
+    meta: Mutex<Option<MetaMemory>>,
 }
 
 impl MemoryStore {
@@ -44,6 +48,8 @@ impl MemoryStore {
             episodic: Mutex::new(None),
             procedural: Mutex::new(None),
             policy: Mutex::new(None),
+            semantic: Mutex::new(None),
+            meta: Mutex::new(None),
         }
     }
 
@@ -257,6 +263,146 @@ impl MemoryStore {
     }
 
     // ========================================================================
+    // Semantic Memory
+    // ========================================================================
+
+    /// 加载 Semantic Memory
+    pub fn load_semantic(&self) -> Result<SemanticMemory, String> {
+        let mut cache = self.semantic.lock().map_err(|_| "锁定 semantic 失败")?;
+        if let Some(ref semantic) = *cache {
+            return Ok(semantic.clone());
+        }
+        let semantic: SemanticMemory = self.read_json(SEMANTIC_FILE)?;
+        *cache = Some(semantic.clone());
+        Ok(semantic)
+    }
+
+    /// 保存 Semantic Memory
+    pub fn save_semantic(&self, semantic: &SemanticMemory) -> Result<(), String> {
+        self.write_json(SEMANTIC_FILE, semantic)?;
+        let mut cache = self.semantic.lock().map_err(|_| "锁定 semantic 失败")?;
+        *cache = Some(semantic.clone());
+        Ok(())
+    }
+
+    /// 更新 Semantic Memory
+    pub fn update_semantic<F>(&self, updater: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut SemanticMemory),
+    {
+        let mut semantic = self.load_semantic()?;
+        if semantic.schema_version.is_empty() {
+            semantic.schema_version = MEMORY_SCHEMA_VERSION.to_string();
+        }
+        updater(&mut semantic);
+        self.save_semantic(&semantic)
+    }
+
+    /// 更新或插入 Semantic Entry
+    pub fn upsert_semantic_entry(&self, entry: SemanticEntry) -> Result<(), String> {
+        self.update_semantic(|semantic| {
+            if let Some(existing) = semantic.entries.iter_mut().find(|candidate| {
+                normalize_key(&candidate.topic) == normalize_key(&entry.topic)
+                    && candidate.source_type == entry.source_type
+            }) {
+                existing.knowledge = choose_richer_text(&existing.knowledge, &entry.knowledge);
+                existing.confidence = existing.confidence.max(entry.confidence);
+                existing.updated_at = now_millis();
+                existing.explicit = existing.explicit || entry.explicit;
+                existing.mention_count = existing.mention_count.saturating_add(entry.mention_count.max(1));
+                if entry.ttl.is_none() || existing.explicit {
+                    existing.ttl = None;
+                } else if let Some(incoming_ttl) = entry.ttl {
+                    existing.ttl = Some(existing.ttl.map(|ttl| ttl.max(incoming_ttl)).unwrap_or(incoming_ttl));
+                }
+                merge_unique_strings(&mut existing.tags, &entry.tags);
+            } else {
+                semantic.entries.push(entry);
+            }
+
+            if semantic.entries.len() > 200 {
+                semantic.entries.sort_by(|a, b| {
+                    b.updated_at
+                        .cmp(&a.updated_at)
+                        .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+                });
+                semantic.entries.truncate(200);
+            }
+        })
+    }
+
+    /// 删除匹配的 Semantic Entries
+    pub fn forget_semantic_entries(&self, query: &str) -> Result<usize, String> {
+        let normalized = normalize_key(query);
+        if normalized.is_empty() {
+            return Ok(0);
+        }
+
+        let mut removed = 0usize;
+        self.update_semantic(|semantic| {
+            let before = semantic.entries.len();
+            semantic.entries.retain(|entry| {
+                !semantic_entry_matches(entry, &normalized)
+            });
+            removed = before.saturating_sub(semantic.entries.len());
+        })?;
+        Ok(removed)
+    }
+
+    // ========================================================================
+    // Meta Memory
+    // ========================================================================
+
+    /// 加载 Meta Memory
+    pub fn load_meta(&self) -> Result<MetaMemory, String> {
+        let mut cache = self.meta.lock().map_err(|_| "锁定 meta 失败")?;
+        if let Some(ref meta) = *cache {
+            return Ok(meta.clone());
+        }
+        let meta: MetaMemory = self.read_json(META_FILE)?;
+        *cache = Some(meta.clone());
+        Ok(meta)
+    }
+
+    /// 保存 Meta Memory
+    pub fn save_meta(&self, meta: &MetaMemory) -> Result<(), String> {
+        self.write_json(META_FILE, meta)?;
+        let mut cache = self.meta.lock().map_err(|_| "锁定 meta 失败")?;
+        *cache = Some(meta.clone());
+        Ok(())
+    }
+
+    /// 更新或插入 Meta Preference
+    pub fn upsert_meta_preference(&self, preference: MetaPreference) -> Result<(), String> {
+        let mut meta = self.load_meta()?;
+        if let Some(existing) = meta.preferences.iter_mut().find(|item| {
+            item.category == preference.category && item.preference == preference.preference
+        }) {
+            existing.value = preference.value;
+            existing.confidence = preference.confidence;
+            existing.updated_at = now_millis();
+            existing.explicit = existing.explicit || preference.explicit;
+            existing.ttl = match (existing.ttl, preference.ttl) {
+                (None, _) | (_, None) => None,
+                (Some(current), Some(incoming)) => Some(current.max(incoming)),
+            };
+        } else {
+            meta.preferences.push(preference);
+        }
+
+        if meta.preferences.len() > 64 {
+            meta.preferences.sort_by(|a, b| {
+                b.updated_at
+                    .cmp(&a.updated_at)
+                    .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+            });
+            meta.preferences.truncate(64);
+        }
+
+        self.save_meta(&meta)
+    }
+
+    // ========================================================================
     // 清除缓存
     // ========================================================================
 
@@ -274,6 +420,12 @@ impl MemoryStore {
         if let Ok(mut cache) = self.policy.lock() {
             *cache = None;
         }
+        if let Ok(mut cache) = self.semantic.lock() {
+            *cache = None;
+        }
+        if let Ok(mut cache) = self.meta.lock() {
+            *cache = None;
+        }
     }
 
     // ========================================================================
@@ -285,6 +437,10 @@ impl MemoryStore {
         use super::types::{MemoryEntry, MemoryType, MemoryScope, MemoryStatus, PrivacyLevel};
 
         let mut entries = Vec::new();
+
+        // 0. 从 Profile 转换
+        let profile = self.load_profile()?;
+        entries.push(profile.to_entry());
 
         // 1. 从 Episodic 转换
         let episodic = self.load_episodic()?;
@@ -369,6 +525,54 @@ impl MemoryStore {
             });
         }
 
+        // 4. 从 Semantic 转换
+        let semantic = self.load_semantic()?;
+        for entry in semantic.entries {
+            entries.push(entry.to_memory_entry());
+        }
+
+        // 5. 从 Meta 转换
+        let meta = self.load_meta()?;
+        for entry in meta.preferences {
+            entries.push(entry.to_memory_entry());
+        }
+
         Ok(entries)
     }
+}
+
+fn normalize_key(input: &str) -> String {
+    input
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '：' && *ch != ':' && *ch != '，' && *ch != ',')
+        .collect()
+}
+
+fn choose_richer_text(existing: &str, incoming: &str) -> String {
+    if incoming.trim().len() > existing.trim().len() {
+        incoming.trim().to_string()
+    } else {
+        existing.trim().to_string()
+    }
+}
+
+fn merge_unique_strings(target: &mut Vec<String>, incoming: &[String]) {
+    for item in incoming {
+        if !target.iter().any(|existing| existing == item) {
+            target.push(item.clone());
+        }
+    }
+}
+
+fn semantic_entry_matches(entry: &SemanticEntry, query: &str) -> bool {
+    let topic = normalize_key(&entry.topic);
+    let knowledge = normalize_key(&entry.knowledge);
+    topic.contains(query)
+        || knowledge.contains(query)
+        || entry
+            .tags
+            .iter()
+            .map(|tag| normalize_key(tag))
+            .any(|tag| tag.contains(query))
 }

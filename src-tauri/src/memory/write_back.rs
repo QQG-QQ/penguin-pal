@@ -4,9 +4,10 @@
 
 use super::store::MemoryStore;
 use super::types::{
-    now_millis, EpisodicEntry, FrequentPath, KeyEntity, ProceduralEntry, RuntimeContextDigest,
-    StableWindowFeatures, WriteBackRequest,
+    now_millis, EpisodicEntry, FrequentPath, KeyEntity, MetaPreference, ProceduralEntry,
+    RuntimeContextDigest, SemanticEntry, StableWindowFeatures, WriteBackRequest,
 };
+use serde_json::json;
 
 /// 写回任务结果到 memory
 pub fn write_back_task_result(store: &MemoryStore, request: WriteBackRequest) -> Result<(), String> {
@@ -262,6 +263,124 @@ pub fn write_confirmation_rejected(
     store.add_episodic_entry(entry)
 }
 
+/// 从普通对话写回长期记忆
+pub fn write_back_conversation_turn(
+    store: &MemoryStore,
+    user_input: &str,
+    _assistant_reply: &str,
+) -> Result<(), String> {
+    let user_input = user_input.trim();
+    if user_input.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(content) = extract_forget_content(user_input) {
+        let _ = store.forget_semantic_entries(&content)?;
+        store.upsert_meta_preference(MetaPreference {
+            id: format!("meta-{}", now_millis()),
+            category: "retention".to_string(),
+            preference: "explicit_forget_requests".to_string(),
+            value: json!(true),
+            confidence: 0.9,
+            created_at: now_millis(),
+            updated_at: now_millis(),
+            explicit: true,
+            ttl: None,
+        })?;
+    }
+
+    if let Some(content) = extract_remember_content(user_input) {
+        let now = now_millis();
+        store.upsert_semantic_entry(SemanticEntry {
+            id: format!("sem-{}", now),
+            topic: summarize_topic(&content),
+            knowledge: content.clone(),
+            source_type: "user_fact".to_string(),
+            confidence: 0.95,
+            created_at: now,
+            updated_at: now,
+            tags: vec![
+                "conversation".to_string(),
+                "explicit_memory".to_string(),
+                "user_fact".to_string(),
+            ],
+            explicit: true,
+            mention_count: 1,
+            ttl: None,
+        })?;
+        store.upsert_meta_preference(MetaPreference {
+            id: format!("meta-{}", now + 1),
+            category: "retention".to_string(),
+            preference: "respect_explicit_remember_requests".to_string(),
+            value: json!(true),
+            confidence: 0.95,
+            created_at: now,
+            updated_at: now,
+            explicit: true,
+            ttl: None,
+        })?;
+    }
+
+    if let Some(language) = extract_reply_language_preference(user_input) {
+        update_profile_language_preference(store, language)?;
+    }
+
+    if let Some(style) = extract_reply_style_preference(user_input) {
+        update_profile_reply_style(store, style)?;
+    }
+
+    if let Some(alias) = extract_user_alias(user_input) {
+        let now = now_millis();
+        store.upsert_semantic_entry(SemanticEntry {
+            id: format!("sem-{}", now),
+            topic: "用户称呼".to_string(),
+            knowledge: format!("用户希望被称呼为 {}", alias),
+            source_type: "user_preference".to_string(),
+            confidence: 0.9,
+            created_at: now,
+            updated_at: now,
+            tags: vec![
+                "conversation".to_string(),
+                "user_alias".to_string(),
+                "user_preference".to_string(),
+            ],
+            explicit: true,
+            mention_count: 1,
+            ttl: None,
+        })?;
+        store.upsert_meta_preference(MetaPreference {
+            id: format!("meta-{}", now + 2),
+            category: "conversation".to_string(),
+            preference: "user_alias".to_string(),
+            value: json!(alias),
+            confidence: 0.9,
+            created_at: now,
+            updated_at: now,
+            explicit: true,
+            ttl: None,
+        })?;
+    }
+
+    if let Some(candidate) = extract_candidate_user_fact(user_input) {
+        let now = now_millis();
+        store.upsert_semantic_entry(SemanticEntry {
+            id: format!("sem-{}", now),
+            topic: candidate.topic,
+            knowledge: candidate.knowledge,
+            source_type: candidate.source_type,
+            confidence: candidate.confidence,
+            created_at: now,
+            updated_at: now,
+            tags: candidate.tags,
+            explicit: false,
+            mention_count: 1,
+            ttl: Some(now + 30 * 24 * 3600 * 1000),
+        })?;
+    }
+
+    Ok(())
+}
+
 /// 从窗口标题提取应用名
 fn extract_app_name(window_title: &str) -> Option<String> {
     // 常见模式：
@@ -317,3 +436,231 @@ fn infer_target_kind(entities: &[KeyEntity]) -> String {
     "app".to_string()
 }
 
+fn summarize_topic(content: &str) -> String {
+    let text = content.trim().trim_matches(|ch: char| "。！!？?，,".contains(ch));
+    let max_chars = 24;
+    let topic: String = text.chars().take(max_chars).collect();
+    if topic.is_empty() {
+        "用户记忆".to_string()
+    } else {
+        topic
+    }
+}
+
+fn extract_remember_content(input: &str) -> Option<String> {
+    if looks_like_memory_status_query(input) {
+        return None;
+    }
+
+    let prefixes = [
+        "请记住",
+        "帮我记住",
+        "请帮我记住",
+        "记住",
+        "记一下",
+        "帮我记一下",
+        "别忘了",
+    ];
+
+    for prefix in prefixes {
+        if let Some(rest) = strip_prefix_ci(input, prefix) {
+            let content = clean_memory_content(rest);
+            if !content.is_empty() {
+                return Some(content);
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_forget_content(input: &str) -> Option<String> {
+    let prefixes = ["忘掉", "忘记", "不要记住", "别记住", "别再记", "忽略刚才"];
+    for prefix in prefixes {
+        if let Some(rest) = strip_prefix_ci(input, prefix) {
+            let content = clean_memory_content(rest);
+            if !content.is_empty() {
+                return Some(content);
+            }
+        }
+    }
+    None
+}
+
+fn extract_reply_language_preference(input: &str) -> Option<&'static str> {
+    if input.contains("中文回复") || input.contains("用中文") || input.contains("默认中文") {
+        return Some("zh-CN");
+    }
+    if input.contains("英文回复")
+        || input.contains("英语回复")
+        || input.contains("用英文")
+        || input.contains("默认英文")
+    {
+        return Some("en-US");
+    }
+    None
+}
+
+fn extract_reply_style_preference(input: &str) -> Option<&'static str> {
+    if input.contains("简洁") || input.contains("简短") {
+        return Some("concise");
+    }
+    if input.contains("详细") || input.contains("展开") {
+        return Some("detailed");
+    }
+    if input.contains("正式") || input.contains("专业一点") {
+        return Some("formal");
+    }
+    if input.contains("口语化") || input.contains("自然一点") {
+        return Some("casual");
+    }
+    None
+}
+
+fn extract_user_alias(input: &str) -> Option<String> {
+    let markers = ["叫我", "称呼我为", "你可以叫我"];
+    for marker in markers {
+        if let Some(index) = input.find(marker) {
+            let rest = clean_memory_content(&input[index + marker.len()..]);
+            let alias = rest
+                .split(|ch: char| "，。！？!?, ".contains(ch))
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !alias.is_empty() {
+                return Some(alias.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn update_profile_language_preference(store: &MemoryStore, language: &str) -> Result<(), String> {
+    let now = now_millis();
+    store.update_profile(|profile| {
+        profile.language_style.preferred_language = language.to_string();
+        if profile.created_at == 0 {
+            profile.created_at = now;
+        }
+    })?;
+
+    store.upsert_meta_preference(MetaPreference {
+        id: format!("meta-{}", now),
+        category: "reply".to_string(),
+        preference: "preferred_language".to_string(),
+        value: json!(language),
+        confidence: 0.9,
+        created_at: now,
+        updated_at: now,
+        explicit: true,
+        ttl: None,
+    })
+}
+
+fn update_profile_reply_style(store: &MemoryStore, style: &str) -> Result<(), String> {
+    let now = now_millis();
+    store.update_profile(|profile| {
+        profile.language_style.reply_style = style.to_string();
+        if profile.created_at == 0 {
+            profile.created_at = now;
+        }
+    })?;
+
+    store.upsert_meta_preference(MetaPreference {
+        id: format!("meta-{}", now),
+        category: "reply".to_string(),
+        preference: "reply_style".to_string(),
+        value: json!(style),
+        confidence: 0.85,
+        created_at: now,
+        updated_at: now,
+        explicit: true,
+        ttl: None,
+    })
+}
+
+fn looks_like_memory_status_query(input: &str) -> bool {
+    input.contains("还记得")
+        || input.contains("记得吗")
+        || input.contains("记住了吗")
+        || input.contains("你记得")
+}
+
+fn clean_memory_content(input: &str) -> String {
+    input
+        .trim()
+        .trim_start_matches(|ch: char| ch == ':' || ch == '：' || ch == '，' || ch == ',')
+        .trim()
+        .trim_end_matches(|ch: char| ch == '。' || ch == '！' || ch == '!' )
+        .trim()
+        .to_string()
+}
+
+fn strip_prefix_ci<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    input.trim().strip_prefix(prefix)
+}
+
+struct CandidateSemanticFact {
+    topic: String,
+    knowledge: String,
+    source_type: String,
+    confidence: f64,
+    tags: Vec<String>,
+}
+
+fn extract_candidate_user_fact(input: &str) -> Option<CandidateSemanticFact> {
+    if extract_remember_content(input).is_some()
+        || extract_forget_content(input).is_some()
+        || extract_reply_language_preference(input).is_some()
+        || extract_reply_style_preference(input).is_some()
+        || extract_user_alias(input).is_some()
+    {
+        return None;
+    }
+
+    let trimmed = input.trim();
+    if let Some(content) = strip_prefix_ci(trimmed, "我喜欢") {
+        let content = clean_memory_content(content);
+        if !content.is_empty() {
+            return Some(CandidateSemanticFact {
+                topic: format!("用户偏好：{}", summarize_topic(&content)),
+                knowledge: format!("用户喜欢 {}", content),
+                source_type: "user_fact_candidate".to_string(),
+                confidence: 0.45,
+                tags: vec!["conversation".to_string(), "candidate".to_string(), "preference".to_string()],
+            });
+        }
+    }
+
+    for prefix in ["我常用", "我一般用", "我主要用"] {
+        if let Some(content) = strip_prefix_ci(trimmed, prefix) {
+            let content = clean_memory_content(content);
+            if !content.is_empty() {
+                return Some(CandidateSemanticFact {
+                    topic: format!("用户常用：{}", summarize_topic(&content)),
+                    knowledge: format!("用户常用 {}", content),
+                    source_type: "user_fact_candidate".to_string(),
+                    confidence: 0.5,
+                    tags: vec!["conversation".to_string(), "candidate".to_string(), "tooling".to_string()],
+                });
+            }
+        }
+    }
+
+    for prefix in ["我的项目目录在", "我的工作目录在", "我的项目在"] {
+        if let Some(content) = strip_prefix_ci(trimmed, prefix) {
+            let content = clean_memory_content(content);
+            if !content.is_empty() {
+                return Some(CandidateSemanticFact {
+                    topic: format!("用户目录：{}", summarize_topic(&content)),
+                    knowledge: format!("用户的目录信息为 {}", content),
+                    source_type: "user_fact_candidate".to_string(),
+                    confidence: 0.55,
+                    tags: vec!["conversation".to_string(), "candidate".to_string(), "path".to_string()],
+                });
+            }
+        }
+    }
+
+    None
+}

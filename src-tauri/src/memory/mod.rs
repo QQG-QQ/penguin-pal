@@ -57,6 +57,7 @@ pub use types::{
     ProcedureSummary,
     PolicySummary,
     SemanticSummary,
+    MetaSummary,
     ProfileHints,
     // Query 和 WriteBack
     MemoryQuery,
