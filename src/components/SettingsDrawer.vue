@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import ControlPanel from './ControlPanel.vue'
 import { presetModelCatalog } from '../lib/modelCatalog'
 import type {
@@ -10,6 +10,7 @@ import type {
   ProviderConfigInput,
   ProviderKind,
   ReplyHistoryEntry,
+  VoiceInputMode,
   VisionChannelKind,
   VisionProviderStatus,
   WhisperModel,
@@ -69,10 +70,188 @@ const visionProviderOptions: Array<{ label: string; value: VisionChannelKind }> 
 ]
 
 const presetOptions = presetModelCatalog
+const DEFAULT_PUSH_TO_TALK_SHORTCUT = 'CommandOrControl+Alt+Space'
+const voiceInputModeOptions: Array<{ label: string; value: VoiceInputMode; summary: string }> = [
+  { label: '关闭语音输入', value: 'disabled', summary: '仅保留文字输入，不自动开麦。' },
+  { label: '常驻监听', value: 'continuous', summary: '后台短窗循环录音，识别后自动发给桌宠。' },
+  { label: '按键说话', value: 'pushToTalk', summary: '按住全局快捷键时录音，松开后转写发送。' }
+]
 
 const selectedPreset = ref('custom')
 const applyingPreset = ref(false)
 const isCodexProvider = ref(localDraft.value.kind === 'codexCli')
+const shortcutRecording = ref(false)
+const shortcutPreview = ref('')
+
+const modifierOrder = ['CommandOrControl', 'Alt', 'Shift']
+
+const modifierTokens = (event: KeyboardEvent) => {
+  const tokens: string[] = []
+  if (event.ctrlKey || event.metaKey) {
+    tokens.push('CommandOrControl')
+  }
+  if (event.altKey) {
+    tokens.push('Alt')
+  }
+  if (event.shiftKey) {
+    tokens.push('Shift')
+  }
+  return tokens
+}
+
+const normalizeShortcutKey = (event: KeyboardEvent): string | null => {
+  const { key } = event
+
+  if (key === 'Control' || key === 'Meta' || key === 'Alt' || key === 'Shift') {
+    return null
+  }
+
+  if (key === ' ') {
+    return 'Space'
+  }
+
+  const aliasMap: Record<string, string> = {
+    ArrowUp: 'Up',
+    ArrowDown: 'Down',
+    ArrowLeft: 'Left',
+    ArrowRight: 'Right',
+    Escape: 'Esc',
+    Enter: 'Enter',
+    Tab: 'Tab',
+    Backspace: 'Backspace',
+    Delete: 'Delete',
+    Insert: 'Insert',
+    Home: 'Home',
+    End: 'End',
+    PageUp: 'PageUp',
+    PageDown: 'PageDown'
+  }
+
+  if (aliasMap[key]) {
+    return aliasMap[key]
+  }
+
+  if (/^F\d{1,2}$/i.test(key)) {
+    return key.toUpperCase()
+  }
+
+  if (/^[a-z0-9]$/i.test(key)) {
+    return key.toUpperCase()
+  }
+
+  return null
+}
+
+const currentShortcutDisplay = () =>
+  localDraft.value.pushToTalkShortcut?.trim() || DEFAULT_PUSH_TO_TALK_SHORTCUT
+
+const updateShortcutPreview = (event: KeyboardEvent) => {
+  const modifiers = modifierTokens(event)
+  shortcutPreview.value = modifiers.join('+')
+}
+
+const stopShortcutCapture = () => {
+  shortcutRecording.value = false
+  shortcutPreview.value = ''
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('keydown', handleShortcutCaptureKeydown, true)
+    window.removeEventListener('keyup', handleShortcutCaptureKeyup, true)
+    window.removeEventListener('blur', handleShortcutCaptureBlur)
+  }
+}
+
+const commitShortcutCapture = (value: string) => {
+  localDraft.value.pushToTalkShortcut = value
+  stopShortcutCapture()
+}
+
+const handleShortcutCaptureKeydown = (event: KeyboardEvent) => {
+  if (!shortcutRecording.value) {
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+
+  if (event.key === 'Escape' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+    stopShortcutCapture()
+    return
+  }
+
+  if (
+    (event.key === 'Backspace' || event.key === 'Delete') &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !event.shiftKey
+  ) {
+    commitShortcutCapture(DEFAULT_PUSH_TO_TALK_SHORTCUT)
+    return
+  }
+
+  const modifiers = modifierTokens(event)
+  const keyToken = normalizeShortcutKey(event)
+
+  if (!keyToken) {
+    shortcutPreview.value = modifiers.join('+')
+    return
+  }
+
+  const combo = [...modifiers, keyToken]
+    .filter((token, index, tokens) => tokens.indexOf(token) === index)
+    .sort((left, right) => {
+      const leftIndex = modifierOrder.indexOf(left)
+      const rightIndex = modifierOrder.indexOf(right)
+      if (leftIndex === -1 && rightIndex === -1) {
+        return 0
+      }
+      if (leftIndex === -1) {
+        return 1
+      }
+      if (rightIndex === -1) {
+        return -1
+      }
+      return leftIndex - rightIndex
+    })
+    .join('+')
+
+  commitShortcutCapture(combo)
+}
+
+const handleShortcutCaptureKeyup = (event: KeyboardEvent) => {
+  if (!shortcutRecording.value) {
+    return
+  }
+
+  event.preventDefault()
+  event.stopPropagation()
+  updateShortcutPreview(event)
+}
+
+const handleShortcutCaptureBlur = () => {
+  stopShortcutCapture()
+}
+
+const beginShortcutCapture = () => {
+  if (shortcutRecording.value) {
+    stopShortcutCapture()
+    return
+  }
+
+  shortcutRecording.value = true
+  shortcutPreview.value = ''
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('keydown', handleShortcutCaptureKeydown, true)
+    window.addEventListener('keyup', handleShortcutCaptureKeyup, true)
+    window.addEventListener('blur', handleShortcutCaptureBlur)
+  }
+}
+
+const resetShortcutToDefault = () => {
+  localDraft.value.pushToTalkShortcut = DEFAULT_PUSH_TO_TALK_SHORTCUT
+  stopShortcutCapture()
+}
 
 const applyProviderRules = () => {
   isCodexProvider.value = localDraft.value.kind === 'codexCli'
@@ -100,6 +279,7 @@ watch(
 watch(
   () => props.draft,
   (value) => {
+    stopShortcutCapture()
     localDraft.value = cloneDraft(value)
     selectedPreset.value = 'custom'
     applyProviderRules()
@@ -140,6 +320,9 @@ const clearVisionApiKey = () => {
 }
 
 const save = () => {
+  localDraft.value.pushToTalkShortcut =
+    localDraft.value.pushToTalkShortcut?.trim() || DEFAULT_PUSH_TO_TALK_SHORTCUT
+
   if (isCodexProvider.value || localDraft.value.kind === 'mock') {
     localDraft.value.apiKey = ''
     localDraft.value.clearApiKey = true
@@ -172,6 +355,10 @@ const formatHistoryTime = (timestamp: number) =>
     minute: '2-digit',
     second: '2-digit'
   })
+
+onBeforeUnmount(() => {
+  stopShortcutCapture()
+})
 </script>
 
 <template>
@@ -603,11 +790,113 @@ const formatHistoryTime = (timestamp: number) =>
 
         <div class="oauth-meta full-row">
           <p v-if="whisperStatus.modelLoaded">
-            当前已加载 {{ whisperStatus.currentModel }} 模型。语音输入会自动使用本地 Whisper 转写。
+            当前已加载 {{ whisperStatus.currentModel }} 模型。保存后会按所选模式使用本地 Whisper 转写。
           </p>
           <p v-else>
             请下载并加载一个 Whisper 模型以启用本地语音识别。推荐使用 Base 模型（142MB）。
           </p>
+        </div>
+      </section>
+
+      <section class="constraint-shell full-row">
+        <div class="constraint-header">
+          <div>
+            <strong>语音输入方式</strong>
+            <p>本地 Whisper 不依赖前台窗口。这里可以切换常驻监听或全局按键说话。</p>
+          </div>
+        </div>
+
+        <div class="constraint-grid">
+          <article class="constraint-panel">
+            <h3>输入模式</h3>
+            <label class="field full-row">
+              <span>模式</span>
+              <select v-model="localDraft.voiceInputMode">
+                <option
+                  v-for="option in voiceInputModeOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+
+            <div class="constraint-item">
+              <div class="constraint-item-top">
+                <strong>{{ voiceInputModeOptions.find((item) => item.value === localDraft.voiceInputMode)?.label }}</strong>
+                <span class="constraint-status">{{ localDraft.voiceInputMode }}</span>
+              </div>
+              <p>{{ voiceInputModeOptions.find((item) => item.value === localDraft.voiceInputMode)?.summary }}</p>
+            </div>
+
+            <label
+              v-if="localDraft.voiceInputMode === 'pushToTalk'"
+              class="field full-row"
+            >
+              <span>按键说话快捷键</span>
+              <div class="shortcut-capture">
+                <input
+                  :value="shortcutRecording ? (shortcutPreview || '请直接按下组合键') : currentShortcutDisplay()"
+                  readonly
+                />
+                <div class="compact-actions">
+                  <button
+                    type="button"
+                    class="ghost-button"
+                    @click="beginShortcutCapture"
+                  >
+                    {{ shortcutRecording ? '停止录制' : '开始录制' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="ghost-button"
+                    @click="resetShortcutToDefault"
+                  >
+                    恢复默认
+                  </button>
+                </div>
+              </div>
+              <p class="field-note">
+                {{
+                  shortcutRecording
+                    ? '正在录制。按下组合键即可保存；按 Esc 取消；按 Backspace/Delete 恢复默认。'
+                    : `当前快捷键：${currentShortcutDisplay()}`
+                }}
+              </p>
+            </label>
+          </article>
+
+          <article class="constraint-panel">
+            <h3>当前状态</h3>
+            <div class="constraint-item">
+              <div class="constraint-item-top">
+                <strong>Whisper 模型</strong>
+                <span class="constraint-status">{{ whisperStatus.modelLoaded ? '已加载' : '未加载' }}</span>
+              </div>
+              <p>
+                {{
+                  whisperStatus.modelLoaded
+                    ? `当前模型：${whisperStatus.currentModel}，录音状态：${whisperStatus.recordingState}。`
+                    : '请先下载并加载 Whisper 模型，语音输入模式配置才会真正生效。'
+                }}
+              </p>
+            </div>
+
+            <div class="constraint-item">
+              <div class="constraint-item-top">
+                <strong>设备环境</strong>
+                <span class="constraint-status">{{ voiceInputAvailable ? '可用' : '待就绪' }}</span>
+              </div>
+              <p>
+                {{
+                  voiceInputAvailable
+                    ? '桌宠运行时已经具备本地语音输入条件。'
+                    : '当前未进入可录音状态。若模型已加载，请在主窗口实际说话或按快捷键再观察。'
+                }}
+              </p>
+            </div>
+          </article>
         </div>
       </section>
 
@@ -642,14 +931,14 @@ const formatHistoryTime = (timestamp: number) =>
 
       <div class="release-note full-row">
         <strong>当前交互约束</strong>
-        <p>语音输入由电脑是否检测到麦克风决定，不能在这里手动关闭。</p>
         <p>
           {{
             voiceInputAvailable
-              ? '已检测到可用麦克风和语音识别环境，主桌宠窗口会默认进入自动语音监听。'
-              : '当前未检测到可用麦克风或语音识别环境，主桌宠窗口现阶段只保留文字输入。'
+              ? '本地 Whisper 语音入口已就绪；常驻监听会在后台短窗循环录音，按键说话会等待全局快捷键。'
+              : '当前本地 Whisper 语音入口还未就绪，通常是因为模型尚未加载或主窗口还没开始实际录音。'
           }}
         </p>
+        <p>按键说话使用 Tauri 全局快捷键格式，例如：{{ DEFAULT_PUSH_TO_TALK_SHORTCUT }}。</p>
         <p>隐藏到托盘只能通过主桌宠窗口中的输入或语音命令触发。</p>
         <p>高风险桌面动作仍然必须经过一次性人工确认，不会开放自由命令执行。</p>
       </div>
@@ -1150,6 +1439,11 @@ textarea {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.shortcut-capture {
+  display: grid;
+  gap: 8px;
 }
 
 .whisper-progress {

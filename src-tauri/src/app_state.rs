@@ -206,6 +206,10 @@ pub struct ProviderConfig {
     pub allow_network: bool,
     pub voice_reply: bool,
     pub retain_history: bool,
+    #[serde(default)]
+    pub voice_input_mode: VoiceInputMode,
+    #[serde(default = "default_push_to_talk_shortcut")]
+    pub push_to_talk_shortcut: String,
     pub api_key_loaded: bool,
     #[serde(default)]
     pub auth_mode: AuthMode,
@@ -223,10 +227,26 @@ impl Default for ProviderConfig {
             allow_network: true,
             voice_reply: true,
             retain_history: true,
+            voice_input_mode: VoiceInputMode::default(),
+            push_to_talk_shortcut: default_push_to_talk_shortcut(),
             api_key_loaded: false,
             auth_mode: AuthMode::ApiKey,
             oauth: OAuthState::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum VoiceInputMode {
+    Disabled,
+    Continuous,
+    PushToTalk,
+}
+
+impl Default for VoiceInputMode {
+    fn default() -> Self {
+        Self::Continuous
     }
 }
 
@@ -399,6 +419,10 @@ pub struct ProviderConfigInput {
     pub allow_network: bool,
     pub voice_reply: bool,
     pub retain_history: bool,
+    #[serde(default)]
+    pub voice_input_mode: VoiceInputMode,
+    #[serde(default = "default_push_to_talk_shortcut")]
+    pub push_to_talk_shortcut: String,
     pub permission_level: u8,
     #[serde(default)]
     pub auth_mode: AuthMode,
@@ -701,6 +725,10 @@ fn default_vision_timeout_ms() -> u64 {
     12_000
 }
 
+fn default_push_to_talk_shortcut() -> String {
+    "CommandOrControl+Alt+Space".to_string()
+}
+
 fn default_vision_max_image_bytes() -> u64 {
     3 * 1024 * 1024
 }
@@ -826,6 +854,11 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
     runtime.provider.oauth.status = OAuthStatus::SignedOut;
     runtime.provider.allow_network = true;
     runtime.provider.system_prompt = migrate_system_prompt(&runtime.provider.system_prompt);
+    runtime.provider.push_to_talk_shortcut = if runtime.provider.push_to_talk_shortcut.trim().is_empty() {
+        default_push_to_talk_shortcut()
+    } else {
+        runtime.provider.push_to_talk_shortcut.trim().to_string()
+    };
     runtime.vision_channel.api_key_loaded = false;
     runtime.vision_channel.last_error = None;
     runtime.vision_channel_status =

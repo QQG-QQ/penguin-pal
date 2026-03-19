@@ -41,9 +41,12 @@ import {
   listenForBubbleLayoutMetrics,
   listenForBubbleWindowState,
   listenForSettingsSectionChange,
+  listenForWhisperPushToTalk,
+  listenForWhisperStatus,
   listenForTodayReplyHistory,
   loadWhisperModel,
   openSettingsWindow,
+  publishWhisperStatus,
   publishTodayReplyHistory,
   publishBubbleWindowState,
   publishAssistantSnapshot,
@@ -53,7 +56,9 @@ import {
   saveProviderConfig,
   sendChatMessage,
   startCodexCliLogin,
+  startWhisperRecording,
   listControlPending,
+  stopWhisperRecording,
   unloadWhisperModel,
   type SettingsSection
 } from './lib/assistant'
@@ -77,6 +82,7 @@ import type {
   ProviderKind,
   ReplyHistoryEntry,
   WhisperModel,
+  WhisperPushToTalkEvent,
   WhisperStatus,
   PendingShellConfirmation
 } from './types/assistant'
@@ -98,6 +104,8 @@ const providerLabels: Record<ProviderKind, string> = {
 }
 
 const DEFAULT_OAUTH_REDIRECT_URL = 'http://127.0.0.1:8976/oauth/callback'
+const DEFAULT_PUSH_TO_TALK_SHORTCUT = 'CommandOrControl+Alt+Space'
+const WHISPER_CAPTURE_WINDOW_MS = 3600
 
 const actionCommandMap: Record<string, string[]> = {
   focus_window: ['唤起桌宠', '聚焦桌宠', '显示桌宠'],
@@ -152,6 +160,8 @@ const emptySnapshot = (): AssistantSnapshot => ({
     allowNetwork: true,
     voiceReply: true,
     retainHistory: true,
+    voiceInputMode: 'continuous',
+    pushToTalkShortcut: DEFAULT_PUSH_TO_TALK_SHORTCUT,
     apiKeyLoaded: false,
     authMode: 'apiKey',
     oauth: {
@@ -224,6 +234,8 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   allowNetwork: state.provider.allowNetwork,
   voiceReply: state.provider.voiceReply,
   retainHistory: state.provider.retainHistory,
+  voiceInputMode: state.provider.voiceInputMode,
+  pushToTalkShortcut: state.provider.pushToTalkShortcut || DEFAULT_PUSH_TO_TALK_SHORTCUT,
   permissionLevel: state.permissionLevel,
   authMode: state.provider.authMode,
   oauthAuthorizeUrl: state.provider.oauth.authorizeUrl,
@@ -315,9 +327,12 @@ let bubbleInteractionListenerCleanup: (() => void) | null = null
 let bubbleLayoutMetricsListenerCleanup: (() => void) | null = null
 let bubbleDismissRequestCleanup: (() => void) | null = null
 let todayReplyHistoryListenerCleanup: (() => void) | null = null
+let whisperStatusListenerCleanup: (() => void) | null = null
+let whisperPushToTalkCleanup: (() => void) | null = null
 let windowMovedCleanup: (() => void) | null = null
 let windowResizedCleanup: (() => void) | null = null
 let autoListenTimer: number | null = null
+let whisperCaptureTimer: number | null = null
 let speechPlaybackActive = false
 let petClampTimer: number | null = null
 let controlPendingTimer: number | null = null
@@ -420,8 +435,14 @@ const speechRecognitionSupported = computed(
     Boolean(window.SpeechRecognition || window.webkitSpeechRecognition)
 )
 
+const useLocalWhisperInput = computed(() => isTauriDesktop())
+const whisperVoiceInputMode = computed(() => snapshot.value.provider.voiceInputMode)
+
 const voiceInputAvailable = computed(
-  () => speechRecognitionSupported.value && microphoneAvailable.value
+  () =>
+    useLocalWhisperInput.value
+      ? whisperStatus.value.modelLoaded
+      : speechRecognitionSupported.value && microphoneAvailable.value
 )
 
 const voiceReplySupported = computed(
@@ -431,6 +452,7 @@ const voiceReplySupported = computed(
 const shouldAutoListen = computed(
   () =>
     voiceInputAvailable.value &&
+    whisperVoiceInputMode.value === 'continuous' &&
     !isSettingsView.value &&
     !busy.value &&
     !textInputFocused.value &&
@@ -925,6 +947,13 @@ const clearAutoListenTimer = () => {
   }
 }
 
+const clearWhisperCaptureTimer = () => {
+  if (whisperCaptureTimer !== null) {
+    window.clearTimeout(whisperCaptureTimer)
+    whisperCaptureTimer = null
+  }
+}
+
 const scheduleAutoListening = (delay = 260) => {
   clearAutoListenTimer()
 
@@ -1259,6 +1288,9 @@ const persistSettings = async (draft: ProviderConfigInput) => {
   if (!nextDraft.model.trim()) {
     nextDraft.model = providerDefaults[nextDraft.kind]
   }
+
+  nextDraft.pushToTalkShortcut =
+    nextDraft.pushToTalkShortcut?.trim() || DEFAULT_PUSH_TO_TALK_SHORTCUT
 
   if (!nextDraft.visionChannel.model.trim()) {
     nextDraft.visionChannel.model =
@@ -2127,11 +2159,16 @@ const sendMessage = async (value = messageDraft.value) => {
   if (voiceReplySupported.value) {
     window.speechSynthesis.cancel()
   }
-  if (recognition && listening.value) {
-    submitVoiceAfterStop = false
-    recognition.stop()
+  if (listening.value) {
+    if (useLocalWhisperInput.value) {
+      void stopLocalWhisperListening({ shouldSend: false, silent: true, reschedule: false })
+    } else if (recognition) {
+      submitVoiceAfterStop = false
+      recognition.stop()
+    }
   }
   clearAutoListenTimer()
+  clearWhisperCaptureTimer()
   clearBubble()
   resetInputHistoryNavigation()
 
@@ -2188,8 +2225,131 @@ const sendMessage = async (value = messageDraft.value) => {
   }
 }
 
-const ensureRecognition = () => {
+const pushWhisperStatus = async (status: WhisperStatus) => {
+  whisperStatus.value = status
+  await publishWhisperStatus(status)
+}
+
+const stopLocalWhisperListening = async ({
+  shouldSend = false,
+  silent = false,
+  reschedule = true
+}: {
+  shouldSend?: boolean
+  silent?: boolean
+  reschedule?: boolean
+} = {}) => {
+  const recordingState = whisperStatus.value.recordingState
+  if (recordingState !== 'recording' && !listening.value) {
+    return
+  }
+
+  clearWhisperCaptureTimer()
+  listening.value = false
+  visualMode.value = 'thinking'
+  await pushWhisperStatus({
+    ...whisperStatus.value,
+    recordingState: 'processing'
+  })
+
+  let sentTranscript = false
+
+  try {
+    const result = await stopWhisperRecording()
+    const transcript = result.text.trim()
+    await pushWhisperStatus({
+      ...whisperStatus.value,
+      recordingState: 'idle'
+    })
+
+    if (transcript) {
+      if (shouldSend) {
+        messageDraft.value = transcript
+        sentTranscript = true
+        await sendMessage(transcript)
+        return
+      }
+
+      if (!silent) {
+        messageDraft.value = transcript
+      }
+    } else if (!silent) {
+      announce('这次没有识别到清晰的语音内容。', 'guarded')
+    }
+  } catch (error) {
+    await pushWhisperStatus({
+      ...whisperStatus.value,
+      recordingState: 'idle'
+    })
+    if (!silent) {
+      announce(resolveErrorMessage(error, '本地 Whisper 停止录音失败'), 'guarded')
+    }
+  } finally {
+    listening.value = false
+    if (!sentTranscript) {
+      resetVisualModeSoon(200)
+      if (reschedule) {
+        scheduleAutoListening(260)
+      }
+    }
+  }
+}
+
+const startLocalWhisperListening = async (autoMode = false) => {
+  if (whisperVoiceInputMode.value === 'disabled') {
+    if (!autoMode) {
+      announce('当前设置里已经关闭语音输入，请先在设置中改成常驻监听或按键说话。', 'guarded')
+    }
+    return
+  }
+
   if (!voiceInputAvailable.value) {
+    if (!autoMode) {
+      announce('请先下载并加载一个 Whisper 模型，再启用本地语音输入。', 'guarded')
+    }
+    return
+  }
+
+  try {
+    clearAutoListenTimer()
+    clearWhisperCaptureTimer()
+    if (voiceReplySupported.value) {
+      window.speechSynthesis.cancel()
+    }
+    clearBubble()
+
+    const nextState = await startWhisperRecording()
+    await pushWhisperStatus({
+      ...whisperStatus.value,
+      recordingState: nextState
+    })
+    listening.value = true
+    visualMode.value = 'listening'
+
+    if (whisperVoiceInputMode.value === 'continuous') {
+      whisperCaptureTimer = window.setTimeout(() => {
+        void stopLocalWhisperListening({
+          shouldSend: true,
+          silent: true
+        })
+      }, WHISPER_CAPTURE_WINDOW_MS)
+    }
+  } catch (error) {
+    listening.value = false
+    await pushWhisperStatus({
+      ...whisperStatus.value,
+      recordingState: 'idle'
+    })
+    if (!autoMode) {
+      announce(resolveErrorMessage(error, '本地 Whisper 启动录音失败'), 'guarded')
+    } else {
+      scheduleAutoListening(1200)
+    }
+  }
+}
+
+const ensureRecognition = () => {
+  if (!voiceInputAvailable.value || useLocalWhisperInput.value) {
     return null
   }
 
@@ -2249,6 +2409,11 @@ const startListening = async (autoMode = false) => {
   }
 
   if (autoMode && !shouldAutoListen.value) {
+    return
+  }
+
+  if (useLocalWhisperInput.value) {
+    await startLocalWhisperListening(autoMode)
     return
   }
 
@@ -2387,10 +2552,30 @@ const beginOAuthLogin = async (draft: ProviderConfigInput) => {
 
 const refreshWhisperStatus = async () => {
   try {
-    whisperStatus.value = await getWhisperStatus()
+    await pushWhisperStatus(await getWhisperStatus())
   } catch {
     // 静默处理错误
   }
+}
+
+const handleWhisperPushToTalkEvent = async (event: WhisperPushToTalkEvent) => {
+  if (isSettingsView.value || isBubbleView.value) {
+    return
+  }
+
+  if (!useLocalWhisperInput.value || whisperVoiceInputMode.value !== 'pushToTalk') {
+    return
+  }
+
+  if (event.state === 'pressed') {
+    await startListening(false)
+    return
+  }
+
+  await stopLocalWhisperListening({
+    shouldSend: true,
+    silent: true
+  })
 }
 
 const handleWhisperDownload = async (model: WhisperModel) => {
@@ -2420,7 +2605,8 @@ const handleWhisperDownload = async (model: WhisperModel) => {
 
 const handleWhisperLoad = async (model: WhisperModel) => {
   try {
-    whisperStatus.value = await loadWhisperModel(model)
+    await pushWhisperStatus(await loadWhisperModel(model))
+    scheduleAutoListening(260)
     announce(`已加载 Whisper ${model} 模型`)
   } catch (error) {
     announce(resolveErrorMessage(error, '加载模型失败'), 'guarded')
@@ -2429,7 +2615,10 @@ const handleWhisperLoad = async (model: WhisperModel) => {
 
 const handleWhisperUnload = async () => {
   try {
-    whisperStatus.value = await unloadWhisperModel()
+    if (listening.value && useLocalWhisperInput.value) {
+      await stopLocalWhisperListening({ shouldSend: false, silent: true, reschedule: false })
+    }
+    await pushWhisperStatus(await unloadWhisperModel())
     announce('已卸载 Whisper 模型')
   } catch (error) {
     announce(resolveErrorMessage(error, '卸载模型失败'), 'guarded')
@@ -2438,7 +2627,10 @@ const handleWhisperUnload = async () => {
 
 const handleWhisperDelete = async (model: WhisperModel) => {
   try {
-    whisperStatus.value = await deleteWhisperModel(model)
+    if (whisperStatus.value.currentModel === model && listening.value && useLocalWhisperInput.value) {
+      await stopLocalWhisperListening({ shouldSend: false, silent: true, reschedule: false })
+    }
+    await pushWhisperStatus(await deleteWhisperModel(model))
     announce(`已删除 Whisper ${model} 模型`)
   } catch (error) {
     announce(resolveErrorMessage(error, '删除模型失败'), 'guarded')
@@ -2449,10 +2641,15 @@ const handleInputFocus = () => {
   composerVisible.value = true
   textInputFocused.value = true
   clearAutoListenTimer()
+  clearWhisperCaptureTimer()
 
-  if (recognition && listening.value) {
-    submitVoiceAfterStop = false
-    recognition.stop()
+  if (listening.value) {
+    if (useLocalWhisperInput.value) {
+      void stopLocalWhisperListening({ shouldSend: false, silent: true, reschedule: false })
+    } else if (recognition) {
+      submitVoiceAfterStop = false
+      recognition.stop()
+    }
   }
 }
 
@@ -2508,6 +2705,14 @@ const setupCrossWindowListeners = async () => {
     todayReplyHistory.value = entries
   })
 
+  whisperStatusListenerCleanup = await listenForWhisperStatus((status) => {
+    whisperStatus.value = status
+  })
+
+  whisperPushToTalkCleanup = await listenForWhisperPushToTalk((event) => {
+    void handleWhisperPushToTalkEvent(event)
+  })
+
   if (isSettingsView.value) {
     sectionListenerCleanup = await listenForSettingsSectionChange((section) => {
       drawerSection.value = section
@@ -2559,6 +2764,25 @@ watch(
   }
 )
 
+watch(
+  () => [whisperVoiceInputMode.value, voiceInputAvailable.value, isSettingsView.value],
+  ([mode, available, settingsView]) => {
+    if (!useLocalWhisperInput.value) {
+      return
+    }
+
+    if (settingsView || mode !== 'continuous' || !available) {
+      clearAutoListenTimer()
+      if (mode !== 'continuous' && listening.value) {
+        void stopLocalWhisperListening({ shouldSend: false, silent: true, reschedule: false })
+      }
+      return
+    }
+
+    scheduleAutoListening(260)
+  }
+)
+
 onMounted(() => {
   if (isBubbleView.value) {
     void setupCrossWindowListeners()
@@ -2585,6 +2809,7 @@ onBeforeUnmount(() => {
   recognition?.stop()
   resetBubbleDismissState()
   clearAutoListenTimer()
+  clearWhisperCaptureTimer()
   clearPetClampTimer()
   clearControlPendingTimer()
   clearShellConfirmationTimer()
@@ -2598,8 +2823,13 @@ onBeforeUnmount(() => {
   bubbleLayoutMetricsListenerCleanup?.()
   bubbleDismissRequestCleanup?.()
   todayReplyHistoryListenerCleanup?.()
+  whisperStatusListenerCleanup?.()
+  whisperPushToTalkCleanup?.()
   windowMovedCleanup?.()
   windowResizedCleanup?.()
+  if (useLocalWhisperInput.value && whisperStatus.value.recordingState === 'recording') {
+    void stopLocalWhisperListening({ shouldSend: false, silent: true, reschedule: false })
+  }
   if (voiceReplySupported.value) {
     window.speechSynthesis.cancel()
   }

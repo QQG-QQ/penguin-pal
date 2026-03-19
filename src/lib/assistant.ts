@@ -26,7 +26,9 @@ import type {
   TranscriptionResult,
   VisionChannelConfig,
   VisionProviderStatus,
+  VoiceInputMode,
   WhisperModel,
+  WhisperPushToTalkEvent,
   WhisperStatus
 } from '../types/assistant'
 
@@ -37,6 +39,8 @@ const providerModels: Record<ProviderKind, string> = {
   anthropic: 'claude-3-5-sonnet-latest',
   openAiCompatible: 'llama3.1'
 }
+
+const DEFAULT_PUSH_TO_TALK_SHORTCUT = 'CommandOrControl+Alt+Space'
 
 const defaultOAuthState = (): OAuthState => ({
   status: 'signedOut',
@@ -212,6 +216,8 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     allowNetwork: false,
     voiceReply: true,
     retainHistory: true,
+    voiceInputMode: 'continuous',
+    pushToTalkShortcut: DEFAULT_PUSH_TO_TALK_SHORTCUT,
     apiKeyLoaded: false,
     authMode: 'apiKey',
     oauth: defaultOAuthState()
@@ -433,6 +439,8 @@ const BUBBLE_INTERACTION_EVENT = 'penguinpal://bubble-interaction'
 const BUBBLE_LAYOUT_METRICS_EVENT = 'penguinpal://bubble-layout-metrics'
 const BUBBLE_DISMISS_EVENT = 'penguinpal://bubble-dismiss'
 const TODAY_REPLY_HISTORY_EVENT = 'penguinpal://today-reply-history'
+const WHISPER_STATUS_EVENT = 'penguinpal://whisper-status'
+const WHISPER_PUSH_TO_TALK_EVENT = 'penguinpal://whisper-push-to-talk'
 
 let browserSettingsWindow: Window | null = null
 let cachedControlBaseUrl: string | null = null
@@ -583,6 +591,14 @@ export const publishTodayReplyHistory = async (entries: ReplyHistoryEntry[]): Pr
   await emit(TODAY_REPLY_HISTORY_EVENT, entries)
 }
 
+export const publishWhisperStatus = async (status: WhisperStatus): Promise<void> => {
+  if (!isTauriRuntime()) {
+    return
+  }
+
+  await emit(WHISPER_STATUS_EVENT, status)
+}
+
 export const listenForTodayReplyHistory = async (
   handler: (entries: ReplyHistoryEntry[]) => void
 ): Promise<UnlistenFn | null> => {
@@ -591,6 +607,30 @@ export const listenForTodayReplyHistory = async (
   }
 
   return listen<ReplyHistoryEntry[]>(TODAY_REPLY_HISTORY_EVENT, (event) => {
+    handler(event.payload)
+  })
+}
+
+export const listenForWhisperStatus = async (
+  handler: (status: WhisperStatus) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<WhisperStatus>(WHISPER_STATUS_EVENT, (event) => {
+    handler(event.payload)
+  })
+}
+
+export const listenForWhisperPushToTalk = async (
+  handler: (event: WhisperPushToTalkEvent) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<WhisperPushToTalkEvent>(WHISPER_PUSH_TO_TALK_EVENT, (event) => {
     handler(event.payload)
   })
 }
@@ -744,16 +784,22 @@ const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapsho
     ...defaultVisionChannel(),
     ...(snapshot.visionChannel ?? {})
   }
+  const provider = {
+    ...snapshot.provider,
+    voiceInputMode: (snapshot.provider.voiceInputMode ?? 'continuous') as VoiceInputMode,
+    pushToTalkShortcut:
+      snapshot.provider.pushToTalkShortcut?.trim() || DEFAULT_PUSH_TO_TALK_SHORTCUT
+  }
 
   return {
     ...snapshot,
     provider: {
-      ...snapshot.provider,
-      apiKeyLoaded: Boolean(snapshot.provider.apiKeyLoaded),
+      ...provider,
+      apiKeyLoaded: Boolean(provider.apiKeyLoaded),
       oauth: {
-        ...snapshot.provider.oauth,
-        scopes: [...snapshot.provider.oauth.scopes],
-        accessTokenLoaded: Boolean(snapshot.provider.oauth.accessTokenLoaded)
+        ...provider.oauth,
+        scopes: [...provider.oauth.scopes],
+        accessTokenLoaded: Boolean(provider.oauth.accessTokenLoaded)
       }
     },
     visionChannel: {
@@ -861,6 +907,8 @@ export const saveProviderConfig = async (
         allowNetwork: input.allowNetwork,
         voiceReply: input.voiceReply,
         retainHistory: input.retainHistory,
+        voiceInputMode: input.voiceInputMode,
+        pushToTalkShortcut: input.pushToTalkShortcut?.trim() || DEFAULT_PUSH_TO_TALK_SHORTCUT,
         apiKeyLoaded: Boolean(input.apiKey && input.apiKey.trim()),
         authMode: input.authMode,
         oauth: {

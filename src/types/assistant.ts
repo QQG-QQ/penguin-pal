@@ -3,6 +3,7 @@ export type AssistantWindowView = 'pet' | 'settings' | 'bubble'
 
 export type ProviderKind = 'mock' | 'codexCli' | 'openAi' | 'anthropic' | 'openAiCompatible'
 export type ProviderAuthMode = 'apiKey' | 'oauth'
+export type VoiceInputMode = 'disabled' | 'continuous' | 'pushToTalk'
 export type OAuthStatus = 'signedOut' | 'pending' | 'authorized' | 'error'
 export type VisionChannelKind = 'disabled' | 'openAi' | 'openAiCompatible'
 export type VisionProviderStatusKind =
@@ -91,6 +92,8 @@ export interface ProviderConfig {
   allowNetwork: boolean
   voiceReply: boolean
   retainHistory: boolean
+  voiceInputMode: VoiceInputMode
+  pushToTalkShortcut: string
   apiKeyLoaded: boolean
   authMode: ProviderAuthMode
   oauth: OAuthState
@@ -147,6 +150,8 @@ export interface ProviderConfigInput {
   allowNetwork: boolean
   voiceReply: boolean
   retainHistory: boolean
+  voiceInputMode: VoiceInputMode
+  pushToTalkShortcut: string
   permissionLevel: number
   authMode: ProviderAuthMode
   oauthAuthorizeUrl: string | null
@@ -357,6 +362,11 @@ export interface TranscriptionResult {
   text: string
   language: string | null
   durationMs: number
+}
+
+export interface WhisperPushToTalkEvent {
+  state: 'pressed' | 'released'
+  shortcut: string
 }
 
 export interface DownloadProgress {

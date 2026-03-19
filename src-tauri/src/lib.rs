@@ -21,12 +21,13 @@ mod window;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{process::Command, sync::Mutex, time::Duration};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Memory 维护线程停止标志
 static MEMORY_MAINTENANCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 const SESSION_TURN_CONTEXT_LIMIT: usize = 12;
 const PROVIDER_HISTORY_LIMIT: usize = 24;
+const WHISPER_PUSH_TO_TALK_EVENT: &str = "penguinpal://whisper-push-to-talk";
 
 /// 请求停止 memory 维护线程
 #[allow(dead_code)]
@@ -46,7 +47,8 @@ use crate::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
         AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult,
         PendingShellCommand, PendingShellConfirmationInfo, PetMode, ProviderConfigInput,
-        ProviderKind, RuntimeState, ShellPermissionSettings, DEFAULT_OAUTH_REDIRECT_URL,
+        ProviderKind, RuntimeState, ShellPermissionSettings, VoiceInputMode,
+        DEFAULT_OAUTH_REDIRECT_URL,
     },
     audio::{types as audio_types, TranscriberService},
     codex_runtime::{apply_private_env, initialize_codex_config, load_codex_config, private_auth_path, resolve_for_app},
@@ -64,7 +66,14 @@ fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
         runtime.permission_level,
         &allowed_actions,
     );
-    runtime.to_snapshot(audio::default_audio_profile(), allowed_actions, ai_constraints)
+    runtime.to_snapshot(
+        audio::default_audio_profile(
+            runtime.provider.voice_input_mode,
+            &runtime.provider.push_to_talk_shortcut,
+        ),
+        allowed_actions,
+        ai_constraints,
+    )
 }
 
 fn current_codex_cli_model(app: &AppHandle) -> String {
@@ -83,6 +92,51 @@ fn sync_codex_provider_view(app: &AppHandle, runtime: &mut RuntimeState) {
     runtime.provider.model = current_codex_cli_model(app);
     runtime.provider.auth_mode = AuthMode::OAuth;
     runtime.provider.base_url = None;
+}
+
+fn normalized_push_to_talk_shortcut(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        "CommandOrControl+Alt+Space".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn sync_whisper_input_shortcut(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+        let global_shortcut = app.global_shortcut();
+        global_shortcut
+            .unregister_all()
+            .map_err(|error| format!("清理按键说话快捷键失败: {error}"))?;
+
+        if !matches!(runtime.provider.voice_input_mode, VoiceInputMode::PushToTalk) {
+            return Ok(());
+        }
+
+        let shortcut = normalized_push_to_talk_shortcut(&runtime.provider.push_to_talk_shortcut);
+        let emitted_shortcut = shortcut.clone();
+        global_shortcut
+            .on_shortcut(shortcut, move |app, _, event| {
+                let state = match event.state {
+                    ShortcutState::Pressed => "pressed",
+                    ShortcutState::Released => "released",
+                    _ => return,
+                };
+
+                let payload = serde_json::json!({
+                    "state": state,
+                    "shortcut": emitted_shortcut,
+                });
+                let _ = app.emit(WHISPER_PUSH_TO_TALK_EVENT, payload);
+            })
+            .map_err(|error| format!("注册按键说话快捷键失败: {error}"))?;
+    }
+
+    Ok(())
 }
 
 /// 将设置中的 Shell 权限同步到 PermissionChecker
@@ -508,6 +562,7 @@ fn save_provider_config(
 ) -> Result<AssistantSnapshot, String> {
     let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
     expire_transient_state(&mut runtime);
+    let previous_runtime = runtime.clone();
 
     let previous_provider_kind = runtime.provider.kind;
     let previous_auth_mode = runtime.provider.auth_mode;
@@ -533,6 +588,9 @@ fn save_provider_config(
     runtime.provider.allow_network = input.allow_network;
     runtime.provider.voice_reply = input.voice_reply;
     runtime.provider.retain_history = input.retain_history;
+    runtime.provider.voice_input_mode = input.voice_input_mode;
+    runtime.provider.push_to_talk_shortcut =
+        normalized_push_to_talk_shortcut(&input.push_to_talk_shortcut);
     runtime.permission_level = policy::clamp_permission_level(input.permission_level);
     runtime.provider.auth_mode = input.auth_mode;
     runtime.provider.oauth.authorize_url = normalize_optional(input.oauth_authorize_url);
@@ -621,6 +679,10 @@ fn save_provider_config(
     }
 
     sync_codex_provider_view(&app, &mut runtime);
+    if let Err(error) = sync_whisper_input_shortcut(&app, &runtime) {
+        *runtime = previous_runtime;
+        return Err(error);
+    }
 
     // 同步 Shell Agent 权限设置
     let previous_shell_enabled = runtime.shell_permissions.enabled;
@@ -1979,6 +2041,7 @@ fn clear_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, S
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             eprintln!("[Setup] Starting application setup...");
@@ -2033,6 +2096,9 @@ pub fn run() {
                     eprintln!("Session thread bootstrap failed: {error}");
                 }
                 sync_codex_provider_view(&app.handle(), &mut runtime);
+                if let Err(error) = sync_whisper_input_shortcut(&app.handle(), &runtime) {
+                    eprintln!("Whisper push-to-talk shortcut sync failed: {error}");
+                }
                 let _ = save(&app.handle(), &runtime);
             }
 
