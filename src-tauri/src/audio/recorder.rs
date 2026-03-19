@@ -82,8 +82,8 @@ impl AudioRecorder {
         let (producer, mut consumer) = rb.split();
         let producer = Arc::new(Mutex::new(producer));
 
-        // Keep the stream alive while recording.
-        let mut stream: Option<cpal::Stream> = None;
+        // Keep the active stream alive until Stop/Shutdown explicitly drops it.
+        let mut active_stream: Option<cpal::Stream> = None;
 
         loop {
             match cmd_rx.recv() {
@@ -111,8 +111,10 @@ impl AudioRecorder {
                         Ok(s) => {
                             if let Err(error) = s.play() {
                                 eprintln!("[AudioRecorder] Failed to start stream: {}", error);
+                                *is_recording.lock() = false;
+                            } else {
+                                active_stream = Some(s);
                             }
-                            stream = Some(s);
                         }
                         Err(error) => {
                             eprintln!("[AudioRecorder] Failed to build stream: {}", error);
@@ -121,7 +123,7 @@ impl AudioRecorder {
                     }
                 }
                 Ok(AudioCommand::Stop) => {
-                    stream = None;
+                    drop(active_stream.take());
                     *is_recording.lock() = false;
 
                     let mut collected = Vec::new();
@@ -131,7 +133,7 @@ impl AudioRecorder {
                     *samples.lock() = collected;
                 }
                 Ok(AudioCommand::Shutdown) | Err(_) => {
-                    stream = None;
+                    drop(active_stream.take());
                     break;
                 }
             }

@@ -46,9 +46,8 @@ use crate::{
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
         AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult,
-        PendingShellCommand, PendingShellConfirmationInfo, PetMode, ProviderConfigInput,
-        ProviderKind, RuntimeState, ShellPermissionSettings, VoiceInputMode,
-        DEFAULT_OAUTH_REDIRECT_URL,
+        PendingShellCommand, PetMode, ProviderConfigInput, ProviderKind, RuntimeState,
+        ShellPermissionSettings, VoiceInputMode, DEFAULT_OAUTH_REDIRECT_URL,
     },
     audio::{types as audio_types, TranscriberService},
     codex_runtime::{apply_private_env, initialize_codex_config, load_codex_config, private_auth_path, resolve_for_app},
@@ -120,7 +119,7 @@ fn sync_whisper_input_shortcut(app: &AppHandle, runtime: &RuntimeState) -> Resul
         let shortcut = normalized_push_to_talk_shortcut(&runtime.provider.push_to_talk_shortcut);
         let emitted_shortcut = shortcut.clone();
         global_shortcut
-            .on_shortcut(shortcut, move |app, _, event| {
+            .on_shortcut(shortcut.as_str(), move |app, _, event| {
                 let state = match event.state {
                     ShortcutState::Pressed => "pressed",
                     ShortcutState::Released => "released",
