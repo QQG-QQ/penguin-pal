@@ -14,12 +14,20 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::{
+    env,
     fs,
     io::Write,
     path::Path,
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::async_runtime;
+
+#[derive(Debug, Clone)]
+struct CodexExecResult {
+    text: String,
+    thread_id: Option<String>,
+}
 
 pub async fn respond(
     provider: &ProviderConfig,
@@ -27,6 +35,7 @@ pub async fn respond(
     oauth_access_token: Option<String>,
     codex_command: Option<String>,
     codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     history: &[ChatMessage],
@@ -48,6 +57,7 @@ pub async fn respond(
             provider,
             codex_command,
             codex_home,
+            codex_thread_id,
             permission_level,
             allowed_actions,
             history,
@@ -117,6 +127,7 @@ pub async fn plan_control_request(
     oauth_access_token: Option<String>,
     codex_command: Option<String>,
     codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     planner_prompt: &str,
@@ -144,9 +155,16 @@ pub async fn plan_control_request(
             user_input.trim()
         );
 
-        return async_runtime::spawn_blocking(move || run_codex_exec(&command, &home_root, &prompt))
+        let existing_thread_id = codex_thread_id.clone();
+        let result = async_runtime::spawn_blocking(move || {
+            run_codex_exec(&command, &home_root, &prompt, existing_thread_id)
+        })
             .await
-            .map_err(|error| format!("等待 Codex CLI 规划结果失败：{error}"))?;
+            .map_err(|error| format!("等待 Codex CLI 规划结果失败：{error}"))??;
+        if result.thread_id.is_some() {
+            *codex_thread_id = result.thread_id.clone();
+        }
+        return Ok(result.text);
     }
 
     match provider.kind {
@@ -302,7 +320,113 @@ pub fn fallback_reply(error: &str) -> String {
     )
 }
 
-fn run_codex_exec(command: &str, home_root: &Path, prompt: &str) -> Result<String, String> {
+fn is_codex_banner_line(line: &str) -> bool {
+    let lowered = line.trim().to_lowercase();
+    lowered.starts_with("openai codex")
+        || lowered == "--------"
+        || lowered.starts_with("workdir:")
+        || lowered.starts_with("model:")
+        || lowered.starts_with("provider:")
+        || lowered.starts_with("approval:")
+        || lowered.starts_with("sandbox:")
+        || lowered.starts_with("reasoning effort:")
+        || lowered.starts_with("reasoning summaries:")
+        || lowered.starts_with("session id:")
+}
+
+fn strip_codex_banner(raw: &str) -> String {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || is_codex_banner_line(trimmed) {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn extract_codex_json_error_messages(raw: &str) -> Vec<String> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || !trimmed.starts_with('{') {
+                return None;
+            }
+
+            let value = serde_json::from_str::<Value>(trimmed).ok()?;
+            if value.get("type").and_then(Value::as_str) == Some("error") {
+                return value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+            }
+
+            value
+                .get("item")
+                .and_then(|item| item.get("message"))
+                .and_then(Value::as_str)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .collect()
+}
+
+fn normalize_codex_failure(stdout: &str, stderr: &str) -> String {
+    let primary = if !stderr.is_empty() { stderr } else { stdout };
+    let cleaned = strip_codex_banner(primary);
+    if !cleaned.is_empty() {
+        return cleaned;
+    }
+
+    let json_errors = extract_codex_json_error_messages(primary);
+    if !json_errors.is_empty() {
+        return json_errors.join("\n");
+    }
+
+    "Codex CLI 调用失败，但只返回了启动元信息。通常是私有配置、登录状态或运行时参数不兼容。请先检查 Codex CLI 登录状态，并避免让设置页直接覆写 CLI 私有配置。".to_string()
+}
+
+fn extract_codex_thread_id(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !trimmed.starts_with('{') {
+            return None;
+        }
+        let value = serde_json::from_str::<Value>(trimmed).ok()?;
+        if value.get("type").and_then(Value::as_str) == Some("thread.started") {
+            value
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .map(|value| value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn build_codex_output_file() -> std::path::PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or_default();
+    env::temp_dir().join(format!(
+        "penguin-pal-codex-last-message-{}-{}.txt",
+        std::process::id(),
+        timestamp
+    ))
+}
+
+fn run_codex_exec_once(
+    command: &str,
+    home_root: &Path,
+    prompt: &str,
+    thread_id: Option<String>,
+) -> Result<CodexExecResult, String> {
+    let output_file = build_codex_output_file();
     let mut child = {
         let mut cmd = Command::new(command);
         apply_private_env(&mut cmd, home_root);
@@ -313,12 +437,31 @@ fn run_codex_exec(command: &str, home_root: &Path, prompt: &str) -> Result<Strin
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         cmd
+    };
+
+    if let Some(thread_id) = thread_id.as_ref().filter(|value| !value.trim().is_empty()) {
+        child
+            .arg("exec")
+            .arg("resume")
+            .arg(thread_id)
+            .arg("--json")
+            .arg("--skip-git-repo-check")
+            .arg("--output-last-message")
+            .arg(&output_file)
+            .arg("-");
+    } else {
+        child
+            .arg("exec")
+            .arg("--json")
+            .arg("--skip-git-repo-check")
+            .arg("--sandbox")
+            .arg("read-only")
+            .arg("--output-last-message")
+            .arg(&output_file)
+            .arg("-");
     }
-        .arg("exec")
-        .arg("--skip-git-repo-check")
-        .arg("--sandbox")
-        .arg("read-only")
-        .arg("-")
+
+    let mut child = child
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -337,32 +480,79 @@ fn run_codex_exec(command: &str, home_root: &Path, prompt: &str) -> Result<Strin
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let discovered_thread_id =
+        extract_codex_thread_id(&stdout).or_else(|| thread_id.clone());
 
     if !output.status.success() {
-        return Err(if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
+        let _ = fs::remove_file(&output_file);
+        return Err(if !stderr.is_empty() || !stdout.is_empty() {
+            normalize_codex_failure(&stdout, &stderr)
         } else {
             "codex exec 返回失败状态，但没有可读错误输出。".to_string()
         });
     }
 
-    if !stdout.is_empty() {
-        return Ok(stdout);
+    let reply = fs::read_to_string(&output_file)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let _ = fs::remove_file(&output_file);
+
+    if let Some(text) = reply {
+        return Ok(CodexExecResult {
+            text,
+            thread_id: discovered_thread_id,
+        });
     }
 
     if !stderr.is_empty() {
-        return Ok(stderr);
+        let cleaned = strip_codex_banner(&stderr);
+        if !cleaned.is_empty() {
+            return Ok(CodexExecResult {
+                text: cleaned,
+                thread_id: discovered_thread_id,
+            });
+        }
+    }
+
+    if !stdout.is_empty() {
+        let cleaned = strip_codex_banner(&stdout);
+        if !cleaned.is_empty() {
+            return Ok(CodexExecResult {
+                text: cleaned,
+                thread_id: discovered_thread_id,
+            });
+        }
     }
 
     Err("codex exec 没有返回可用文本。".to_string())
+}
+
+fn run_codex_exec(
+    command: &str,
+    home_root: &Path,
+    prompt: &str,
+    thread_id: Option<String>,
+) -> Result<CodexExecResult, String> {
+    let existing_thread_id = thread_id.clone();
+    match run_codex_exec_once(command, home_root, prompt, thread_id) {
+        Ok(result) => Ok(result),
+        Err(error) if existing_thread_id.is_some() => {
+            run_codex_exec_once(command, home_root, prompt, None).map_err(|fallback_error| {
+                format!(
+                    "{error}\n\n另外，尝试启动一个新的 Codex 线程也失败了：{fallback_error}"
+                )
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn call_codex_cli(
     _provider: &ProviderConfig,
     codex_command: Option<String>,
     codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
     _permission_level: u8,
     _allowed_actions: &[DesktopAction],
     history: &[ChatMessage],
@@ -415,15 +605,34 @@ async fn call_codex_cli(
         "请基于上述对话历史，直接输出对最后一条用户消息的答复。"
     };
 
-    let prompt = format!(
-        "{unified_system}{reasoning_hint}\n\n## 对话历史\n{conversation}\n\n{final_instruction}"
-    );
+    let prompt = if codex_thread_id.is_some() {
+        let latest_user_message = history
+            .iter()
+            .rev()
+            .find(|message| message.role == "user" && !message.content.trim().is_empty())
+            .map(|message| message.content.trim().to_string())
+            .unwrap_or_default();
 
-    let reply = async_runtime::spawn_blocking(move || run_codex_exec(&command, &home_root, &prompt))
+        format!(
+            "{unified_system}{reasoning_hint}\n\n## 当前回合用户消息\n{latest_user_message}\n\n{final_instruction}"
+        )
+    } else {
+        format!(
+            "{unified_system}{reasoning_hint}\n\n## 对话历史\n{conversation}\n\n{final_instruction}"
+        )
+    };
+
+    let existing_thread_id = codex_thread_id.clone();
+    let result = async_runtime::spawn_blocking(move || {
+        run_codex_exec(&command, &home_root, &prompt, existing_thread_id)
+    })
         .await
         .map_err(|error| format!("等待 Codex CLI 响应失败：{error}"))??;
+    if result.thread_id.is_some() {
+        *codex_thread_id = result.thread_id.clone();
+    }
 
-    Ok((reply, "Codex CLI".to_string()))
+    Ok((result.text, "Codex CLI".to_string()))
 }
 
 /// 构建 Codex CLI 的对话历史文本

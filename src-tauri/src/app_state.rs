@@ -518,6 +518,8 @@ pub struct PendingOAuthState {
 pub struct RuntimeState {
     pub mode: PetMode,
     pub messages: Vec<ChatMessage>,
+    pub session_thread_id: Option<String>,
+    pub codex_thread_id: Option<String>,
     pub provider: ProviderConfig,
     pub vision_channel: VisionChannelConfig,
     pub vision_channel_status: VisionProviderStatus,
@@ -588,6 +590,8 @@ impl Default for RuntimeState {
             messages: vec![ChatMessage::assistant(
                 "欢迎回来。我已经切到严格白名单模式，先把桌宠 UI、语音入口和安全边界搭好了，再接真实 AI API。",
             )],
+            session_thread_id: None,
+            codex_thread_id: None,
             provider: ProviderConfig::default(),
             vision_channel: VisionChannelConfig::default(),
             vision_channel_status: current_vision_channel_status(&VisionChannelConfig::default(), None),
@@ -679,6 +683,10 @@ impl RuntimeState {
 struct PersistedState {
     mode: PetMode,
     messages: Vec<ChatMessage>,
+    #[serde(default)]
+    session_thread_id: Option<String>,
+    #[serde(default)]
+    codex_thread_id: Option<String>,
     provider: ProviderConfig,
     #[serde(default)]
     vision_channel: VisionChannelConfig,
@@ -779,6 +787,8 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
     let mut runtime = RuntimeState {
         mode: persisted.mode,
         messages: persisted.messages,
+        session_thread_id: persisted.session_thread_id,
+        codex_thread_id: persisted.codex_thread_id,
         provider: persisted.provider,
         vision_channel,
         vision_channel_status,
@@ -849,6 +859,16 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
     let persisted = PersistedState {
         mode: PetMode::Idle,
         messages,
+        session_thread_id: if runtime.provider.retain_history {
+            runtime.session_thread_id.clone()
+        } else {
+            None
+        },
+        codex_thread_id: if runtime.provider.retain_history {
+            runtime.codex_thread_id.clone()
+        } else {
+            None
+        },
         provider,
         vision_channel,
         permission_level: runtime.permission_level.min(2),

@@ -67,12 +67,21 @@ impl Session {
 
     /// 添加消息
     pub fn add_message(&mut self, role: &str, content: &str) {
+        self.add_message_at(role, content, Utc::now());
+    }
+
+    pub fn add_message_at(
+        &mut self,
+        role: &str,
+        content: &str,
+        timestamp: DateTime<Utc>,
+    ) {
         self.messages.push(SessionMessage {
             role: role.to_string(),
             content: content.to_string(),
-            timestamp: Utc::now(),
+            timestamp,
         });
-        self.updated_at = Utc::now();
+        self.updated_at = timestamp;
 
         // 自动设置标题（取第一条用户消息的前 50 字符）
         if self.title.is_none() && role == "user" {
@@ -180,6 +189,21 @@ impl SessionManager {
     pub fn add_message(&mut self, role: &str, content: &str) -> Result<(), String> {
         if let Some(ref mut session) = self.current_session {
             session.add_message(role, content);
+            session.save(&self.sessions_dir)?;
+            Ok(())
+        } else {
+            Err("当前没有活动会话".to_string())
+        }
+    }
+
+    pub fn add_message_at(
+        &mut self,
+        role: &str,
+        content: &str,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), String> {
+        if let Some(ref mut session) = self.current_session {
+            session.add_message_at(role, content, timestamp);
             session.save(&self.sessions_dir)?;
             Ok(())
         } else {

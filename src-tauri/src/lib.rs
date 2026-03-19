@@ -12,6 +12,7 @@ mod memory;
 mod permission;
 mod rule_engine;
 mod security;
+mod session_thread;
 mod shell_agent;
 mod testing;
 mod tray;
@@ -24,6 +25,8 @@ use tauri::{AppHandle, Manager, State};
 
 /// Memory 维护线程停止标志
 static MEMORY_MAINTENANCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+const SESSION_TURN_CONTEXT_LIMIT: usize = 12;
+const PROVIDER_HISTORY_LIMIT: usize = 24;
 
 /// 请求停止 memory 维护线程
 #[allow(dead_code)]
@@ -34,7 +37,8 @@ pub fn request_memory_maintenance_shutdown() {
 use crate::{
     agent::{
         router as agent_router,
-        types::{AgentMessageMeta, AgentRoute, TopLevelIntent},
+        session_turn::{self, SessionTurnKind},
+        types::{AgentMessageMeta, AgentRoute},
         AgentTaskState,
     },
     ai::{guardrails, memory as ai_memory, provider},
@@ -45,7 +49,7 @@ use crate::{
         ProviderKind, RuntimeState, ShellPermissionSettings, DEFAULT_OAUTH_REDIRECT_URL,
     },
     audio::{types as audio_types, TranscriberService},
-    codex_runtime::{apply_private_env, initialize_codex_config, load_codex_config, private_auth_path, resolve_for_app, save_codex_config},
+    codex_runtime::{apply_private_env, initialize_codex_config, load_codex_config, private_auth_path, resolve_for_app},
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
@@ -61,6 +65,24 @@ fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
         &allowed_actions,
     );
     runtime.to_snapshot(audio::default_audio_profile(), allowed_actions, ai_constraints)
+}
+
+fn current_codex_cli_model(app: &AppHandle) -> String {
+    load_codex_config(app)
+        .ok()
+        .map(|config| config.model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| ProviderKind::CodexCli.default_model().to_string())
+}
+
+fn sync_codex_provider_view(app: &AppHandle, runtime: &mut RuntimeState) {
+    if !matches!(runtime.provider.kind, ProviderKind::CodexCli) {
+        return;
+    }
+
+    runtime.provider.model = current_codex_cli_model(app);
+    runtime.provider.auth_mode = AuthMode::OAuth;
+    runtime.provider.base_url = None;
 }
 
 /// 将设置中的 Shell 权限同步到 PermissionChecker
@@ -598,6 +620,8 @@ fn save_provider_config(
         }
     }
 
+    sync_codex_provider_view(&app, &mut runtime);
+
     // 同步 Shell Agent 权限设置
     let previous_shell_enabled = runtime.shell_permissions.enabled;
     runtime.shell_permissions = input.shell_permissions.clone();
@@ -684,17 +708,6 @@ fn save_provider_config(
         &mut runtime.audit_trail,
         audit::record("save_provider_config", "ok", audit_detail, 1),
     );
-
-    // 如果使用 Codex CLI，同步模型设置到 config.toml
-    if matches!(runtime.provider.kind, ProviderKind::CodexCli) {
-        if let Ok(mut codex_config) = load_codex_config(&app) {
-            if codex_config.model != runtime.provider.model {
-                codex_config.model = runtime.provider.model.clone();
-                let _ = save_codex_config(&app, &codex_config);
-                eprintln!("[save_provider_config] Synced model to Codex config: {}", runtime.provider.model);
-            }
-        }
-    }
 
     save(&app, &runtime)?;
     if let Some(agent_state) = app.try_state::<AgentTaskState>() {
@@ -1224,10 +1237,13 @@ async fn execute_pending_shell_command(
     let snapshot = {
         let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
         runtime.pending_shell_command = None;
-        runtime.messages.push(ChatMessage::user("yes".to_string()));
+        let confirmation = ChatMessage::user("yes".to_string());
+        runtime.messages.push(confirmation.clone());
         runtime.messages.push(reply_message.clone());
         runtime.mode = PetMode::Idle;
         ai_memory::trim_history(&mut runtime.messages);
+        let _ = session_thread::append_message(app, &mut runtime, &confirmation);
+        let _ = session_thread::append_message(app, &mut runtime, &reply_message);
 
         audit::push_entry(
             &mut runtime.audit_trail,
@@ -1263,10 +1279,13 @@ async fn cancel_pending_shell_command(
     let snapshot = {
         let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
         runtime.pending_shell_command = None;
-        runtime.messages.push(ChatMessage::user("no".to_string()));
+        let confirmation = ChatMessage::user("no".to_string());
+        runtime.messages.push(confirmation.clone());
         runtime.messages.push(reply_message.clone());
         runtime.mode = PetMode::Idle;
         ai_memory::trim_history(&mut runtime.messages);
+        let _ = session_thread::append_message(app, &mut runtime, &confirmation);
+        let _ = session_thread::append_message(app, &mut runtime, &reply_message);
 
         audit::push_entry(
             &mut runtime.audit_trail,
@@ -1325,6 +1344,56 @@ fn render_recent_conversation_context(messages: &[ChatMessage]) -> Option<String
     }
 }
 
+fn render_active_task_context(task: Option<&agent::types::AgentTaskRun>) -> Option<String> {
+    let task = task?;
+    let mut lines = vec![
+        "## 当前任务状态".to_string(),
+        format!("- taskTitle: {}", task.task_title.trim()),
+        format!("- intent: {:?}", task.intent),
+        format!("- status: {:?}", task.task_status),
+        format!("- stepBudget: {}", task.step_budget),
+        format!("- retryBudget: {}", task.retry_budget),
+    ];
+
+    if let Some(summary) = task.pending_action_summary.as_ref().filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("- pendingAction: {}", summary.trim()));
+    }
+    if let Some(reason) = task.failure_reason.as_ref().filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("- lastFailure: {}", reason.trim()));
+    }
+    if let Some(last_step) = task.recent_steps.last() {
+        lines.push(format!("- lastStep: {}", last_step.summary.trim()));
+    }
+
+    Some(format!("{}\n", lines.join("\n")))
+}
+
+fn looks_like_control_confirmation_reply(input: &str) -> bool {
+    let normalized = input.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    [
+        "确认",
+        "可以",
+        "继续",
+        "执行",
+        "yes",
+        "y",
+        "ok",
+        "好的",
+        "取消",
+        "不要",
+        "停止",
+        "no",
+        "n",
+        "算了",
+    ]
+    .iter()
+    .any(|item| normalized == *item)
+}
+
 #[tauri::command]
 async fn send_chat_message(
     app: AppHandle,
@@ -1359,6 +1428,34 @@ async fn send_chat_message(
         }
     }
 
+    let pending_control_count = control_router::list_pending(&app)
+        .map(|items| items.len())
+        .unwrap_or_default();
+    if pending_control_count > 0 && looks_like_control_confirmation_reply(trimmed) {
+        let result = agent_router::handle_confirmation_response(&app, trimmed).await?;
+        let reply_message = ChatMessage::assistant(&result.reply_text);
+        let snapshot = {
+            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            let user_message = ChatMessage::user(trimmed.to_string());
+            runtime.messages.push(user_message.clone());
+            runtime.messages.push(reply_message.clone());
+            runtime.mode = PetMode::Idle;
+            ai_memory::trim_history(&mut runtime.messages);
+            let _ = session_thread::append_message(&app, &mut runtime, &user_message);
+            let _ = session_thread::append_message(&app, &mut runtime, &reply_message);
+            save(&app, &runtime)?;
+            snapshot_from_runtime(&runtime)
+        };
+
+        return Ok(ChatResponse {
+            reply: reply_message,
+            provider_label: result.provider_label,
+            snapshot,
+            agent: Some(result.meta),
+            pending_shell_confirmation: None,
+        });
+    }
+
     let user_message = ChatMessage::user(trimmed.to_string());
     let (
         provider_config,
@@ -1368,7 +1465,7 @@ async fn send_chat_message(
         vision_api_key,
         codex_command,
         codex_home,
-        full_history,
+        provider_history,
         recent_conversation_context,
         permission_level,
         allowed_actions,
@@ -1376,11 +1473,24 @@ async fn send_chat_message(
         let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
         expire_transient_state(&mut runtime);
         runtime.mode = PetMode::Thinking;
-        runtime.messages.push(user_message);
+        runtime.messages.push(user_message.clone());
         ai_memory::trim_history(&mut runtime.messages);
+        let _ = session_thread::append_message(&app, &mut runtime, &user_message);
         save(&app, &runtime)?;
         let allowed_actions = policy::actions_for_level(runtime.permission_level);
         let codex_runtime = resolve_for_app(&app).ok();
+        let provider_history = session_thread::recent_messages(
+            &app,
+            &mut runtime,
+            PROVIDER_HISTORY_LIMIT,
+        )
+        .unwrap_or_else(|_| runtime.messages.clone());
+        let session_turn_messages = session_thread::recent_messages(
+            &app,
+            &mut runtime,
+            SESSION_TURN_CONTEXT_LIMIT,
+        )
+        .unwrap_or_else(|_| ai_memory::context_window(&runtime.messages));
         (
             runtime.provider.clone(),
             runtime.api_key.clone(),
@@ -1394,33 +1504,15 @@ async fn send_chat_message(
             codex_runtime
                 .as_ref()
                 .map(|item| item.home_root.to_string_lossy().to_string()),
-            runtime.messages.clone(),
-            render_recent_conversation_context(&ai_memory::context_window(&runtime.messages)),
+            provider_history,
+            render_recent_conversation_context(&session_turn_messages),
             runtime.permission_level,
             allowed_actions,
         )
     };
 
-    let intent = if matches!(provider_config.kind, ProviderKind::Mock) {
-        TopLevelIntent::Chat
-    } else {
-        match agent::intent_classifier::classify_user_intent(
-            &provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
-            codex_command.clone(),
-            codex_home.clone(),
-            permission_level,
-            &allowed_actions,
-            trimmed,
-        )
-        .await
-        {
-            Ok(decision) => decision.route,
-            Err(_) => TopLevelIntent::Chat,
-        }
-    };
-
+    let current_task = agent::task_store::current_task(&app).ok().flatten();
+    let current_task_context = render_active_task_context(current_task.as_ref());
     let (
         reply_text,
         provider_label,
@@ -1429,42 +1521,86 @@ async fn send_chat_message(
         agent_meta,
         pending_shell_confirmation,
         should_exit,
-    ) = match intent {
-        TopLevelIntent::Chat => {
-            let history = build_chat_history_for_provider(
-                &provider_config,
-                permission_level,
-                &allowed_actions,
-                &full_history,
-            );
-            let (reply, label) = provider::respond(
-                &provider_config,
-                api_key.clone(),
-                oauth_access_token.clone(),
-                codex_command.clone(),
-                codex_home.clone(),
-                permission_level,
-                &allowed_actions,
-                &history,
-            )
-            .await?;
-            (
-                reply,
-                label,
-                "chat_ok".to_string(),
-                "top_level_intent=chat".to_string(),
-                Some(AgentMessageMeta {
-                    route: AgentRoute::Chat,
-                    planned_tools: vec![],
-                    pending_request: None,
-                    task: None,
-                    summary: None,
-                }),
-                None,
-                false,
-            )
-        }
-        TopLevelIntent::DesktopAction => {
+        codex_thread_id,
+    ) = if matches!(provider_config.kind, ProviderKind::Mock) {
+        let mut codex_thread_id = {
+            let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            runtime.codex_thread_id.clone()
+        };
+        let history = build_chat_history_for_provider(
+            &provider_config,
+            permission_level,
+            &allowed_actions,
+            &provider_history,
+        );
+        let (reply, label) = provider::respond(
+            &provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            &mut codex_thread_id,
+            permission_level,
+            &allowed_actions,
+            &history,
+        )
+        .await?;
+        (
+            reply,
+            label,
+            "chat_ok".to_string(),
+            "session_turn=mock_reply".to_string(),
+            Some(AgentMessageMeta {
+                route: AgentRoute::Chat,
+                planned_tools: vec![],
+                pending_request: None,
+                task: None,
+                summary: None,
+            }),
+            None,
+            false,
+            codex_thread_id,
+        )
+    } else {
+        let mut codex_thread_id = {
+            let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            runtime.codex_thread_id.clone()
+        };
+        let session_turn = session_turn::decide_session_turn(
+            &provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            &mut codex_thread_id,
+            permission_level,
+            &allowed_actions,
+            trimmed,
+            recent_conversation_context.as_deref(),
+            current_task_context.as_deref(),
+            pending_control_count,
+        )
+        .await;
+
+        match session_turn {
+            Ok(decision) => match decision.kind {
+                SessionTurnKind::Reply => (
+                    decision.reply.unwrap_or_default(),
+                    provider_config.kind.label().to_string(),
+                    "chat_ok".to_string(),
+                    "session_turn=reply".to_string(),
+                    Some(AgentMessageMeta {
+                        route: AgentRoute::Chat,
+                        planned_tools: vec![],
+                        pending_request: None,
+                        task: None,
+                        summary: None,
+                    }),
+                    None,
+                    false,
+                    codex_thread_id,
+                ),
+                SessionTurnKind::DesktopAction => {
             let result = agent_router::maybe_handle_control_message(
                 &app,
                 &provider_config,
@@ -1474,6 +1610,7 @@ async fn send_chat_message(
                 vision_api_key.clone(),
                 codex_command.clone(),
                 codex_home.clone(),
+                &mut codex_thread_id,
                 permission_level,
                 &allowed_actions,
                 trimmed,
@@ -1490,9 +1627,10 @@ async fn send_chat_message(
                 Some(result.meta),
                 None,
                 false,
+                codex_thread_id,
             )
-        }
-        TopLevelIntent::TestRequest => {
+                }
+                SessionTurnKind::TestRequest => {
             let result = agent_router::maybe_handle_test_message(
                 &app,
                 &provider_config,
@@ -1502,6 +1640,7 @@ async fn send_chat_message(
                 vision_api_key.clone(),
                 codex_command.clone(),
                 codex_home.clone(),
+                &mut codex_thread_id,
                 permission_level,
                 &allowed_actions,
                 trimmed,
@@ -1518,49 +1657,59 @@ async fn send_chat_message(
                 Some(result.meta),
                 None,
                 false,
+                codex_thread_id,
             )
-        }
-        TopLevelIntent::DebugRequest => {
-            let result = agent_router::handle_debug_request(
-                &app,
-                &vision_channel,
-                vision_api_key.clone(),
-                trimmed,
-            )
-            .await?;
-            (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-                None,
-                false,
-            )
-        }
-        TopLevelIntent::MemoryRequest => {
-            let result = agent_router::handle_memory_request(&app)?;
-            (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-                None,
-                false,
-            )
-        }
-        TopLevelIntent::ConfirmationResponse => {
-            let result = agent_router::handle_confirmation_response(&app, trimmed).await?;
-            (
-                result.reply_text,
-                result.provider_label,
-                result.outcome,
-                result.detail,
-                Some(result.meta),
-                None,
-                false,
-            )
+                }
+                SessionTurnKind::MemoryRequest => {
+                    let result = agent_router::handle_memory_request(&app)?;
+                    (
+                        result.reply_text,
+                        result.provider_label,
+                        result.outcome,
+                        result.detail,
+                        Some(result.meta),
+                        None,
+                        false,
+                        codex_thread_id,
+                    )
+                }
+            },
+            Err(_) => {
+                let history = build_chat_history_for_provider(
+                    &provider_config,
+                    permission_level,
+                    &allowed_actions,
+                    &provider_history,
+                );
+                let (reply, label) = provider::respond(
+                    &provider_config,
+                    api_key.clone(),
+                    oauth_access_token.clone(),
+                    codex_command.clone(),
+                    codex_home.clone(),
+                    &mut codex_thread_id,
+                    permission_level,
+                    &allowed_actions,
+                    &history,
+                )
+                .await?;
+                (
+                    reply,
+                    label,
+                    "chat_ok".to_string(),
+                    "session_turn=fallback_reply".to_string(),
+                    Some(AgentMessageMeta {
+                        route: AgentRoute::Chat,
+                        planned_tools: vec![],
+                        pending_request: None,
+                        task: None,
+                        summary: None,
+                    }),
+                    None,
+                    false,
+                    codex_thread_id,
+                )
+            }
         }
     };
 
@@ -1570,7 +1719,9 @@ async fn send_chat_message(
         let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
         runtime.messages.push(reply_message.clone());
         runtime.mode = PetMode::Idle;
+        runtime.codex_thread_id = codex_thread_id.clone();
         ai_memory::trim_history(&mut runtime.messages);
+        let _ = session_thread::append_message(&app, &mut runtime, &reply_message);
 
         if let Err(error) = history::record_input_history(&app, trimmed) {
             audit::push_entry(
@@ -1796,9 +1947,12 @@ fn clear_conversation(
     let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
     runtime.mode = PetMode::Idle;
     runtime.pending_action_approvals.clear();
+    runtime.codex_thread_id = None;
     runtime.messages = vec![ChatMessage::assistant(
         "会话已经清空。现在重新回到严格白名单模式，你可以继续测试 UI、语音、OAuth 和动作面板。",
     )];
+    let seed_messages = runtime.messages.clone();
+    let _ = session_thread::start_new_thread(&app, &mut runtime, &seed_messages);
     audit::push_entry(
         &mut runtime.audit_trail,
         audit::record("clear_conversation", "ok", "用户主动清空了会话历史。", 0),
@@ -1871,6 +2025,15 @@ pub fn run() {
             // 初始化 Codex 配置目录结构
             if let Err(error) = initialize_codex_config(&app.handle()) {
                 eprintln!("Codex config initialization failed: {error}");
+            }
+
+            let runtime_state: State<'_, Mutex<RuntimeState>> = app.state();
+            if let Ok(mut runtime) = runtime_state.lock() {
+                if let Err(error) = session_thread::bootstrap_runtime_thread(&app.handle(), &mut runtime) {
+                    eprintln!("Session thread bootstrap failed: {error}");
+                }
+                sync_codex_provider_view(&app.handle(), &mut runtime);
+                let _ = save(&app.handle(), &runtime);
             }
 
             // 异步检查并自动更新 Codex

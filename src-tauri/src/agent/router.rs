@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    app_state::{load, now_millis, ChatMessage, DesktopAction, ProviderConfig, RuntimeState, VisionChannelConfig},
+    app_state::{load, now_millis, save, ChatMessage, DesktopAction, ProviderConfig, RuntimeState, VisionChannelConfig},
     control::registry as control_registry,
     control::{router as control_router, types::ToolInvokeResponse},
     history,
@@ -166,6 +166,7 @@ pub async fn maybe_handle_control_message(
     vision_api_key: Option<String>,
     codex_command: Option<String>,
     codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
@@ -185,9 +186,33 @@ pub async fn maybe_handle_control_message(
         return Ok(None);
     }
 
-    if task_store::has_active_task(app)? {
+    if let Some(mut task) = task_store::current_task(app)? {
+        if matches!(task.intent, TopLevelIntent::DesktopAction) {
+            if task.pending_action_id.is_some() || task.waiting_pending_id.is_some() {
+                return Ok(Some(active_task_waiting_result(&task)));
+            }
+
+            let result = continue_loop_for_task(
+                app,
+                provider_config,
+                api_key,
+                oauth_access_token,
+                vision_channel,
+                vision_api_key,
+                codex_command,
+                codex_home,
+                codex_thread_id,
+                permission_level,
+                allowed_actions,
+                trimmed,
+                &mut task,
+            )
+            .await?;
+            return Ok(Some(result));
+        }
+
         return Ok(Some(blocked_result(
-            "当前还有一个未完成的桌面任务，请先确认或取消。".to_string(),
+            "当前还有一个未完成的测试任务，请先完成当前任务后再发起新的桌面动作。".to_string(),
         )));
     }
 
@@ -206,6 +231,7 @@ pub async fn maybe_handle_control_message(
         vision_api_key,
         codex_command,
         codex_home,
+        codex_thread_id,
         permission_level,
         allowed_actions,
         trimmed,
@@ -225,6 +251,7 @@ pub async fn maybe_handle_test_message(
     vision_api_key: Option<String>,
     codex_command: Option<String>,
     codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
@@ -241,9 +268,33 @@ pub async fn maybe_handle_test_message(
         return Ok(None);
     }
 
-    if task_store::has_active_task(app)? {
+    if let Some(mut task) = task_store::current_task(app)? {
+        if matches!(task.intent, TopLevelIntent::TestRequest) {
+            if task.pending_action_id.is_some() || task.waiting_pending_id.is_some() {
+                return Ok(Some(active_task_waiting_result(&task)));
+            }
+
+            let result = continue_loop_for_task(
+                app,
+                provider_config,
+                api_key,
+                oauth_access_token,
+                vision_channel,
+                vision_api_key,
+                codex_command,
+                codex_home,
+                codex_thread_id,
+                permission_level,
+                allowed_actions,
+                trimmed,
+                &mut task,
+            )
+            .await?;
+            return Ok(Some(result));
+        }
+
         return Ok(Some(blocked_result(
-            "当前还有一个未完成的任务，请先确认或取消。".to_string(),
+            "当前还有一个未完成的桌面任务，请先完成当前任务后再发起新的测试请求。".to_string(),
         )));
     }
 
@@ -262,6 +313,7 @@ pub async fn maybe_handle_test_message(
         vision_api_key,
         codex_command,
         codex_home,
+        codex_thread_id,
         permission_level,
         allowed_actions,
         trimmed,
@@ -505,6 +557,7 @@ async fn continue_desktop_loop(
     vision_api_key: Option<String>,
     codex_command: Option<String>,
     codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
@@ -533,6 +586,7 @@ async fn continue_desktop_loop(
             oauth_access_token.clone(),
             codex_command.clone(),
             codex_home.clone(),
+            codex_thread_id,
             permission_level,
             allowed_actions,
             user_input,
@@ -737,6 +791,7 @@ async fn continue_test_loop(
     vision_api_key: Option<String>,
     codex_command: Option<String>,
     codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
@@ -777,6 +832,7 @@ async fn continue_test_loop(
             oauth_access_token.clone(),
             codex_command.clone(),
             codex_home.clone(),
+            codex_thread_id,
             permission_level,
             allowed_actions,
             user_input,
@@ -1230,6 +1286,9 @@ async fn confirm_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolI
         permission_level,
         allowed_actions,
     ) = runtime_inputs_for_agent(app)?;
+    let mut codex_thread_id = load(app)
+        .ok()
+        .and_then(|runtime| runtime.codex_thread_id);
 
     let result = continue_loop_for_task(
         app,
@@ -1240,12 +1299,19 @@ async fn confirm_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolI
         vision_api_key,
         codex_command,
         codex_home,
+        &mut codex_thread_id,
         permission_level,
         &allowed_actions,
         &goal,
         &mut task,
     )
     .await?;
+    if let Some(thread_id) = codex_thread_id {
+        let state: State<'_, Mutex<RuntimeState>> = app.state();
+        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        runtime.codex_thread_id = Some(thread_id);
+        save(app, &runtime)?;
+    }
     Ok(handle_to_tool_response(result))
 }
 
@@ -1405,6 +1471,52 @@ fn blocked_result(reason: String) -> AgentHandleResult {
             pending_request: None,
             task: None,
             summary: None,
+        },
+    }
+}
+
+fn active_task_waiting_result(task: &AgentTaskRun) -> AgentHandleResult {
+    let route = if matches!(task.intent, TopLevelIntent::TestRequest) {
+        AgentRoute::Test
+    } else {
+        AgentRoute::Control
+    };
+    let provider_label = if matches!(route, AgentRoute::Test) {
+        "Test Agent"
+    } else {
+        "Desktop Agent"
+    };
+    let pending_summary = task
+        .pending_action_summary
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| "当前任务正在等待一个待确认动作。".to_string());
+    let reply_text = format!(
+        "当前任务还没有结束。\n\n正在等待确认：{pending_summary}\n请直接回复“确认”或“取消”；如果你只是想了解当前卡在哪，也可以继续问我。"
+    );
+
+    AgentHandleResult {
+        reply_text,
+        provider_label: provider_label.to_string(),
+        outcome: if matches!(route, AgentRoute::Test) {
+            "test_pending".to_string()
+        } else {
+            "control_pending".to_string()
+        },
+        detail: format!(
+            "task={} waiting_pending={}",
+            task.task_id,
+            task.waiting_pending_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+        meta: AgentMessageMeta {
+            route,
+            planned_tools: task.planned_tools(),
+            pending_request: None,
+            task: Some(task.waiting_progress()),
+            summary: task.final_summary.clone(),
         },
     }
 }
@@ -1625,6 +1737,7 @@ async fn continue_loop_for_task(
     vision_api_key: Option<String>,
     codex_command: Option<String>,
     codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
     permission_level: u8,
     allowed_actions: &[DesktopAction],
     user_input: &str,
@@ -1642,6 +1755,7 @@ async fn continue_loop_for_task(
                 vision_api_key,
                 codex_command,
                 codex_home,
+                codex_thread_id,
                 permission_level,
                 allowed_actions,
                 user_input,
@@ -1661,6 +1775,7 @@ async fn continue_loop_for_task(
                 vision_api_key,
                 codex_command,
                 codex_home,
+                codex_thread_id,
                 permission_level,
                 allowed_actions,
                 user_input,

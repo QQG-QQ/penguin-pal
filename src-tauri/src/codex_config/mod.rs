@@ -14,4 +14,5 @@ pub mod skills;
 
 pub use config::CodexConfig;
 pub use rules::RuleSet;
+pub use sessions::{SessionManager, SessionMessage};
 pub use skills::{load_skills, SkillSet};

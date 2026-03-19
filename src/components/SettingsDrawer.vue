@@ -247,7 +247,15 @@ const formatHistoryTime = (timestamp: number) =>
 
       <label class="field full-row">
         <span>Model</span>
-        <input v-model="localDraft.model" type="text" placeholder="例如 gpt-4.1-mini" />
+        <input
+          v-model="localDraft.model"
+          type="text"
+          :readonly="isCodexProvider"
+          :placeholder="isCodexProvider ? 'Codex CLI 模型由私有运行时配置决定' : '例如 gpt-4.1-mini'"
+        />
+        <small v-if="isCodexProvider" class="field-note">
+          Codex CLI 会按桌宠私有运行时自己的配置执行，这里不再回写 <code>.codex/config.toml</code>。
+        </small>
       </label>
 
       <label v-if="!isCodexProvider" class="field full-row">
@@ -314,6 +322,7 @@ const formatHistoryTime = (timestamp: number) =>
             <p>当前聊天引擎：{{ currentProviderLabel }}</p>
             <p>{{ codexStatus.message }}</p>
             <p>Codex CLI Provider 会优先使用桌宠自己的私有运行时和私有登录目录，不依赖系统全局安装。</p>
+            <p>设置页里的 Model 现在只用于显示当前运行时视图，不会再直接改写 Codex CLI 私有配置。</p>
             <p v-if="oauthNotice">{{ oauthNotice }}</p>
           </div>
         </section>
@@ -833,6 +842,12 @@ const formatHistoryTime = (timestamp: number) =>
 .field span {
   font-size: 13px;
   color: #365667;
+}
+
+.field-note {
+  color: #4c6674;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 input,

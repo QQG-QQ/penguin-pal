@@ -48,7 +48,7 @@ pub fn build_user_intent_classifier_prompt() -> String {
 分类规则：\n\
 1. route=test_request：用户明确想运行测试、回归、验证、重测失败项、执行测试套件。\n\
 2. route=desktop_action：用户明确想让你操作桌面软件、窗口、剪贴板、浏览器、记事本、微信或执行本地代理动作。\n\
-3. route=debug_request：用户明确想让你排查、定位、分析某个当前问题、失败原因、异常链路或调试现象；重点是诊断，不是普通闲聊。\n\
+3. route=debug_request：只在用户明确要求你“排查/定位/调试/诊断/分析异常链路”，或要求你基于当前任务、失败记录、日志、报错现场继续调试时使用；重点是诊断，不是普通闲聊。\n\
 4. route=confirmation_response：用户只是在回复 yes/no、确认/取消、可以/不要、继续/停止 这类确认语义。\n\
 5. route=memory_request：用户明确在询问「记忆系统状态」「存储路径在哪」「内存占用情况」这类系统级记忆查询。\n\
 6. route=chat：普通聊天、提问、解释、询问状态、让你说明能力或文档，不是要求执行测试或操作。\n\
@@ -61,8 +61,31 @@ pub fn build_user_intent_classifier_prompt() -> String {
 \n\
 7. 如果句子里出现「测试」这个词，但用户其实是在询问测试结果、测试记录，必须输出 route=chat，而不是 test_request。\n\
 8. 如果用户是在要求你去执行某个功能、打开软件、输入文本、切换窗口、运行代理动作，输出 desktop_action。\n\
-9. 不要因为关键词就机械分类；要根据整句意图判断。\n\
-10. 不确定时优先输出 route=chat。"
+9. 「为什么会出问题」「这是什么意思」「解释一下这个报错/现象」这类追问，默认是 route=chat；除非用户明确要求你继续排查或当前确实存在进行中的调试上下文。\n\
+10. 不要因为关键词就机械分类；要根据整句意图判断。\n\
+11. 不确定时优先输出 route=chat。"
+        .to_string()
+}
+
+pub fn build_session_turn_prompt() -> String {
+    "你是 PenguinPal 的统一会话代理。\n\
+你在同一个连续会话线程里工作：既能正常聊天解释，也能在必要时发起桌面动作或测试任务。\n\
+你只能输出一段 JSON，不能输出 markdown、解释、代码块或额外文字。\n\
+输出 schema：{\"kind\":\"reply|desktop_action|test_request|memory_request\",\"reply\":\"...\"}\n\
+\n\
+决策规则：\n\
+1. kind=reply：用于普通聊天、解释原因、回答设置问题、说明状态、分析现象、追问上下文、解释报错、说明你接下来会做什么。\n\
+2. kind=desktop_action：只在用户明确要求你操作桌面软件、窗口、剪贴板、浏览器、记事本、微信或执行本地代理动作时使用。\n\
+3. kind=test_request：只在用户明确要求你测试、验证、回归、重测某个功能或流程时使用。\n\
+4. kind=memory_request：只在用户明确询问记忆系统状态、存储路径、占用情况时使用。\n\
+5. 如果用户是在问“为什么会出问题”“这是什么意思”“解释一下刚才现象/报错”，默认必须输出 kind=reply，而不是 desktop_action/test_request。\n\
+6. 如果当前存在待确认动作，而用户不是在明确确认/取消，通常仍然输出 kind=reply，向用户解释当前卡在哪。\n\
+7. 如果用户只是说“继续”“再试一次”“接着来”，但上下文显示是在推进桌面任务或测试任务，可以输出 desktop_action 或 test_request。\n\
+8. 如果当前已经有活动任务，而用户是在追问“现在什么情况”“为什么失败”“卡在哪”“刚才那步是什么意思”，默认输出 kind=reply，沿着同一线程解释。\n\
+9. 当 kind=reply 时，reply 必须直接对用户说话，并且不能为空。\n\
+10. 当 kind 不是 reply 时，reply 可以为空。\n\
+11. 不确定时优先输出 kind=reply。\n\
+12. 不要因为关键词就机械分类，要结合整段会话上下文和当前任务状态判断。"
         .to_string()
 }
 
