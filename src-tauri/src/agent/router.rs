@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::sync::Mutex;
+use std::{path::{Path, PathBuf}, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
@@ -20,6 +20,8 @@ use super::{
     task_store,
     test_assertions,
     test_loop_planner,
+    workspace_context,
+    workspace_loop_planner,
     types::{
         AgentLoopSummary, AgentLoopTaskStatus, AgentMessageMeta, AgentNextAction, AgentRoute,
         AgentTaskProgress, AgentTaskRun, AgentTaskStatus, FailureReasonCode, FailureStage,
@@ -32,6 +34,8 @@ const AI_FIRST_STEP_SAFETY_CAP: usize = 50;
 const AI_FIRST_RETRY_BUDGET: usize = 3;
 const TEST_LOOP_STEP_BUDGET: usize = 12;
 const TEST_LOOP_RETRY_BUDGET: usize = 1;
+const WORKSPACE_LOOP_STEP_BUDGET: usize = 24;
+const WORKSPACE_LOOP_RETRY_BUDGET: usize = 2;
 
 fn render_recent_conversation_context(messages: &[ChatMessage]) -> Option<String> {
     let rendered = messages
@@ -75,7 +79,12 @@ fn build_memory_context_for_task(
 
     let query = crate::memory::service::build_query_from_task(
         user_input,
-        Some("desktop_action"),
+        Some(match task.intent {
+            TopLevelIntent::DesktopAction => "desktop_action",
+            TopLevelIntent::TestRequest => "test_request",
+            TopLevelIntent::WorkspaceTask => "workspace_task",
+            _ => "chat",
+        }),
         window_title,
         None,
     );
@@ -212,7 +221,10 @@ pub async fn maybe_handle_control_message(
         }
 
         return Ok(Some(blocked_result(
-            "当前还有一个未完成的测试任务，请先完成当前任务后再发起新的桌面动作。".to_string(),
+            format!(
+                "当前还有一个未完成的{}，请先完成当前任务后再发起新的桌面动作。",
+                task_kind_label(task.intent.clone())
+            ),
         )));
     }
 
@@ -294,7 +306,10 @@ pub async fn maybe_handle_test_message(
         }
 
         return Ok(Some(blocked_result(
-            "当前还有一个未完成的桌面任务，请先完成当前任务后再发起新的测试请求。".to_string(),
+            format!(
+                "当前还有一个未完成的{}，请先完成当前任务后再发起新的测试请求。",
+                task_kind_label(task.intent.clone())
+            ),
         )));
     }
 
@@ -305,6 +320,88 @@ pub async fn maybe_handle_test_message(
         TEST_LOOP_RETRY_BUDGET,
     );
     let result = continue_test_loop(
+        app,
+        provider_config,
+        api_key,
+        oauth_access_token,
+        vision_channel,
+        vision_api_key,
+        codex_command,
+        codex_home,
+        codex_thread_id,
+        permission_level,
+        allowed_actions,
+        trimmed,
+        conversation_context,
+        &mut task,
+    )
+    .await?;
+    Ok(Some(result))
+}
+
+pub async fn maybe_handle_workspace_message(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    conversation_context: Option<&str>,
+    force_route: bool,
+) -> Result<Option<AgentHandleResult>, String> {
+    let trimmed = user_input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if !force_route {
+        return Ok(None);
+    }
+
+    if let Some(mut task) = task_store::current_task(app)? {
+        if matches!(task.intent, TopLevelIntent::WorkspaceTask) {
+            if task.pending_action_id.is_some() || task.waiting_pending_id.is_some() {
+                return Ok(Some(active_task_waiting_result(&task)));
+            }
+
+            let result = continue_loop_for_task(
+                app,
+                provider_config,
+                api_key,
+                oauth_access_token,
+                vision_channel,
+                vision_api_key,
+                codex_command,
+                codex_home,
+                codex_thread_id,
+                permission_level,
+                allowed_actions,
+                trimmed,
+                &mut task,
+            )
+            .await?;
+            return Ok(Some(result));
+        }
+
+        return Ok(Some(blocked_result_for_route(
+            AgentRoute::Workspace,
+            "当前还有一个未完成的桌面或测试任务，请先完成当前任务后再发起新的工作区任务。".to_string(),
+        )));
+    }
+
+    let mut task = AgentTaskRun::new_loop(
+        TopLevelIntent::WorkspaceTask,
+        trimmed,
+        WORKSPACE_LOOP_STEP_BUDGET,
+        WORKSPACE_LOOP_RETRY_BUDGET,
+    );
+    let result = continue_workspace_loop(
         app,
         provider_config,
         api_key,
@@ -682,7 +779,14 @@ async fn continue_desktop_loop(
             }
             AgentNextAction::RetryStep { target, summary } => {
                 // AI-first: desktop loop 现在支持 retry_step
-                match perform_retry_step(app, task, target, summary)? {
+                match perform_retry_step(
+                    app,
+                    task,
+                    target,
+                    summary,
+                    AgentRoute::Control,
+                    "Desktop Agent",
+                )? {
                     LoopContinuation::Continue => {}
                     LoopContinuation::Return(result) => return Ok(result),
                 }
@@ -1020,7 +1124,14 @@ async fn continue_test_loop(
                 }
             }
             AgentNextAction::RetryStep { target, summary } => {
-                match perform_retry_step(app, task, target, summary)? {
+                match perform_retry_step(
+                    app,
+                    task,
+                    target,
+                    summary,
+                    AgentRoute::Test,
+                    "Test Agent",
+                )? {
                     LoopContinuation::Continue => {}
                     LoopContinuation::Return(result) => return Ok(result),
                 }
@@ -1050,6 +1161,226 @@ async fn continue_test_loop(
         "Test Agent",
         task,
         "当前测试任务已经耗尽 step budget，已停止继续规划。".to_string(),
+    ))
+}
+
+async fn continue_workspace_loop(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    _vision_channel: &VisionChannelConfig,
+    _vision_api_key: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    conversation_context: Option<&str>,
+    task: &mut AgentTaskRun,
+) -> Result<AgentHandleResult, String> {
+    let memory_context = build_memory_context_for_task(app, user_input, task);
+    let configured_workspace_root = load(app).ok().and_then(|runtime| runtime.workspace_root);
+    let workspace = workspace_context::detect_workspace_context(configured_workspace_root.as_deref());
+    let workspace_prompt = workspace.as_ref().map(|item| item.render_for_prompt());
+    let default_workdir = workspace
+        .as_ref()
+        .map(|item| item.default_workdir().to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string());
+
+    loop {
+        if task.step_budget == 0 {
+            break;
+        }
+
+        task.task_status = AgentLoopTaskStatus::Planning;
+        task.updated_at = now_millis();
+
+        let decision = match workspace_loop_planner::plan_next_workspace_action(
+            provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            codex_thread_id,
+            permission_level,
+            allowed_actions,
+            user_input,
+            task,
+            conversation_context,
+            memory_context.as_deref(),
+            workspace_prompt.as_deref(),
+            &default_workdir,
+        )
+        .await
+        {
+            Ok(decision) => decision,
+            Err(error) => {
+                task.task_status = AgentLoopTaskStatus::Failed;
+                task.failure_reason = Some(error.clone());
+                task.failure_reason_code = FailureReasonCode::PlannerFailed;
+                task.failure_stage = Some(FailureStage::Planning);
+                write_back_task_memory(app, task);
+                return Ok(fail_result(
+                    AgentRoute::Workspace,
+                    "Workspace Agent",
+                    task,
+                    format!("workspace agent 没能生成下一步动作：{error}"),
+                ));
+            }
+        };
+
+        match decision.next {
+            AgentNextAction::RespondToUser { message } => {
+                task.task_status = AgentLoopTaskStatus::Completed;
+                write_back_task_memory(app, task);
+                return Ok(simple_result(
+                    AgentRoute::Workspace,
+                    "Workspace Agent",
+                    "workspace_response",
+                    message,
+                    task,
+                ));
+            }
+            AgentNextAction::ExecuteTool { tool, summary, args } => {
+                let action_args = apply_workspace_defaults(&tool, args.clone(), Some(&default_workdir));
+                match execute_tool_step(app, task, &tool, action_args.clone(), Some(summary.clone()))? {
+                    LoopToolExecution::Success => {
+                        task.step_budget = task.step_budget.saturating_sub(1);
+                        task.task_status = AgentLoopTaskStatus::Observing;
+                    }
+                    LoopToolExecution::Pending { note, pending_request } => {
+                        task_store::replace_active_task(app, Some(task.clone()))?;
+                        return Ok(pending_result(
+                            task,
+                            pending_request,
+                            note,
+                            AgentRoute::Workspace,
+                            "Workspace Agent",
+                        ));
+                    }
+                    LoopToolExecution::Failure { reason } => {
+                        if let Some(result) = maybe_retry_or_fail(
+                            task,
+                            &tool,
+                            &reason,
+                            &action_args,
+                            AgentRoute::Workspace,
+                            "Workspace Agent",
+                        ) {
+                            return Ok(result);
+                        }
+                    }
+                }
+            }
+            AgentNextAction::RequestConfirmation {
+                tool,
+                summary,
+                args,
+                message,
+            } => {
+                let action_args = apply_workspace_defaults(&tool, args.clone(), Some(&default_workdir));
+                match execute_tool_step(app, task, &tool, action_args.clone(), summary.clone())? {
+                    LoopToolExecution::Success => {
+                        task.step_budget = task.step_budget.saturating_sub(1);
+                        task.task_status = AgentLoopTaskStatus::Observing;
+                        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
+                            task.completed_notes.push(message);
+                        }
+                    }
+                    LoopToolExecution::Pending { note, pending_request } => {
+                        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
+                            task.completed_notes.push(message);
+                        }
+                        task_store::replace_active_task(app, Some(task.clone()))?;
+                        return Ok(pending_result(
+                            task,
+                            pending_request,
+                            note,
+                            AgentRoute::Workspace,
+                            "Workspace Agent",
+                        ));
+                    }
+                    LoopToolExecution::Failure { reason } => {
+                        if let Some(result) = maybe_retry_or_fail(
+                            task,
+                            &tool,
+                            &reason,
+                            &action_args,
+                            AgentRoute::Workspace,
+                            "Workspace Agent",
+                        ) {
+                            return Ok(result);
+                        }
+                    }
+                }
+            }
+            AgentNextAction::RetryStep { target, summary } => {
+                match perform_retry_step(
+                    app,
+                    task,
+                    target,
+                    summary,
+                    AgentRoute::Workspace,
+                    "Workspace Agent",
+                )? {
+                    LoopContinuation::Continue => {}
+                    LoopContinuation::Return(result) => return Ok(result),
+                }
+            }
+            AgentNextAction::FinishTask { message, summary } => {
+                task.task_status = AgentLoopTaskStatus::Completed;
+                task.final_summary = Some(summary.clone());
+                write_back_task_memory(app, task);
+                return Ok(complete_result(
+                    AgentRoute::Workspace,
+                    "Workspace Agent",
+                    task,
+                    message,
+                    summary,
+                ));
+            }
+            AgentNextAction::FailTask { message, summary } => {
+                task.task_status = AgentLoopTaskStatus::Failed;
+                task.failure_reason = Some(message.clone());
+                task.failure_reason_code = summary.failure_reason_code.clone();
+                task.failure_stage = summary.failure_stage.clone();
+                task.final_summary = Some(summary);
+                write_back_task_memory(app, task);
+                return Ok(fail_result(
+                    AgentRoute::Workspace,
+                    "Workspace Agent",
+                    task,
+                    message,
+                ));
+            }
+            AgentNextAction::ObserveContext { .. } | AgentNextAction::AssertCondition { .. } => {
+                task.task_status = AgentLoopTaskStatus::Failed;
+                task.failure_reason = Some("workspace loop 不支持 observe_context/assert_condition。".to_string());
+                task.failure_reason_code = FailureReasonCode::InvalidAction;
+                task.failure_stage = Some(FailureStage::Planning);
+                write_back_task_memory(app, task);
+                return Ok(fail_result(
+                    AgentRoute::Workspace,
+                    "Workspace Agent",
+                    task,
+                    "workspace loop 不支持 observe_context/assert_condition。".to_string(),
+                ));
+            }
+        }
+    }
+
+    task.task_status = AgentLoopTaskStatus::Failed;
+    task.failure_reason = Some("当前工作区任务已经耗尽 step budget。".to_string());
+    task.failure_reason_code = FailureReasonCode::StepBudgetExceeded;
+    task.failure_stage = Some(FailureStage::Planning);
+    write_back_task_memory(app, task);
+    Ok(fail_result(
+        AgentRoute::Workspace,
+        "Workspace Agent",
+        task,
+        "当前工作区任务已经耗尽 step budget，已停止继续规划。".to_string(),
     ))
 }
 
@@ -1095,6 +1426,60 @@ fn execute_tool_step(
     executor::execute_loop_tool(app, task, tool, materialized_args, summary)
 }
 
+fn apply_workspace_defaults(tool: &str, args: Value, default_workdir: Option<&str>) -> Value {
+    let Some(default_workdir) = default_workdir.filter(|value| !value.trim().is_empty()) else {
+        return args;
+    };
+
+    let Some(mut map) = args.as_object().cloned() else {
+        return args;
+    };
+
+    match tool {
+        "run_shell_command" => {
+            map.entry("workdir".to_string())
+                .or_insert_with(|| Value::String(default_workdir.to_string()));
+        }
+        "list_directory" | "read_file_text" | "write_file_text" | "create_directory" | "delete_path" => {
+            if let Some(path) = map.get("path").and_then(Value::as_str) {
+                map.insert(
+                    "path".to_string(),
+                    Value::String(resolve_workspace_path(path, default_workdir)),
+                );
+            }
+        }
+        "move_path" => {
+            if let Some(path) = map.get("fromPath").and_then(Value::as_str) {
+                map.insert(
+                    "fromPath".to_string(),
+                    Value::String(resolve_workspace_path(path, default_workdir)),
+                );
+            }
+            if let Some(path) = map.get("toPath").and_then(Value::as_str) {
+                map.insert(
+                    "toPath".to_string(),
+                    Value::String(resolve_workspace_path(path, default_workdir)),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    Value::Object(map)
+}
+
+fn resolve_workspace_path(path: &str, default_workdir: &str) -> String {
+    let target = Path::new(path);
+    if target.is_absolute() {
+        return path.to_string();
+    }
+
+    PathBuf::from(default_workdir)
+        .join(target)
+        .to_string_lossy()
+        .to_string()
+}
+
 fn maybe_retry_or_fail(
     task: &mut AgentTaskRun,
     tool: &str,
@@ -1124,6 +1509,8 @@ fn perform_retry_step(
     task: &mut AgentTaskRun,
     target: RetryTarget,
     summary: String,
+    route: AgentRoute,
+    provider_label: &str,
 ) -> Result<LoopContinuation, String> {
     if task.retry_budget == 0 {
         task.task_status = AgentLoopTaskStatus::Failed;
@@ -1131,10 +1518,10 @@ fn perform_retry_step(
         task.failure_reason_code = FailureReasonCode::RetryExhausted;
         task.failure_stage = Some(FailureStage::Retry);
         return Ok(LoopContinuation::Return(fail_result(
-            AgentRoute::Test,
-            "Test Agent",
+            route,
+            provider_label,
             task,
-            "当前测试任务已经耗尽 retry budget。".to_string(),
+            "当前任务已经耗尽 retry budget。".to_string(),
         )));
     }
 
@@ -1168,8 +1555,8 @@ fn perform_retry_step(
                 task.failure_reason_code = FailureReasonCode::RetryExhausted;
                 task.failure_stage = Some(FailureStage::Retry);
                 return Ok(LoopContinuation::Return(fail_result(
-                    AgentRoute::Test,
-                    "Test Agent",
+                    route,
+                    provider_label,
                     task,
                     "当前没有可重试的低风险动作。".to_string(),
                 )));
@@ -1196,8 +1583,8 @@ fn perform_retry_step(
                         task,
                         pending_request,
                         note,
-                        AgentRoute::Test,
-                        "Test Agent",
+                        route,
+                        provider_label,
                     )))
                 }
                 LoopToolExecution::Failure { reason } => {
@@ -1206,8 +1593,8 @@ fn perform_retry_step(
                     task.failure_reason_code = FailureReasonCode::RetryExhausted;
                     task.failure_stage = Some(FailureStage::Retry);
                     Ok(LoopContinuation::Return(fail_result(
-                        AgentRoute::Test,
-                        "Test Agent",
+                        route,
+                        provider_label,
                         task,
                         reason,
                     )))
@@ -1475,14 +1862,45 @@ fn map_loop_status(status: &AgentLoopTaskStatus) -> AgentTaskStatus {
     }
 }
 
+fn provider_label_for_route(route: AgentRoute) -> &'static str {
+    match route {
+        AgentRoute::Chat => "Chat Agent",
+        AgentRoute::Control => "Desktop Agent",
+        AgentRoute::Test => "Test Agent",
+        AgentRoute::Workspace => "Workspace Agent",
+    }
+}
+
+fn route_outcome(prefix: &str, route: AgentRoute) -> String {
+    match route {
+        AgentRoute::Chat => format!("chat_{prefix}"),
+        AgentRoute::Control => format!("control_{prefix}"),
+        AgentRoute::Test => format!("test_{prefix}"),
+        AgentRoute::Workspace => format!("workspace_{prefix}"),
+    }
+}
+
+fn task_kind_label(intent: TopLevelIntent) -> &'static str {
+    match intent {
+        TopLevelIntent::DesktopAction => "桌面任务",
+        TopLevelIntent::TestRequest => "测试任务",
+        TopLevelIntent::WorkspaceTask => "工作区任务",
+        _ => "任务",
+    }
+}
+
 fn blocked_result(reason: String) -> AgentHandleResult {
+    blocked_result_for_route(AgentRoute::Control, reason)
+}
+
+fn blocked_result_for_route(route: AgentRoute, reason: String) -> AgentHandleResult {
     AgentHandleResult {
-        reply_text: format!("这次桌面任务未执行。\n\n原因：{reason}"),
-        provider_label: "Desktop Agent".to_string(),
-        outcome: "control_blocked".to_string(),
+        reply_text: format!("这次任务未执行。\n\n原因：{reason}"),
+        provider_label: provider_label_for_route(route).to_string(),
+        outcome: route_outcome("blocked", route),
         detail: reason,
         meta: AgentMessageMeta {
-            route: AgentRoute::Control,
+            route,
             planned_tools: vec![],
             pending_request: None,
             task: None,
@@ -1492,16 +1910,12 @@ fn blocked_result(reason: String) -> AgentHandleResult {
 }
 
 fn active_task_waiting_result(task: &AgentTaskRun) -> AgentHandleResult {
-    let route = if matches!(task.intent, TopLevelIntent::TestRequest) {
-        AgentRoute::Test
-    } else {
-        AgentRoute::Control
+    let route = match task.intent {
+        TopLevelIntent::TestRequest => AgentRoute::Test,
+        TopLevelIntent::WorkspaceTask => AgentRoute::Workspace,
+        _ => AgentRoute::Control,
     };
-    let provider_label = if matches!(route, AgentRoute::Test) {
-        "Test Agent"
-    } else {
-        "Desktop Agent"
-    };
+    let provider_label = provider_label_for_route(route);
     let pending_summary = task
         .pending_action_summary
         .as_ref()
@@ -1515,11 +1929,7 @@ fn active_task_waiting_result(task: &AgentTaskRun) -> AgentHandleResult {
     AgentHandleResult {
         reply_text,
         provider_label: provider_label.to_string(),
-        outcome: if matches!(route, AgentRoute::Test) {
-            "test_pending".to_string()
-        } else {
-            "control_pending".to_string()
-        },
+        outcome: route_outcome("pending", route),
         detail: format!(
             "task={} waiting_pending={}",
             task.task_id,
@@ -1577,11 +1987,7 @@ fn complete_result(
     AgentHandleResult {
         reply_text: lines.join("\n"),
         provider_label: provider_label.to_string(),
-        outcome: if matches!(route, AgentRoute::Test) {
-            "test_ok".to_string()
-        } else {
-            "control_ok".to_string()
-        },
+        outcome: route_outcome("ok", route),
         detail: format!("task={} status=completed", task.task_id),
         meta: AgentMessageMeta {
             route,
@@ -1612,11 +2018,7 @@ fn fail_result(route: AgentRoute, provider_label: &str, task: &AgentTaskRun, rea
     AgentHandleResult {
         reply_text: lines.join("\n"),
         provider_label: provider_label.to_string(),
-        outcome: if matches!(route, AgentRoute::Test) {
-            "test_failed".to_string()
-        } else {
-            "control_failed".to_string()
-        },
+        outcome: route_outcome("failed", route),
         detail: reason.clone(),
         meta: AgentMessageMeta {
             route,
@@ -1645,11 +2047,7 @@ fn pending_result(
     AgentHandleResult {
         reply_text: lines.join("\n"),
         provider_label: provider_label.to_string(),
-        outcome: if matches!(route, AgentRoute::Test) {
-            "test_pending".to_string()
-        } else {
-            "control_pending".to_string()
-        },
+        outcome: route_outcome("pending", route),
         detail: format!(
             "task={} pending_id={}",
             task.task_id,
@@ -1689,6 +2087,7 @@ fn tool_response_to_handle(
         .and_then(Value::as_str)
         .map(|value| match value {
             "test" => AgentRoute::Test,
+            "workspace" => AgentRoute::Workspace,
             "control" => AgentRoute::Control,
             _ => AgentRoute::Control,
         })
@@ -1783,6 +2182,26 @@ async fn continue_loop_for_task(
         TopLevelIntent::TestRequest => {
             let conversation_context = load_recent_conversation_context(app);
             continue_test_loop(
+                app,
+                provider_config,
+                api_key,
+                oauth_access_token,
+                vision_channel,
+                vision_api_key,
+                codex_command,
+                codex_home,
+                codex_thread_id,
+                permission_level,
+                allowed_actions,
+                user_input,
+                conversation_context.as_deref(),
+                task,
+            )
+            .await
+        }
+        TopLevelIntent::WorkspaceTask => {
+            let conversation_context = load_recent_conversation_context(app);
+            continue_workspace_loop(
                 app,
                 provider_config,
                 api_key,

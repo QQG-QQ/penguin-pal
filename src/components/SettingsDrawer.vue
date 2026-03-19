@@ -337,6 +337,7 @@ const clearVisionApiKey = () => {
 const save = () => {
   localDraft.value.pushToTalkShortcut =
     localDraft.value.pushToTalkShortcut?.trim() || DEFAULT_PUSH_TO_TALK_SHORTCUT
+  localDraft.value.workspaceRoot = localDraft.value.workspaceRoot?.trim() || null
 
   if (isCodexProvider.value || localDraft.value.kind === 'mock') {
     localDraft.value.apiKey = ''
@@ -740,6 +741,36 @@ onBeforeUnmount(() => {
           </p>
           <p v-else>
             已启用的权限将在保存后生效。高风险操作仍需用户确认。
+          </p>
+        </div>
+      </section>
+
+      <section class="oauth-shell full-row">
+        <div class="oauth-header">
+          <div>
+            <strong>工作区 Agent</strong>
+            <p>代码审查、项目分析和受控构建会优先在这个工作区根目录里进行。</p>
+          </div>
+          <span class="oauth-status">{{ localDraft.workspaceRoot?.trim() ? '已固定' : '自动检测' }}</span>
+        </div>
+
+        <div class="oauth-grid">
+          <label class="field full-row">
+            <span>工作区根目录</span>
+            <input
+              v-model="localDraft.workspaceRoot"
+              type="text"
+              placeholder="例如 D:\\projectsnew\\penguin-pal；留空时自动从当前目录向上检测 .git/Cargo.toml/package.json"
+            />
+          </label>
+        </div>
+
+        <div class="oauth-meta full-row">
+          <p v-if="localDraft.workspaceRoot?.trim()">
+            当前会优先把工作区任务固定到：{{ localDraft.workspaceRoot }}
+          </p>
+          <p v-else>
+            留空时会使用当前进程目录，并向上寻找 .git、Cargo.toml、package.json 等标记作为工作区根。
           </p>
         </div>
       </section>

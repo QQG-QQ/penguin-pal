@@ -5,6 +5,7 @@
 #![allow(unused)]
 
 pub mod executor;
+pub mod agent_turn;
 pub mod intent;
 pub mod intent_classifier;
 pub mod loop_planner;
@@ -16,6 +17,9 @@ pub mod runtime_context;
 pub mod router;
 pub mod screen_context;
 pub mod session_turn;
+pub mod workspace_context;
+pub mod workspace_loop_planner;
+pub mod workspace_loop_prompt;
 // NOTE: screen_planner 已弃用，主链已迁移到 loop_planner / test_loop_planner
 // 保留文件以备回退参考，但不再导出
 // pub mod screen_planner;

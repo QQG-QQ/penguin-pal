@@ -10,6 +10,7 @@ pub enum AgentRoute {
     Chat,
     Control,
     Test,
+    Workspace,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -18,6 +19,7 @@ pub enum TopLevelIntent {
     Chat,
     DesktopAction,
     TestRequest,
+    WorkspaceTask,
     DebugRequest,
     ConfirmationResponse,
     MemoryRequest,
@@ -418,8 +420,22 @@ pub const AGENT_ALLOWED_TOOLS: &[&str] = &[
     "wait_for_element",
 ];
 
+pub const WORKSPACE_ALLOWED_TOOLS: &[&str] = &[
+    "list_directory",
+    "read_file_text",
+    "write_file_text",
+    "create_directory",
+    "move_path",
+    "delete_path",
+    "run_shell_command",
+];
+
 pub fn is_agent_tool_allowed(name: &str) -> bool {
     AGENT_ALLOWED_TOOLS.contains(&name)
+}
+
+pub fn is_workspace_tool_allowed(name: &str) -> bool {
+    WORKSPACE_ALLOWED_TOOLS.contains(&name)
 }
 
 pub fn default_true() -> bool {
@@ -437,6 +453,8 @@ impl AgentTaskRun {
         let task_title = truncate_task_title(goal);
         let route = if matches!(intent, TopLevelIntent::TestRequest) {
             AgentRoute::Test
+        } else if matches!(intent, TopLevelIntent::WorkspaceTask) {
+            AgentRoute::Workspace
         } else {
             AgentRoute::Control
         };

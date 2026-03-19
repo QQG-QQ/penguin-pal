@@ -61,6 +61,7 @@ pub(crate) fn parse_plan(raw: &str) -> Result<AgentPlan, String> {
             Ok(plan)
         }
         AgentRoute::Test => Err("桌面代理规划器不接受 test 路由输出。".to_string()),
+        AgentRoute::Workspace => Err("桌面代理规划器不接受 workspace 路由输出。".to_string()),
     }
 }
 

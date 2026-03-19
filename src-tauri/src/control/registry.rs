@@ -179,7 +179,7 @@ pub fn tool_definitions() -> Vec<ControlToolDefinition> {
         ControlToolDefinition {
             name: "run_shell_command".to_string(),
             title: "执行受控 shell 命令".to_string(),
-            summary: "执行受控白名单 shell 命令，仅允许只读查询和有限 build/test 命令。".to_string(),
+            summary: "执行受控白名单 shell 命令，仅允许 git/rg/dir/type/where 与有限 build/test 命令。".to_string(),
             minimum_permission_level: 0,
             risk_level: ControlRiskLevel::WriteLow,
             requires_confirmation: false,
@@ -187,7 +187,7 @@ pub fn tool_definitions() -> Vec<ControlToolDefinition> {
                 ControlToolArgSpec {
                     name: "command".to_string(),
                     required: true,
-                    summary: "命令名，例如 pwd / dir / type / where / git / npm / cargo。".to_string(),
+                    summary: "命令名，例如 pwd / dir / type / where / rg / git / npm / cargo。".to_string(),
                     example: Some(json!("git")),
                 },
                 ControlToolArgSpec {

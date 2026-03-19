@@ -398,6 +398,7 @@ pub struct AssistantSnapshot {
     pub mode: PetMode,
     pub messages: Vec<ChatMessage>,
     pub provider: ProviderConfig,
+    pub workspace_root: Option<String>,
     pub vision_channel: VisionChannelConfig,
     pub vision_channel_status: VisionProviderStatus,
     pub permission_level: u8,
@@ -423,6 +424,8 @@ pub struct ProviderConfigInput {
     pub voice_input_mode: VoiceInputMode,
     #[serde(default = "default_push_to_talk_shortcut")]
     pub push_to_talk_shortcut: String,
+    #[serde(default)]
+    pub workspace_root: Option<String>,
     pub permission_level: u8,
     #[serde(default)]
     pub auth_mode: AuthMode,
@@ -545,6 +548,7 @@ pub struct RuntimeState {
     pub session_thread_id: Option<String>,
     pub codex_thread_id: Option<String>,
     pub provider: ProviderConfig,
+    pub workspace_root: Option<String>,
     pub vision_channel: VisionChannelConfig,
     pub vision_channel_status: VisionProviderStatus,
     pub permission_level: u8,
@@ -617,6 +621,7 @@ impl Default for RuntimeState {
             session_thread_id: None,
             codex_thread_id: None,
             provider: ProviderConfig::default(),
+            workspace_root: None,
             vision_channel: VisionChannelConfig::default(),
             vision_channel_status: current_vision_channel_status(&VisionChannelConfig::default(), None),
             permission_level: 2,
@@ -690,6 +695,7 @@ impl RuntimeState {
             mode: self.mode,
             messages: self.messages.clone(),
             provider,
+            workspace_root: self.workspace_root.clone(),
             vision_channel,
             vision_channel_status: self.vision_channel_status.clone(),
             permission_level: self.permission_level,
@@ -712,6 +718,8 @@ struct PersistedState {
     #[serde(default)]
     codex_thread_id: Option<String>,
     provider: ProviderConfig,
+    #[serde(default)]
+    workspace_root: Option<String>,
     #[serde(default)]
     vision_channel: VisionChannelConfig,
     permission_level: u8,
@@ -818,6 +826,7 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         session_thread_id: persisted.session_thread_id,
         codex_thread_id: persisted.codex_thread_id,
         provider: persisted.provider,
+        workspace_root: persisted.workspace_root,
         vision_channel,
         vision_channel_status,
         permission_level: 2,
@@ -903,6 +912,7 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
             None
         },
         provider,
+        workspace_root: runtime.workspace_root.clone(),
         vision_channel,
         permission_level: runtime.permission_level.min(2),
         audit_trail: runtime.audit_trail.clone(),

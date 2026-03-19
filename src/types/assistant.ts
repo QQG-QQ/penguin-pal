@@ -132,6 +132,7 @@ export interface AssistantSnapshot {
   mode: PetMode
   messages: ChatMessage[]
   provider: ProviderConfig
+  workspaceRoot: string | null
   visionChannel: VisionChannelConfig
   visionChannelStatus: VisionProviderStatus
   permissionLevel: number
@@ -152,6 +153,7 @@ export interface ProviderConfigInput {
   retainHistory: boolean
   voiceInputMode: VoiceInputMode
   pushToTalkShortcut: string
+  workspaceRoot: string | null
   permissionLevel: number
   authMode: ProviderAuthMode
   oauthAuthorizeUrl: string | null
@@ -180,7 +182,7 @@ export interface VisionChannelConfigInput {
   clearApiKey?: boolean
 }
 
-export type AgentRoute = 'chat' | 'control' | 'test'
+export type AgentRoute = 'chat' | 'control' | 'test' | 'workspace'
 export type AgentTaskStatus = 'running' | 'waitingConfirmation' | 'completed' | 'failed' | 'cancelled'
 
 export interface AgentTaskProgress {

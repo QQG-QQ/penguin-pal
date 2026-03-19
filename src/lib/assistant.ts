@@ -224,6 +224,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     authMode: 'apiKey',
     oauth: defaultOAuthState()
   },
+  workspaceRoot: null,
   visionChannel: defaultVisionChannel(),
   visionChannelStatus: fallbackVisionStatus(defaultVisionChannel()),
   permissionLevel: 2,
@@ -812,6 +813,7 @@ const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapsho
 
   return {
     ...snapshot,
+    workspaceRoot: snapshot.workspaceRoot?.trim() || null,
     provider: {
       ...provider,
       apiKeyLoaded: Boolean(provider.apiKeyLoaded),
@@ -941,6 +943,7 @@ export const saveProviderConfig = async (
           expiresAt: input.clearOAuthToken ? null : oauth.expiresAt
         }
       },
+      workspaceRoot: input.workspaceRoot?.trim() || null,
       visionChannel: {
         ...fallbackSnapshot.visionChannel,
         enabled: input.visionChannel.enabled,

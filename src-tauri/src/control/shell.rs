@@ -130,6 +130,12 @@ fn resolve_allowed_command(command: &str, args: &[String]) -> ControlResult<Allo
             "git",
             args,
         )),
+        "git" if args_match(args, &["status", "--short"]) => Ok(simple_command(
+            ShellProfile::ReadOnly,
+            "git status --short",
+            "git",
+            args,
+        )),
         "git" if args_match(args, &["branch", "--show-current"]) => Ok(simple_command(
             ShellProfile::ReadOnly,
             "git branch --show-current",
@@ -140,6 +146,36 @@ fn resolve_allowed_command(command: &str, args: &[String]) -> ControlResult<Allo
             ShellProfile::ReadOnly,
             "git rev-parse --short HEAD",
             "git",
+            args,
+        )),
+        "git" if args_match(args, &["diff", "--stat"]) => Ok(simple_command(
+            ShellProfile::ReadOnly,
+            "git diff --stat",
+            "git",
+            args,
+        )),
+        "git" if args_match(args, &["diff", "--name-only"]) => Ok(simple_command(
+            ShellProfile::ReadOnly,
+            "git diff --name-only",
+            "git",
+            args,
+        )),
+        "git" if args_match(args, &["show", "--stat", "--oneline", "HEAD"]) => Ok(simple_command(
+            ShellProfile::ReadOnly,
+            "git show --stat --oneline HEAD",
+            "git",
+            args,
+        )),
+        "git" if args_match(args, &["log", "-1", "--oneline"]) => Ok(simple_command(
+            ShellProfile::ReadOnly,
+            "git log -1 --oneline",
+            "git",
+            args,
+        )),
+        "rg" if matches_rg_args(args) => Ok(simple_command(
+            ShellProfile::ReadOnly,
+            &format!("rg {}", args.join(" ")).trim().to_string(),
+            "rg",
             args,
         )),
         "npm" if args_match(args, &["run", "build"]) => Ok(simple_command(
@@ -166,14 +202,26 @@ fn resolve_allowed_command(command: &str, args: &[String]) -> ControlResult<Allo
             "cargo",
             args,
         )),
+        "cargo" if args_match(args, &["check"]) => Ok(simple_command(
+            ShellProfile::Build,
+            "cargo check",
+            "cargo",
+            args,
+        )),
         "cargo" if args_match(args, &["test"]) => Ok(simple_command(
             ShellProfile::Build,
             "cargo test",
             "cargo",
             args,
         )),
+        "cargo" if args_match(args, &["test", "--lib"]) => Ok(simple_command(
+            ShellProfile::Build,
+            "cargo test --lib",
+            "cargo",
+            args,
+        )),
         _ => Err(ControlError::invalid_argument(
-            "run_shell_command 只允许受控白名单命令：pwd/dir/type/where/git/npm/cargo 的有限子集。",
+            "run_shell_command 只允许受控白名单命令：pwd/dir/type/where/rg/git/npm/cargo 的有限子集。",
         )),
     }
 }
@@ -207,6 +255,27 @@ fn args_match(args: &[String], expected: &[&str]) -> bool {
             .iter()
             .zip(expected.iter())
             .all(|(left, right)| left == right)
+}
+
+fn matches_rg_args(args: &[String]) -> bool {
+    if args.is_empty() || args.len() > 2 {
+        return false;
+    }
+
+    if args.iter().any(|item| item.trim().is_empty()) {
+        return false;
+    }
+
+    let pattern = args.first().map(|item| item.trim()).unwrap_or_default();
+    if pattern.starts_with('-') {
+        return false;
+    }
+
+    if let Some(path) = args.get(1) {
+        !path.trim().starts_with('-')
+    } else {
+        true
+    }
 }
 
 fn resolve_workdir(input: Option<&str>) -> ControlResult<PathBuf> {
@@ -252,5 +321,49 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> ControlResult<s
             return Err(ControlError::timeout("shell 命令执行超时。"));
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{matches_rg_args, resolve_allowed_command, ShellProfile};
+
+    #[test]
+    fn allow_workspace_review_shell_commands() {
+        let git_diff = resolve_allowed_command("git", &["diff".to_string(), "--stat".to_string()])
+            .expect("git diff --stat should be allowed");
+        assert!(matches!(git_diff.profile, ShellProfile::ReadOnly));
+
+        let git_log = resolve_allowed_command(
+            "git",
+            &["log".to_string(), "-1".to_string(), "--oneline".to_string()],
+        )
+        .expect("git log -1 --oneline should be allowed");
+        assert!(matches!(git_log.profile, ShellProfile::ReadOnly));
+
+        let cargo_check = resolve_allowed_command("cargo", &["check".to_string()])
+            .expect("cargo check should be allowed");
+        assert!(matches!(cargo_check.profile, ShellProfile::Build));
+    }
+
+    #[test]
+    fn allow_simple_rg_queries_only() {
+        assert!(matches_rg_args(&["workspace_task".to_string()]));
+        assert!(matches_rg_args(&[
+            "workspace_task".to_string(),
+            "src-tauri/src".to_string()
+        ]));
+        assert!(!matches_rg_args(&["--files".to_string()]));
+        assert!(!matches_rg_args(&[
+            "workspace_task".to_string(),
+            "--hidden".to_string()
+        ]));
+
+        let rg = resolve_allowed_command(
+            "rg",
+            &["workspace_task".to_string(), "src-tauri/src".to_string()],
+        )
+        .expect("simple rg command should be allowed");
+        assert!(matches!(rg.profile, ShellProfile::ReadOnly));
     }
 }

@@ -185,6 +185,7 @@ const emptySnapshot = (): AssistantSnapshot => ({
       expiresAt: null
     }
   },
+  workspaceRoot: null,
   visionChannel: {
     enabled: false,
     kind: 'disabled',
@@ -259,6 +260,7 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   retainHistory: state.provider.retainHistory,
   voiceInputMode: state.provider.voiceInputMode,
   pushToTalkShortcut: state.provider.pushToTalkShortcut || DEFAULT_PUSH_TO_TALK_SHORTCUT,
+  workspaceRoot: state.workspaceRoot,
   permissionLevel: state.permissionLevel,
   authMode: state.provider.authMode,
   oauthAuthorizeUrl: state.provider.oauth.authorizeUrl,
@@ -1322,6 +1324,7 @@ const persistSettings = async (draft: ProviderConfigInput) => {
 
   nextDraft.pushToTalkShortcut =
     nextDraft.pushToTalkShortcut?.trim() || DEFAULT_PUSH_TO_TALK_SHORTCUT
+  nextDraft.workspaceRoot = nextDraft.workspaceRoot?.trim() || null
 
   if (!nextDraft.visionChannel.model.trim()) {
     nextDraft.visionChannel.model =
