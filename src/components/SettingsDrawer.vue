@@ -197,6 +197,11 @@ const handleShortcutCaptureKeydown = (event: KeyboardEvent) => {
     return
   }
 
+  if (modifiers.length === 0) {
+    shortcutPreview.value = `${keyToken}（请至少加一个 Ctrl / Alt / Shift）`
+    return
+  }
+
   const combo = [...modifiers, keyToken]
     .filter((token, index, tokens) => tokens.indexOf(token) === index)
     .sort((left, right) => {
@@ -892,7 +897,8 @@ onBeforeUnmount(() => {
                 {{
                   voiceInputAvailable
                     ? '桌宠运行时已经具备本地语音输入条件。'
-                    : '当前未进入可录音状态。若模型已加载，请在主窗口实际说话或按快捷键再观察。'
+                    : whisperStatus.inputMessage ||
+                      '当前未进入可录音状态。若模型已加载，请先检查麦克风权限、默认输入设备和录音链是否正常。'
                 }}
               </p>
             </div>

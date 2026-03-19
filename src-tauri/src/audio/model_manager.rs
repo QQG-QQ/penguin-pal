@@ -90,51 +90,71 @@ impl ModelManager {
         let url = model.download_url();
         let path = self.model_path(model);
         let temp_path = path.with_extension("bin.tmp");
+        let result = async {
+            let client = reqwest::Client::new();
+            let response = client
+                .get(url)
+                .send()
+                .await
+                .map_err(|e| format!("请求失败: {}", e))?;
 
-        // 创建 HTTP 客户端
-        let client = reqwest::Client::new();
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("请求失败: {}", e))?;
+            if !response.status().is_success() {
+                return Err(format!("HTTP 错误: {}", response.status()));
+            }
 
-        if !response.status().is_success() {
-            return Err(format!("HTTP 错误: {}", response.status()));
-        }
+            let declared_size = response.content_length();
+            let total_size = declared_size.unwrap_or(model.size_bytes());
 
-        let total_size = response.content_length().unwrap_or(model.size_bytes());
+            let mut file =
+                fs::File::create(&temp_path).map_err(|e| format!("创建文件失败: {}", e))?;
 
-        // 创建临时文件
-        let mut file = fs::File::create(&temp_path)
-            .map_err(|e| format!("创建文件失败: {}", e))?;
+            let mut downloaded: u64 = 0;
+            let mut stream = response.bytes_stream();
 
-        let mut downloaded: u64 = 0;
-        let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| format!("下载失败: {}", e))?;
+                use std::io::Write;
+                file.write_all(&chunk)
+                    .map_err(|e| format!("写入失败: {}", e))?;
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("下载失败: {}", e))?;
+                downloaded += chunk.len() as u64;
+
+                let progress = DownloadProgress {
+                    model,
+                    downloaded_bytes: downloaded,
+                    total_bytes: total_size,
+                    progress_percent: (downloaded as f64 / total_size as f64) * 100.0,
+                };
+
+                let _ = progress_channel.send(progress);
+            }
+
             use std::io::Write;
-            file.write_all(&chunk)
-                .map_err(|e| format!("写入失败: {}", e))?;
+            file.flush().map_err(|e| format!("刷新模型文件失败: {}", e))?;
 
-            downloaded += chunk.len() as u64;
+            if downloaded == 0 {
+                return Err("下载完成但模型文件为空".to_string());
+            }
 
-            let progress = DownloadProgress {
-                model,
-                downloaded_bytes: downloaded,
-                total_bytes: total_size,
-                progress_percent: (downloaded as f64 / total_size as f64) * 100.0,
-            };
+            if let Some(expected_size) = declared_size {
+                if downloaded != expected_size {
+                    return Err(format!(
+                        "模型下载不完整：期望 {} 字节，实际 {} 字节",
+                        expected_size, downloaded
+                    ));
+                }
+            }
 
-            let _ = progress_channel.send(progress);
+            fs::rename(&temp_path, &path).map_err(|e| format!("重命名文件失败: {}", e))?;
+            Ok(path.clone())
+        }
+        .await;
+
+        if result.is_err() && temp_path.exists() {
+            let _ = fs::remove_file(&temp_path);
         }
 
-        // 重命名临时文件
-        fs::rename(&temp_path, &path)
-            .map_err(|e| format!("重命名文件失败: {}", e))?;
-
-        Ok(path)
+        result
     }
 
     pub fn delete_model(&self, model: WhisperModel) -> Result<(), String> {

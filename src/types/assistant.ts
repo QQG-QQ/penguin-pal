@@ -356,6 +356,8 @@ export interface WhisperStatus {
   currentModel: WhisperModel | null
   availableModels: ModelInfo[]
   recordingState: RecordingState
+  inputReady: boolean
+  inputMessage: string | null
 }
 
 export interface TranscriptionResult {

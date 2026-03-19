@@ -32,11 +32,14 @@ impl TranscriberService {
     }
 
     pub fn get_status(&self) -> WhisperStatus {
+        let (input_ready, input_message) = self.recorder.input_status();
         WhisperStatus {
             model_loaded: self.engine.is_loaded(),
             current_model: self.engine.current_model(),
             available_models: self.model_manager.get_available_models(),
             recording_state: *self.state.lock(),
+            input_ready,
+            input_message,
         }
     }
 
@@ -80,23 +83,33 @@ impl TranscriberService {
             return Err("请先加载 Whisper 模型".to_string());
         }
 
-        let current_state = *self.state.lock();
-        if current_state != RecordingState::Idle {
+        let mut state = self.state.lock();
+        if *state != RecordingState::Idle {
             return Err("已经在录音中".to_string());
         }
 
-        *self.state.lock() = RecordingState::Recording;
-        self.recorder.start()
+        self.recorder.start()?;
+        *state = RecordingState::Recording;
+        Ok(())
     }
 
     pub fn stop_recording(&self) -> Result<TranscriptionResult, String> {
-        let current_state = *self.state.lock();
-        if current_state != RecordingState::Recording {
-            return Err("未在录音状态".to_string());
+        {
+            let mut state = self.state.lock();
+            if *state != RecordingState::Recording {
+                return Err("未在录音状态".to_string());
+            }
+
+            *state = RecordingState::Processing;
         }
 
-        *self.state.lock() = RecordingState::Processing;
-        let samples = self.recorder.stop()?;
+        let samples = match self.recorder.stop() {
+            Ok(samples) => samples,
+            Err(error) => {
+                *self.state.lock() = RecordingState::Idle;
+                return Err(error);
+            }
+        };
 
         if samples.is_empty() {
             *self.state.lock() = RecordingState::Idle;

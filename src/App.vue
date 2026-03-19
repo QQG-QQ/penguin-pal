@@ -291,7 +291,9 @@ const whisperStatus = ref<WhisperStatus>({
   modelLoaded: false,
   currentModel: null,
   availableModels: [],
-  recordingState: 'idle'
+  recordingState: 'idle',
+  inputReady: false,
+  inputMessage: null
 })
 const whisperDownloading = ref(false)
 const whisperDownloadProgress = ref<DownloadProgress | null>(null)
@@ -441,7 +443,7 @@ const whisperVoiceInputMode = computed(() => snapshot.value.provider.voiceInputM
 const voiceInputAvailable = computed(
   () =>
     useLocalWhisperInput.value
-      ? whisperStatus.value.modelLoaded
+      ? whisperStatus.value.modelLoaded && whisperStatus.value.inputReady
       : speechRecognitionSupported.value && microphoneAvailable.value
 )
 
@@ -2277,10 +2279,7 @@ const stopLocalWhisperListening = async ({
       announce('这次没有识别到清晰的语音内容。', 'guarded')
     }
   } catch (error) {
-    await pushWhisperStatus({
-      ...whisperStatus.value,
-      recordingState: 'idle'
-    })
+    await refreshWhisperStatus()
     if (!silent) {
       announce(resolveErrorMessage(error, '本地 Whisper 停止录音失败'), 'guarded')
     }
@@ -2305,7 +2304,12 @@ const startLocalWhisperListening = async (autoMode = false) => {
 
   if (!voiceInputAvailable.value) {
     if (!autoMode) {
-      announce('请先下载并加载一个 Whisper 模型，再启用本地语音输入。', 'guarded')
+      announce(
+        whisperStatus.value.modelLoaded
+          ? whisperStatus.value.inputMessage || '当前麦克风输入还未就绪，请先检查录音设备或系统权限。'
+          : '请先下载并加载一个 Whisper 模型，再启用本地语音输入。',
+        'guarded'
+      )
     }
     return
   }
@@ -2336,10 +2340,7 @@ const startLocalWhisperListening = async (autoMode = false) => {
     }
   } catch (error) {
     listening.value = false
-    await pushWhisperStatus({
-      ...whisperStatus.value,
-      recordingState: 'idle'
-    })
+    await refreshWhisperStatus()
     if (!autoMode) {
       announce(resolveErrorMessage(error, '本地 Whisper 启动录音失败'), 'guarded')
     } else {

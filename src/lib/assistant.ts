@@ -1527,7 +1527,9 @@ export const getWhisperStatus = async (): Promise<WhisperStatus> => {
       modelLoaded: false,
       currentModel: null,
       availableModels: [],
-      recordingState: 'idle'
+      recordingState: 'idle',
+      inputReady: false,
+      inputMessage: null
     }
   }
 }
@@ -1580,7 +1582,9 @@ export const unloadWhisperModel = async (): Promise<WhisperStatus> => {
       modelLoaded: false,
       currentModel: null,
       availableModels: [],
-      recordingState: 'idle'
+      recordingState: 'idle',
+      inputReady: false,
+      inputMessage: null
     }
   }
 }

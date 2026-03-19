@@ -28,6 +28,7 @@ static MEMORY_MAINTENANCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 const SESSION_TURN_CONTEXT_LIMIT: usize = 12;
 const PROVIDER_HISTORY_LIMIT: usize = 24;
 const WHISPER_PUSH_TO_TALK_EVENT: &str = "penguinpal://whisper-push-to-talk";
+const SHELL_CONFIRMATION_TIMEOUT_MS: u64 = 60_000;
 
 /// 请求停止 memory 维护线程
 #[allow(dead_code)]
@@ -46,8 +47,9 @@ use crate::{
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
         AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult,
-        PendingShellCommand, PetMode, ProviderConfigInput, ProviderKind, RuntimeState,
-        ShellPermissionSettings, VoiceInputMode, DEFAULT_OAUTH_REDIRECT_URL,
+        PendingShellCommand, PendingShellConfirmationInfo, PetMode, ProviderConfigInput,
+        ProviderKind, RuntimeState, ShellPermissionSettings, VoiceInputMode,
+        DEFAULT_OAUTH_REDIRECT_URL,
     },
     audio::{types as audio_types, TranscriberService},
     codex_runtime::{apply_private_env, initialize_codex_config, load_codex_config, private_auth_path, resolve_for_app},
@@ -102,37 +104,83 @@ fn normalized_push_to_talk_shortcut(raw: &str) -> String {
     }
 }
 
-fn sync_whisper_input_shortcut(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
+fn whisper_push_to_talk_shortcut(runtime: &RuntimeState) -> Option<String> {
+    if matches!(runtime.provider.voice_input_mode, VoiceInputMode::PushToTalk) {
+        Some(normalized_push_to_talk_shortcut(
+            &runtime.provider.push_to_talk_shortcut,
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(desktop)]
+fn register_whisper_input_shortcut(app: &AppHandle, shortcut: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+    let global_shortcut = app.global_shortcut();
+    let emitted_shortcut = shortcut.to_string();
+    global_shortcut
+        .on_shortcut(shortcut, move |app, _, event| {
+            let state = match event.state {
+                ShortcutState::Pressed => "pressed",
+                ShortcutState::Released => "released",
+                _ => return,
+            };
+
+            let payload = serde_json::json!({
+                "state": state,
+                "shortcut": emitted_shortcut,
+            });
+            let _ = app.emit(WHISPER_PUSH_TO_TALK_EVENT, payload);
+        })
+        .map_err(|error| format!("注册按键说话快捷键失败: {error}"))?;
+
+    Ok(())
+}
+
+fn sync_whisper_input_shortcut(
+    app: &AppHandle,
+    previous_runtime: Option<&RuntimeState>,
+    next_runtime: &RuntimeState,
+) -> Result<(), String> {
     #[cfg(desktop)]
     {
-        use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
         let global_shortcut = app.global_shortcut();
-        global_shortcut
-            .unregister_all()
-            .map_err(|error| format!("清理按键说话快捷键失败: {error}"))?;
+        let previous_shortcut = previous_runtime.and_then(whisper_push_to_talk_shortcut);
+        let next_shortcut = whisper_push_to_talk_shortcut(next_runtime);
 
-        if !matches!(runtime.provider.voice_input_mode, VoiceInputMode::PushToTalk) {
+        if previous_shortcut == next_shortcut {
+            if let Some(shortcut) = next_shortcut.as_deref() {
+                if !global_shortcut.is_registered(shortcut) {
+                    register_whisper_input_shortcut(app, shortcut)?;
+                }
+            }
             return Ok(());
         }
 
-        let shortcut = normalized_push_to_talk_shortcut(&runtime.provider.push_to_talk_shortcut);
-        let emitted_shortcut = shortcut.clone();
-        global_shortcut
-            .on_shortcut(shortcut.as_str(), move |app, _, event| {
-                let state = match event.state {
-                    ShortcutState::Pressed => "pressed",
-                    ShortcutState::Released => "released",
-                    _ => return,
-                };
+        if let Some(shortcut) = next_shortcut.as_deref() {
+            register_whisper_input_shortcut(app, shortcut)?;
+        }
 
-                let payload = serde_json::json!({
-                    "state": state,
-                    "shortcut": emitted_shortcut,
-                });
-                let _ = app.emit(WHISPER_PUSH_TO_TALK_EVENT, payload);
-            })
-            .map_err(|error| format!("注册按键说话快捷键失败: {error}"))?;
+        if let Some(shortcut) = previous_shortcut.as_deref() {
+            if global_shortcut.is_registered(shortcut) {
+                if let Err(error) = global_shortcut.unregister(shortcut) {
+                    if let Some(next_shortcut) = next_shortcut.as_deref() {
+                        if next_shortcut != shortcut && global_shortcut.is_registered(next_shortcut) {
+                            let _ = global_shortcut.unregister(next_shortcut);
+                        }
+                    }
+                    return Err(format!("卸载旧按键说话快捷键失败: {error}"));
+                }
+            }
+        } else if previous_runtime.is_none() && next_shortcut.is_none() {
+            global_shortcut
+                .unregister_all()
+                .map_err(|error| format!("清理按键说话快捷键失败: {error}"))?;
+        }
     }
 
     Ok(())
@@ -646,11 +694,7 @@ fn save_provider_config(
         &runtime.vision_channel,
         runtime.vision_api_key.as_ref(),
     );
-
-    // Shell Agent 权限设置
     runtime.shell_permissions = input.shell_permissions.clone();
-    // 同步到 PermissionChecker
-    sync_shell_permissions_to_checker(&app, &input.shell_permissions)?;
 
     let oauth_identity_changed = previous_provider_kind != runtime.provider.kind
         || previous_auth_mode != runtime.provider.auth_mode
@@ -678,79 +722,15 @@ fn save_provider_config(
     }
 
     sync_codex_provider_view(&app, &mut runtime);
-    if let Err(error) = sync_whisper_input_shortcut(&app, &runtime) {
+    if let Err(error) = sync_whisper_input_shortcut(&app, Some(&previous_runtime), &runtime) {
         *runtime = previous_runtime;
         return Err(error);
     }
-
-    // 同步 Shell Agent 权限设置
-    let previous_shell_enabled = runtime.shell_permissions.enabled;
-    runtime.shell_permissions = input.shell_permissions.clone();
-
-    // 同步到 BehaviorState 权限系统
-    if let Ok(app_data) = app.path().app_data_dir() {
-        let behavior_state = shell_agent::BehaviorState::new(&app_data);
-        let duration_ms = if input.shell_permissions.duration_hours > 0 {
-            Some(input.shell_permissions.duration_hours as u64 * 60 * 60 * 1000)
-        } else {
-            None // 永久
-        };
-
-        if input.shell_permissions.enabled {
-            // 根据设置授予对应权限
-            if input.shell_permissions.allow_execute {
-                let _ = behavior_state.grant_permission(
-                    "shell:execute",
-                    crate::permission::PermissionScope::Global,
-                    duration_ms,
-                );
-            } else {
-                let _ = behavior_state.revoke_permission("shell:execute");
-            }
-
-            if input.shell_permissions.allow_file_modify {
-                let _ = behavior_state.grant_permission(
-                    "shell:modify",
-                    crate::permission::PermissionScope::Global,
-                    duration_ms,
-                );
-            } else {
-                let _ = behavior_state.revoke_permission("shell:modify");
-            }
-
-            if input.shell_permissions.allow_file_delete {
-                let _ = behavior_state.grant_permission(
-                    "shell:delete",
-                    crate::permission::PermissionScope::Global,
-                    duration_ms,
-                );
-            } else {
-                let _ = behavior_state.revoke_permission("shell:delete");
-            }
-
-            if input.shell_permissions.allow_network {
-                let _ = behavior_state.grant_permission(
-                    "shell:network",
-                    crate::permission::PermissionScope::Global,
-                    duration_ms,
-                );
-            } else {
-                let _ = behavior_state.revoke_permission("shell:network");
-            }
-
-            if input.shell_permissions.allow_system {
-                let _ = behavior_state.grant_permission(
-                    "shell:system",
-                    crate::permission::PermissionScope::Global,
-                    duration_ms,
-                );
-            } else {
-                let _ = behavior_state.revoke_permission("shell:system");
-            }
-        } else if previous_shell_enabled {
-            // 如果之前启用现在禁用，撤销所有权限
-            let _ = behavior_state.revoke_all_shell_permissions();
-        }
+    if let Err(error) = sync_shell_permissions_to_checker(&app, &input.shell_permissions) {
+        let _ = sync_shell_permissions_to_checker(&app, &previous_runtime.shell_permissions);
+        let _ = sync_whisper_input_shortcut(&app, Some(&runtime), &previous_runtime);
+        *runtime = previous_runtime;
+        return Err(error);
     }
 
     runtime.mode = PetMode::Idle;
@@ -770,7 +750,12 @@ fn save_provider_config(
         audit::record("save_provider_config", "ok", audit_detail, 1),
     );
 
-    save(&app, &runtime)?;
+    if let Err(error) = save(&app, &runtime) {
+        let _ = sync_shell_permissions_to_checker(&app, &previous_runtime.shell_permissions);
+        let _ = sync_whisper_input_shortcut(&app, Some(&runtime), &previous_runtime);
+        *runtime = previous_runtime;
+        return Err(error);
+    }
     if let Some(agent_state) = app.try_state::<AgentTaskState>() {
         if let Ok(mut cache) = agent_state.vision_cache() {
             *cache = None;
@@ -1365,6 +1350,81 @@ async fn cancel_pending_shell_command(
     })
 }
 
+fn pending_shell_confirmation_info(pending: &PendingShellCommand) -> PendingShellConfirmationInfo {
+    PendingShellConfirmationInfo {
+        id: pending.id.clone(),
+        command: pending.command.clone(),
+        risk_description: pending.risk_description.clone(),
+        created_at: pending.created_at,
+    }
+}
+
+fn pending_shell_command_expired(pending: &PendingShellCommand) -> bool {
+    now_millis().saturating_sub(pending.created_at) > SHELL_CONFIRMATION_TIMEOUT_MS
+}
+
+fn reply_for_expired_shell_command(
+    app: &AppHandle,
+    state: &State<'_, Mutex<RuntimeState>>,
+) -> Result<ChatResponse, String> {
+    let reply_message =
+        ChatMessage::assistant("之前那条待确认的 Shell 命令已经超时，未被执行。请重新发起。");
+    let snapshot = {
+        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        runtime.pending_shell_command = None;
+        runtime.messages.push(reply_message.clone());
+        runtime.mode = PetMode::Idle;
+        ai_memory::trim_history(&mut runtime.messages);
+        let _ = session_thread::append_message(app, &mut runtime, &reply_message);
+        save(app, &runtime)?;
+        snapshot_from_runtime(&runtime)
+    };
+
+    Ok(ChatResponse {
+        reply: reply_message,
+        provider_label: "Shell Agent".to_string(),
+        snapshot,
+        agent: None,
+        pending_shell_confirmation: None,
+    })
+}
+
+fn reply_for_pending_shell_command(
+    app: &AppHandle,
+    state: &State<'_, Mutex<RuntimeState>>,
+    pending: &PendingShellCommand,
+    user_input: &str,
+) -> Result<ChatResponse, String> {
+    let reply_text = format!(
+        "当前还有一个待确认的 Shell 命令尚未执行：\n```\n{}\n```\n\n风险说明：{}\n\n如果你要继续执行，请回复 `yes` / `确认`；如果要取消，请回复 `no` / `取消`。你刚才这句“{}”不会清除这条待确认命令。",
+        pending.command,
+        pending.risk_description,
+        user_input.trim()
+    );
+    let reply_message = ChatMessage::assistant(&reply_text);
+
+    let snapshot = {
+        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        let user_message = ChatMessage::user(user_input.trim().to_string());
+        runtime.messages.push(user_message.clone());
+        runtime.messages.push(reply_message.clone());
+        runtime.mode = PetMode::Idle;
+        ai_memory::trim_history(&mut runtime.messages);
+        let _ = session_thread::append_message(app, &mut runtime, &user_message);
+        let _ = session_thread::append_message(app, &mut runtime, &reply_message);
+        save(app, &runtime)?;
+        snapshot_from_runtime(&runtime)
+    };
+
+    Ok(ChatResponse {
+        reply: reply_message,
+        provider_label: "Shell Agent".to_string(),
+        snapshot,
+        agent: None,
+        pending_shell_confirmation: Some(pending_shell_confirmation_info(pending)),
+    })
+}
+
 fn build_chat_history_for_provider(
     provider_config: &app_state::ProviderConfig,
     permission_level: u8,
@@ -1474,6 +1534,9 @@ async fn send_chat_message(
 
     // 处理 yes/no 确认
     if let Some(pending) = pending_cmd {
+        if pending_shell_command_expired(&pending) {
+            return reply_for_expired_shell_command(&app, &state);
+        }
         let lower = trimmed.to_lowercase();
         if lower == "yes" || lower == "y" || lower == "确认" {
             // 用户确认执行
@@ -1482,11 +1545,7 @@ async fn send_chat_message(
             // 用户取消执行
             return cancel_pending_shell_command(&app, &state, &pending).await;
         }
-        // 其他输入继续正常流程，清除待确认命令
-        {
-            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
-            runtime.pending_shell_command = None;
-        }
+        return reply_for_pending_shell_command(&app, &state, &pending, trimmed);
     }
 
     let pending_control_count = control_router::list_pending(&app)
@@ -2095,7 +2154,7 @@ pub fn run() {
                     eprintln!("Session thread bootstrap failed: {error}");
                 }
                 sync_codex_provider_view(&app.handle(), &mut runtime);
-                if let Err(error) = sync_whisper_input_shortcut(&app.handle(), &runtime) {
+                if let Err(error) = sync_whisper_input_shortcut(&app.handle(), None, &runtime) {
                     eprintln!("Whisper push-to-talk shortcut sync failed: {error}");
                 }
                 let _ = save(&app.handle(), &runtime);

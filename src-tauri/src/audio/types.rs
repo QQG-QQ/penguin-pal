@@ -91,6 +91,8 @@ pub struct WhisperStatus {
     pub current_model: Option<WhisperModel>,
     pub available_models: Vec<ModelInfo>,
     pub recording_state: RecordingState,
+    pub input_ready: bool,
+    pub input_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -71,7 +71,7 @@ impl WhisperEngine {
 
         // 配置参数
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("zh"));
+        params.set_language(None);
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -105,7 +105,7 @@ impl WhisperEngine {
 
         Ok(TranscriptionResult {
             text: text.trim().to_string(),
-            language: Some("zh".to_string()),
+            language: None,
             duration_ms,
         })
     }

@@ -157,7 +157,7 @@ pub async fn plan_control_request(
 
         let existing_thread_id = codex_thread_id.clone();
         let result = async_runtime::spawn_blocking(move || {
-            run_codex_exec(&command, &home_root, &prompt, existing_thread_id)
+            run_codex_exec(&command, &home_root, &prompt, &prompt, existing_thread_id)
         })
             .await
             .map_err(|error| format!("等待 Codex CLI 规划结果失败：{error}"))??;
@@ -531,18 +531,20 @@ fn run_codex_exec_once(
 fn run_codex_exec(
     command: &str,
     home_root: &Path,
-    prompt: &str,
+    resume_prompt: &str,
+    restart_prompt: &str,
     thread_id: Option<String>,
 ) -> Result<CodexExecResult, String> {
     let existing_thread_id = thread_id.clone();
-    match run_codex_exec_once(command, home_root, prompt, thread_id) {
+    match run_codex_exec_once(command, home_root, resume_prompt, thread_id) {
         Ok(result) => Ok(result),
         Err(error) if existing_thread_id.is_some() => {
-            run_codex_exec_once(command, home_root, prompt, None).map_err(|fallback_error| {
-                format!(
-                    "{error}\n\n另外，尝试启动一个新的 Codex 线程也失败了：{fallback_error}"
-                )
-            })
+            run_codex_exec_once(command, home_root, restart_prompt, None)
+                .map_err(|fallback_error| {
+                    format!(
+                        "{error}\n\n另外，尝试启动一个新的 Codex 线程也失败了：{fallback_error}"
+                    )
+                })
         }
         Err(error) => Err(error),
     }
@@ -605,7 +607,7 @@ async fn call_codex_cli(
         "请基于上述对话历史，直接输出对最后一条用户消息的答复。"
     };
 
-    let prompt = if codex_thread_id.is_some() {
+    let resume_prompt = if codex_thread_id.is_some() {
         let latest_user_message = history
             .iter()
             .rev()
@@ -621,10 +623,19 @@ async fn call_codex_cli(
             "{unified_system}{reasoning_hint}\n\n## 对话历史\n{conversation}\n\n{final_instruction}"
         )
     };
+    let restart_prompt = format!(
+        "{unified_system}{reasoning_hint}\n\n## 对话历史\n{conversation}\n\n{final_instruction}"
+    );
 
     let existing_thread_id = codex_thread_id.clone();
     let result = async_runtime::spawn_blocking(move || {
-        run_codex_exec(&command, &home_root, &prompt, existing_thread_id)
+        run_codex_exec(
+            &command,
+            &home_root,
+            &resume_prompt,
+            &restart_prompt,
+            existing_thread_id,
+        )
     })
         .await
         .map_err(|error| format!("等待 Codex CLI 响应失败：{error}"))??;

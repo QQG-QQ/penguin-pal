@@ -11,8 +11,15 @@ pub fn create_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::e
 
     let menu = Menu::with_items(app, &[&show_item, &settings_item, &quit_item])?;
 
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "未找到默认托盘图标资源")
+        })?;
+
     let _tray = TrayIconBuilder::new()
-        .icon(app.default_window_icon().unwrap().clone())
+        .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
