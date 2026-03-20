@@ -1,5 +1,9 @@
 use serde_json::{json, Value};
-use std::{path::{Path, PathBuf}, sync::Mutex};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
@@ -115,6 +119,18 @@ struct DomainLoopStaticContext {
     memory_context: Option<String>,
     workspace_prompt: Option<String>,
     default_workdir: Option<String>,
+    workspace_review_policy: Option<WorkspaceReviewPolicy>,
+}
+
+#[derive(Clone)]
+struct WorkspaceReviewBootstrapFile {
+    path: String,
+    summary: String,
+}
+
+#[derive(Clone)]
+struct WorkspaceReviewPolicy {
+    bootstrap_files: Vec<WorkspaceReviewBootstrapFile>,
 }
 
 enum DomainLoopControl {
@@ -151,6 +167,31 @@ const WORKSPACE_ALLOWED_ACTIONS: &[DomainLoopActionKind] = &[
     DomainLoopActionKind::RetryStep,
     DomainLoopActionKind::FinishTask,
     DomainLoopActionKind::FailTask,
+];
+
+const WORKSPACE_REVIEW_MAINLINE_FILES: &[(&str, &str)] = &[
+    ("src-tauri/src/lib.rs", "读取主入口 lib.rs，确认当前统一 agent 主链"),
+    (
+        "src-tauri/src/agent/agent_turn.rs",
+        "读取 agent_turn.rs，确认顶层统一回合决策协议",
+    ),
+    (
+        "src-tauri/src/agent/router.rs",
+        "读取 router.rs，确认当前生效的执行路由与统一执行器",
+    ),
+];
+
+const WORKSPACE_REVIEW_SUPPORT_FILES: &[(&str, &str)] = &[
+    ("README.md", "读取 README.md，确认仓库目标与运行方式"),
+    ("package.json", "读取 package.json，确认前端脚本与构建入口"),
+    (
+        "src-tauri/src/agent/model_adapter.rs",
+        "读取 model_adapter.rs，确认跨 provider 结构化输出适配层",
+    ),
+    (
+        "src-tauri/src/ai/provider.rs",
+        "读取 provider.rs，确认各 provider 的调用与恢复逻辑",
+    ),
 ];
 
 fn domain_loop_spec(domain: AgentExecutionDomain) -> DomainLoopSpec {
@@ -1064,6 +1105,16 @@ async fn continue_domain_loop_generic(
             DomainLoopControl::Return(result) => return Ok(result),
         }
 
+        if let Some(control) =
+            maybe_run_workspace_review_bootstrap(app, spec, &static_context, task)?
+        {
+            match control {
+                DomainLoopControl::Continue => continue,
+                DomainLoopControl::Break => break,
+                DomainLoopControl::Return(result) => return Ok(result),
+            }
+        }
+
         task.task_status = AgentLoopTaskStatus::Planning;
         let runtime_context = refresh_domain_runtime_context(
             spec,
@@ -1149,27 +1200,279 @@ fn build_domain_loop_static_context(
         None
     };
 
-    let (workspace_prompt, default_workdir) = if matches!(
+    let (workspace_prompt, default_workdir, workspace_review_policy) = if matches!(
         spec.workspace_defaults_mode,
         DomainWorkspaceDefaultsMode::DetectWorkspace
     ) {
         let configured_workspace_root = load(app).ok().and_then(|runtime| runtime.workspace_root);
         let workspace = workspace_context::detect_workspace_context(configured_workspace_root.as_deref());
-        let prompt = workspace.as_ref().map(|item| item.render_for_prompt());
+        let review_policy = workspace
+            .as_ref()
+            .and_then(|item| build_workspace_review_policy(item.default_workdir(), user_input, task));
+        let prompt = workspace.as_ref().map(|item| {
+            let mut rendered = item.render_for_prompt();
+            if let Some(policy) = review_policy.as_ref() {
+                rendered.push('\n');
+                rendered.push_str(&render_workspace_review_policy(policy));
+            }
+            rendered
+        });
         let workdir = workspace
             .as_ref()
             .map(|item| item.default_workdir().to_string_lossy().to_string())
             .or_else(|| Some(".".to_string()));
-        (prompt, workdir)
+        (prompt, workdir, review_policy)
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     DomainLoopStaticContext {
         memory_context,
         workspace_prompt,
         default_workdir,
+        workspace_review_policy,
     }
+}
+
+fn build_workspace_review_policy(
+    workspace_root: &Path,
+    user_input: &str,
+    task: &AgentTaskRun,
+) -> Option<WorkspaceReviewPolicy> {
+    if !is_workspace_review_request(user_input, task) {
+        return None;
+    }
+
+    let mut seen = HashSet::new();
+    let mut bootstrap_files = Vec::new();
+
+    if is_project_overview_request(user_input, task) {
+        for (relative_path, summary) in WORKSPACE_REVIEW_SUPPORT_FILES
+            .iter()
+            .filter(|(path, _)| matches!(*path, "README.md" | "package.json"))
+        {
+            push_workspace_review_file(
+                &mut bootstrap_files,
+                &mut seen,
+                workspace_root,
+                relative_path,
+                summary,
+            );
+        }
+    }
+
+    for (relative_path, summary) in WORKSPACE_REVIEW_MAINLINE_FILES {
+        if input_mentions_workspace_file(user_input, task, relative_path) {
+            push_workspace_review_file(
+                &mut bootstrap_files,
+                &mut seen,
+                workspace_root,
+                relative_path,
+                summary,
+            );
+        }
+    }
+
+    for (relative_path, summary) in WORKSPACE_REVIEW_MAINLINE_FILES {
+        push_workspace_review_file(
+            &mut bootstrap_files,
+            &mut seen,
+            workspace_root,
+            relative_path,
+            summary,
+        );
+    }
+
+    if is_provider_alignment_request(user_input, task) {
+        for (relative_path, summary) in WORKSPACE_REVIEW_SUPPORT_FILES
+            .iter()
+            .filter(|(path, _)| {
+                matches!(
+                    *path,
+                    "src-tauri/src/agent/model_adapter.rs" | "src-tauri/src/ai/provider.rs"
+                )
+            })
+        {
+            push_workspace_review_file(
+                &mut bootstrap_files,
+                &mut seen,
+                workspace_root,
+                relative_path,
+                summary,
+            );
+        }
+    }
+
+    if bootstrap_files.is_empty() {
+        None
+    } else {
+        Some(WorkspaceReviewPolicy { bootstrap_files })
+    }
+}
+
+fn render_workspace_review_policy(policy: &WorkspaceReviewPolicy) -> String {
+    let lines = policy
+        .bootstrap_files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| format!("{}. {} ({})", index + 1, file.path, file.summary))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "## 代码审查 Bootstrap\n\
+- 当前任务命中主链优先审查模式。\n\
+- 在输出整体架构/风险结论前，必须先读取这些文件：\n{lines}\n\
+- legacy / deprecated / fallback 文件只有在主入口或当前调用链明确引用后，才允许被当成当前实现的一部分讨论。\n"
+    )
+}
+
+fn maybe_run_workspace_review_bootstrap(
+    app: &AppHandle,
+    spec: DomainLoopSpec,
+    static_context: &DomainLoopStaticContext,
+    task: &mut AgentTaskRun,
+) -> Result<Option<DomainLoopControl>, String> {
+    if !matches!(spec.domain, AgentExecutionDomain::Workspace) {
+        return Ok(None);
+    }
+
+    let Some(policy) = static_context.workspace_review_policy.as_ref() else {
+        return Ok(None);
+    };
+
+    let Some(file) = next_workspace_review_bootstrap_file(task, policy) else {
+        return Ok(None);
+    };
+
+    let control = handle_domain_tool_step(
+        app,
+        spec,
+        static_context,
+        task,
+        "read_file_text".to_string(),
+        json!({ "path": file.path }),
+        Some(file.summary),
+        None,
+    )?;
+    Ok(Some(control))
+}
+
+fn next_workspace_review_bootstrap_file(
+    task: &AgentTaskRun,
+    policy: &WorkspaceReviewPolicy,
+) -> Option<WorkspaceReviewBootstrapFile> {
+    policy
+        .bootstrap_files
+        .iter()
+        .find(|file| !workspace_review_file_already_read(task, &file.path))
+        .cloned()
+}
+
+fn workspace_review_file_already_read(task: &AgentTaskRun, path: &str) -> bool {
+    task.recent_steps.iter().any(|step| {
+        step.tool.as_deref() == Some("read_file_text")
+            && step
+                .args
+                .as_ref()
+                .and_then(|value| value.get("path"))
+                .and_then(Value::as_str)
+                == Some(path)
+    })
+}
+
+fn push_workspace_review_file(
+    bootstrap_files: &mut Vec<WorkspaceReviewBootstrapFile>,
+    seen: &mut HashSet<String>,
+    workspace_root: &Path,
+    relative_path: &str,
+    summary: &str,
+) {
+    let absolute_path = workspace_root.join(relative_path);
+    if !absolute_path.exists() {
+        return;
+    }
+    let normalized = absolute_path.to_string_lossy().to_string();
+    if !seen.insert(normalized.clone()) {
+        return;
+    }
+    bootstrap_files.push(WorkspaceReviewBootstrapFile {
+        path: normalized,
+        summary: summary.to_string(),
+    });
+}
+
+fn input_mentions_workspace_file(user_input: &str, task: &AgentTaskRun, relative_path: &str) -> bool {
+    let basename = Path::new(relative_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(relative_path);
+    let haystack = format!(
+        "{}\n{}\n{}",
+        user_input,
+        task.original_request,
+        task.goal
+    )
+    .to_lowercase();
+    haystack.contains(&relative_path.to_lowercase()) || haystack.contains(&basename.to_lowercase())
+}
+
+fn is_workspace_review_request(user_input: &str, task: &AgentTaskRun) -> bool {
+    if !matches!(task.intent, TopLevelIntent::WorkspaceTask) {
+        return false;
+    }
+
+    let haystack = format!(
+        "{}\n{}\n{}",
+        user_input,
+        task.original_request,
+        task.goal
+    )
+    .to_lowercase();
+
+    [
+        "审查代码",
+        "代码审查",
+        "review",
+        "分析项目",
+        "分析这个项目",
+        "看看仓库",
+        "查看仓库",
+        "看架构",
+        "架构",
+        "说明风险",
+        "风险",
+        "分析实现",
+        "读取代码",
+    ]
+    .iter()
+    .any(|keyword| haystack.contains(keyword))
+}
+
+fn is_project_overview_request(user_input: &str, task: &AgentTaskRun) -> bool {
+    let haystack = format!(
+        "{}\n{}\n{}",
+        user_input,
+        task.original_request,
+        task.goal
+    )
+    .to_lowercase();
+    ["分析项目", "分析这个项目", "看看仓库", "查看仓库", "项目结构", "仓库结构"]
+        .iter()
+        .any(|keyword| haystack.contains(keyword))
+}
+
+fn is_provider_alignment_request(user_input: &str, task: &AgentTaskRun) -> bool {
+    let haystack = format!(
+        "{}\n{}\n{}",
+        user_input,
+        task.original_request,
+        task.goal
+    )
+    .to_lowercase();
+    ["provider", "api", "模型", "codex", "anthropic", "openai", "兼容"]
+        .iter()
+        .any(|keyword| haystack.contains(keyword))
 }
 
 async fn refresh_domain_runtime_context(
