@@ -1014,7 +1014,7 @@ const clampPetWindowToMonitor = async () => {
   await syncBubbleWindow()
 }
 
-const schedulePetWindowClamp = (delay = 220) => {
+const schedulePetWindowClamp = (delay = 70) => {
   clearPetClampTimer()
 
   petClampTimer = window.setTimeout(() => {

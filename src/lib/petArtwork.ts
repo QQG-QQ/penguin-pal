@@ -82,21 +82,21 @@ const dockedArtwork: Record<Exclude<PetDockState, 'normal'>, PetArtworkDescripto
     alt: '管理员企鹅左侧半隐藏待机立绘',
     naturalWidth: 1365,
     naturalHeight: 2048,
-    alphaBBox: { left: 666, top: 735, right: 987, bottom: 1443 }
+    alphaBBox: { left: 666, top: 735, right: 986, bottom: 1442 }
   },
   dockedRight: {
     src: dockedRightArt,
     alt: '管理员企鹅右侧半隐藏待机立绘',
     naturalWidth: 1365,
     naturalHeight: 2048,
-    alphaBBox: { left: 0, top: 7, right: 1365, bottom: 2036 }
+    alphaBBox: { left: 677, top: 734, right: 987, bottom: 1445 }
   },
   dockedTop: {
     src: dockedTopArt,
     alt: '管理员企鹅顶部半隐藏待机立绘',
     naturalWidth: 1024,
     naturalHeight: 1536,
-    alphaBBox: { left: 0, top: 9, right: 1023, bottom: 1531 }
+    alphaBBox: { left: 207, top: 867, right: 729, bottom: 1126 }
   }
 }
 
