@@ -1068,7 +1068,7 @@ const enterDockedIdle = async () => {
   }
 
   const nextDockState = choosePetDockState(dockBaseFrame, workArea)
-  const dockedFrame = planDockedWindowFrame(nextDockState, workArea, currentFrame)
+  const dockedFrame = planDockedWindowFrame(nextDockState, workArea, dockBaseFrame)
   restorePetFrame = currentFrame
   dockState.value = nextDockState
   await nextTick()

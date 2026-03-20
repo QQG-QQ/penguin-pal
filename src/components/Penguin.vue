@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, type CSSProperties } from 'vue'
 import { startMainWindowDrag } from '../lib/assistant'
 import {
   computePetLayoutMetrics,
   getPetArtwork,
   isPetOpaqueHit,
   loadPetAlphaMask,
+  normalizeAlphaBBox,
   type PetAlphaMask
 } from '../lib/petArtwork'
 import type { PetDockState, PetLayoutMetrics, PetMode } from '../types/assistant'
@@ -42,6 +43,25 @@ const clearLongPressTimer = () => {
 
 const artwork = computed(() => getPetArtwork(props.mode, props.dockState))
 const isDocked = computed(() => props.dockState !== 'normal')
+const dockedImageStyle = computed<CSSProperties | undefined>(() => {
+  if (!isDocked.value) {
+    return undefined
+  }
+
+  const normalized = normalizeAlphaBBox(artwork.value)
+  const visibleWidth = normalized.right - normalized.left
+  const visibleHeight = normalized.bottom - normalized.top
+
+  return {
+    width: `${100 / visibleWidth}%`,
+    height: `${100 / visibleHeight}%`,
+    maxWidth: 'none',
+    maxHeight: 'none',
+    position: 'absolute',
+    left: `${-(normalized.left / visibleWidth) * 100}%`,
+    top: `${-(normalized.top / visibleHeight) * 100}%`
+  }
+})
 
 watch(
   artwork,
@@ -188,6 +208,7 @@ const cancelPointerInteraction = () => {
         :class="`motion-${mode}`"
         :src="artwork.src"
         :alt="artwork.alt"
+        :style="dockedImageStyle"
         draggable="false"
       />
     </div>
@@ -279,9 +300,11 @@ const cancelPointerInteraction = () => {
 }
 
 .pet-shell.is-docked .pet-body {
+  position: relative;
   width: 100%;
   height: 100%;
   align-items: center;
+  overflow: hidden;
 }
 
 .penguin-art {
@@ -296,9 +319,8 @@ const cancelPointerInteraction = () => {
 }
 
 .pet-shell.is-docked .penguin-art {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
+  width: auto;
+  height: auto;
   transform-origin: 50% 50%;
   filter: drop-shadow(0 10px 18px rgba(8, 20, 31, 0.1));
   animation: none !important;

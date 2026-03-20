@@ -1,5 +1,4 @@
 import type { PetDockState } from '../types/assistant'
-import { getDockedArtwork, normalizeAlphaBBox } from './petArtwork'
 import type { WorkAreaRect } from './petLayout'
 
 export interface PetWindowFrame {
@@ -20,9 +19,9 @@ export const PET_DOCK_EDGE_THRESHOLD_PX = 72
 const SCREEN_MARGIN = 12
 
 const dockedFrameByState: Record<Exclude<PetDockState, 'normal'>, PetWindowSize & { revealPx: number }> = {
-  dockedLeft: { width: 288, height: 432, revealPx: 34 },
-  dockedRight: { width: 288, height: 432, revealPx: 34 },
-  dockedTop: { width: 240, height: 360, revealPx: 28 }
+  dockedLeft: { width: 248, height: 332, revealPx: 56 },
+  dockedRight: { width: 248, height: 332, revealPx: 56 },
+  dockedTop: { width: 248, height: 320, revealPx: 64 }
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max)
@@ -65,22 +64,17 @@ export const getDockedWindowSize = (
 export const planDockedWindowFrame = (
   dockState: Exclude<PetDockState, 'normal'>,
   workArea: WorkAreaRect,
-  previousFrame: PetWindowFrame
+  previousVisibleFrame: PetWindowFrame
 ): PetWindowFrame => {
-  const artwork = getDockedArtwork(dockState)
-  const normalized = normalizeAlphaBBox(artwork)
   const preset = dockedFrameByState[dockState]
   const width = preset.width
   const height = preset.height
-  const bboxLeft = width * normalized.left
-  const bboxRight = width * normalized.right
-  const bboxBottom = height * normalized.bottom
-  const previousBottom = previousFrame.top + previousFrame.height
-  const previousCenterX = previousFrame.left + previousFrame.width / 2
+  const previousBottom = previousVisibleFrame.top + previousVisibleFrame.height
+  const previousCenterX = previousVisibleFrame.left + previousVisibleFrame.width / 2
 
   if (dockState === 'dockedLeft') {
     return {
-      left: Math.round(workArea.left - bboxRight + preset.revealPx),
+      left: Math.round(workArea.left - width + preset.revealPx),
       top: Math.round(
         clamp(previousBottom - height, workArea.top + SCREEN_MARGIN, workArea.bottom - height - SCREEN_MARGIN)
       ),
@@ -91,7 +85,7 @@ export const planDockedWindowFrame = (
 
   if (dockState === 'dockedRight') {
     return {
-      left: Math.round(workArea.right - preset.revealPx - bboxLeft),
+      left: Math.round(workArea.right - preset.revealPx),
       top: Math.round(
         clamp(previousBottom - height, workArea.top + SCREEN_MARGIN, workArea.bottom - height - SCREEN_MARGIN)
       ),
@@ -104,7 +98,7 @@ export const planDockedWindowFrame = (
     left: Math.round(
       clamp(previousCenterX - width / 2, workArea.left + SCREEN_MARGIN, workArea.right - width - SCREEN_MARGIN)
     ),
-    top: Math.round(workArea.top - bboxBottom + preset.revealPx),
+    top: Math.round(workArea.top - height + preset.revealPx),
     width,
     height
   }
