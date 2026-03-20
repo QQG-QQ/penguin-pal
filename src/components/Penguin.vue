@@ -1,19 +1,23 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import guardedArt from '../../penguin/penguin-guarded-cutout.png'
-import idleArt from '../../penguin/penguin-idle-cutout.png'
-import listeningArt from '../../penguin/penguin-listening-cutout.png'
-import speakingArt from '../../penguin/penguin-speaking-cutout.png'
-import thinkingArt from '../../penguin/penguin-thinking-cutout.png'
+import { computed, ref, watch } from 'vue'
 import { startMainWindowDrag } from '../lib/assistant'
-import type { PetLayoutMetrics, PetMode } from '../types/assistant'
+import {
+  computePetLayoutMetrics,
+  getPetArtwork,
+  isPetOpaqueHit,
+  loadPetAlphaMask,
+  type PetAlphaMask
+} from '../lib/petArtwork'
+import type { PetDockState, PetLayoutMetrics, PetMode } from '../types/assistant'
 
 const props = defineProps<{
   mode: PetMode
+  dockState: PetDockState
 }>()
 
 const emit = defineEmits<{
   activate: []
+  interact: []
 }>()
 
 let pointerStartX = 0
@@ -22,6 +26,9 @@ let pointerPressed = false
 let dragStarted = false
 let longPressTimer: number | null = null
 const shellRef = ref<HTMLElement | null>(null)
+const artRef = ref<HTMLImageElement | null>(null)
+const alphaMask = ref<PetAlphaMask | null>(null)
+let artworkLoadToken = 0
 
 const CLICK_MOVE_TOLERANCE = 6
 const LONG_PRESS_DRAG_DELAY_MS = 250
@@ -33,50 +40,74 @@ const clearLongPressTimer = () => {
   }
 }
 
-const artwork = computed(() => {
-  const map: Record<PetMode, { src: string; alt: string }> = {
-    idle: { src: idleArt, alt: '管理员企鹅待机立绘' },
-    listening: { src: listeningArt, alt: '管理员企鹅聆听立绘' },
-    thinking: { src: thinkingArt, alt: '管理员企鹅思考立绘' },
-    speaking: { src: speakingArt, alt: '管理员企鹅回复立绘' },
-    guarded: { src: guardedArt, alt: '管理员企鹅警戒立绘' }
-  }
+const artwork = computed(() => getPetArtwork(props.mode, props.dockState))
+const isDocked = computed(() => props.dockState !== 'normal')
 
-  return map[props.mode]
-})
+watch(
+  artwork,
+  (nextArtwork) => {
+    const currentToken = ++artworkLoadToken
+    alphaMask.value = null
 
-const getLayoutMetrics = (): PetLayoutMetrics | null => {
-  const shell = shellRef.value
-  if (!shell) {
+    void loadPetAlphaMask(nextArtwork)
+      .then((mask) => {
+        if (currentToken === artworkLoadToken) {
+          alphaMask.value = mask
+        }
+      })
+      .catch(() => {
+        if (currentToken === artworkLoadToken) {
+          alphaMask.value = null
+        }
+      })
+  },
+  { immediate: true }
+)
+
+const readArtworkRect = () => {
+  const art = artRef.value
+  if (!art) {
     return null
   }
 
-  const rect = shell.getBoundingClientRect()
-  const anchorX = rect.left + rect.width / 2
-  const anchorY = rect.top + rect.height * 0.17
-  const faceHalfWidth = rect.width * 0.2
-  const faceTop = rect.top + rect.height * 0.12
-  const faceBottom = rect.top + rect.height * 0.46
-
+  const rect = art.getBoundingClientRect()
   return {
-    anchorX,
-    anchorY,
-    petLeft: rect.left,
-    petTop: rect.top,
-    petRight: rect.right,
-    petBottom: rect.bottom,
-    faceLeft: anchorX - faceHalfWidth,
-    faceTop,
-    faceRight: anchorX + faceHalfWidth,
-    faceBottom
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height
   }
+}
+
+const getLayoutMetrics = (): PetLayoutMetrics | null => {
+  const rect = readArtworkRect()
+  if (!rect) {
+    return null
+  }
+
+  return computePetLayoutMetrics(rect, artwork.value)
 }
 
 defineExpose({
   getLayoutMetrics
 })
 
+const isOpaquePointerHit = (event: PointerEvent) => {
+  const rect = readArtworkRect()
+  if (!rect) {
+    return true
+  }
+
+  return isPetOpaqueHit(artwork.value, rect, alphaMask.value, event.clientX, event.clientY)
+}
+
 const rememberPointerOrigin = (event: PointerEvent) => {
+  if (!isOpaquePointerHit(event)) {
+    cancelPointerInteraction()
+    return
+  }
+
+  emit('interact')
   pointerStartX = event.clientX
   pointerStartY = event.clientY
   pointerPressed = true
@@ -98,6 +129,10 @@ const rememberPointerOrigin = (event: PointerEvent) => {
 }
 
 const activatePet = (event: PointerEvent) => {
+  if (!pointerPressed) {
+    return
+  }
+
   clearLongPressTimer()
   pointerPressed = false
 
@@ -109,7 +144,11 @@ const activatePet = (event: PointerEvent) => {
   const movedX = Math.abs(event.clientX - pointerStartX)
   const movedY = Math.abs(event.clientY - pointerStartY)
 
-  if (movedX <= CLICK_MOVE_TOLERANCE && movedY <= CLICK_MOVE_TOLERANCE) {
+  if (
+    movedX <= CLICK_MOVE_TOLERANCE &&
+    movedY <= CLICK_MOVE_TOLERANCE &&
+    isOpaquePointerHit(event)
+  ) {
     emit('activate')
   }
 }
@@ -125,7 +164,7 @@ const cancelPointerInteraction = () => {
   <section
     ref="shellRef"
     class="pet-shell"
-    :class="`mode-${mode}`"
+    :class="[`mode-${mode}`, `dock-${dockState}`, { 'is-docked': isDocked }]"
     @pointerdown.left="rememberPointerOrigin"
     @pointerup.left="activatePet"
     @pointercancel="cancelPointerInteraction"
@@ -136,6 +175,7 @@ const cancelPointerInteraction = () => {
 
     <div class="pet-body">
       <img
+        ref="artRef"
         class="penguin-art"
         :class="`motion-${mode}`"
         :src="artwork.src"
@@ -167,10 +207,24 @@ const cancelPointerInteraction = () => {
   cursor: grabbing;
 }
 
+.pet-shell.is-docked {
+  max-width: none;
+  width: 100%;
+  height: 100%;
+  padding-top: 0;
+  align-items: center;
+  justify-content: center;
+}
+
 .pet-aura,
 .pet-shadow {
   position: absolute;
   pointer-events: none;
+}
+
+.pet-shell.is-docked .pet-aura,
+.pet-shell.is-docked .pet-shadow {
+  display: none;
 }
 
 .pet-aura {
@@ -216,6 +270,12 @@ const cancelPointerInteraction = () => {
   align-items: flex-end;
 }
 
+.pet-shell.is-docked .pet-body {
+  width: 100%;
+  height: 100%;
+  align-items: center;
+}
+
 .penguin-art {
   display: block;
   width: 100%;
@@ -225,6 +285,15 @@ const cancelPointerInteraction = () => {
   user-select: none;
   -webkit-user-drag: none;
   pointer-events: none;
+}
+
+.pet-shell.is-docked .penguin-art {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 10px 18px rgba(8, 20, 31, 0.1));
+  animation: none !important;
 }
 
 .mode-listening .aura-a {

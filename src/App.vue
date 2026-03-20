@@ -14,6 +14,12 @@ import {
   type PendingCommandConfirmation
 } from './lib/commandConfirmation'
 import { findModelCatalogEntry, modelCatalog } from './lib/modelCatalog'
+import {
+  PET_DOCK_IDLE_DELAY_MS,
+  choosePetDockState,
+  planDockedWindowFrame,
+  type PetWindowFrame
+} from './lib/petDocking'
 import { buildWorkAreaRect, clampWindowPositionToWorkArea } from './lib/petLayout'
 import { parseSlashCommand, slashHelpText } from './lib/slashCommands'
 import {
@@ -83,6 +89,7 @@ import type {
   ManagedMemoryKind,
   MemoryManagementSnapshot,
   PetLayoutMetrics,
+  PetDockState,
   PetMode,
   ProviderConfigInput,
   ProviderKind,
@@ -364,6 +371,7 @@ let autoListenTimer: number | null = null
 let whisperCaptureTimer: number | null = null
 let speechPlaybackActive = false
 let petClampTimer: number | null = null
+let petDockTimer: number | null = null
 let controlPendingTimer: number | null = null
 let shellConfirmationTimer: number | null = null
 let pendingCommandTimer: number | null = null
@@ -373,10 +381,13 @@ let inputHistoryCursor = -1
 let draftBeforeHistoryNavigation = ''
 const bubbleInteractionActive = ref(false)
 let lastBubbleDebugKey = ''
+const dockState = ref<PetDockState>('normal')
+let restorePetFrame: PetWindowFrame | null = null
 
 const isSettingsView = computed(() => windowView.value === 'settings')
 const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWindowView())
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
+const isPetDocked = computed(() => dockState.value !== 'normal')
 const activeProviderLabel = computed(() => providerLabels[snapshot.value.provider.kind])
 const showAgentTaskStrip = computed(() => Boolean(agentTaskProgress.value))
 const hasControlPending = computed(() => Boolean(controlPendingRequest.value))
@@ -446,6 +457,23 @@ const showComposer = computed(
     textInputFocused.value ||
     Boolean(messageDraft.value.trim()) ||
     Boolean(pendingCommandConfirmation.value)
+)
+const canEnterDockedIdle = computed(
+  () =>
+    isTauriDesktop() &&
+    !isSettingsView.value &&
+    !isBubbleView.value &&
+    !isPetDocked.value &&
+    activeMode.value === 'idle' &&
+    !busy.value &&
+    !listening.value &&
+    !bubbleText.value.trim() &&
+    !showComposer.value &&
+    !showAgentTaskStrip.value &&
+    !hasControlPending.value &&
+    !hasPendingCommand.value &&
+    !pendingApproval.value &&
+    !pendingShellConfirmation.value
 )
 
 const canSubmitApproval = computed(() => {
@@ -837,6 +865,13 @@ const clearPetClampTimer = () => {
   }
 }
 
+const clearPetDockTimer = () => {
+  if (petDockTimer !== null) {
+    window.clearTimeout(petDockTimer)
+    petDockTimer = null
+  }
+}
+
 const resolveCurrentWorkArea = async () => {
   const monitor = await currentMonitor()
   const position = monitor?.workArea.position ?? { x: 0, y: 0 }
@@ -853,8 +888,31 @@ const collectPetLayoutMetrics = async (): Promise<PetLayoutMetrics | null> => {
   return penguinRef.value?.getLayoutMetrics() ?? null
 }
 
+const captureCurrentPetFrame = async (): Promise<PetWindowFrame | null> => {
+  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
+    return null
+  }
+
+  const appWindow = getCurrentWindow()
+  const position = await appWindow.outerPosition()
+  const size = await appWindow.outerSize()
+
+  return {
+    left: position.x,
+    top: position.y,
+    width: size.width,
+    height: size.height
+  }
+}
+
 const clampPetWindowToMonitor = async () => {
-  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value || petClampInFlight) {
+  if (
+    !isTauriDesktop() ||
+    isSettingsView.value ||
+    isBubbleView.value ||
+    petClampInFlight ||
+    isPetDocked.value
+  ) {
     return
   }
 
@@ -893,8 +951,76 @@ const schedulePetWindowClamp = (delay = 80) => {
   }, delay)
 }
 
+const restoreDockedPet = async (syncBubble = true) => {
+  if (!isTauriDesktop() || dockState.value === 'normal') {
+    return
+  }
+
+  const nextFrame = restorePetFrame
+  dockState.value = 'normal'
+  clearPetDockTimer()
+  await nextTick()
+
+  if (nextFrame) {
+    const appWindow = getCurrentWindow()
+    await appWindow.setSize(new LogicalSize(nextFrame.width, nextFrame.height))
+    await appWindow.setPosition(new PhysicalPosition(nextFrame.left, nextFrame.top))
+  }
+
+  restorePetFrame = null
+
+  if (syncBubble) {
+    await syncBubbleWindow()
+  }
+
+  if (canEnterDockedIdle.value) {
+    schedulePetDockedIdle()
+  }
+}
+
+const enterDockedIdle = async () => {
+  if (!canEnterDockedIdle.value || dockState.value !== 'normal') {
+    return
+  }
+
+  const currentFrame = await captureCurrentPetFrame()
+  if (!currentFrame) {
+    return
+  }
+
+  const workArea = await resolveCurrentWorkArea()
+  const nextDockState = choosePetDockState(currentFrame, workArea)
+  const dockedFrame = planDockedWindowFrame(nextDockState, workArea, currentFrame)
+  restorePetFrame = currentFrame
+  dockState.value = nextDockState
+  await nextTick()
+
+  const appWindow = getCurrentWindow()
+  await appWindow.setSize(new LogicalSize(dockedFrame.width, dockedFrame.height))
+  await appWindow.setPosition(new PhysicalPosition(dockedFrame.left, dockedFrame.top))
+}
+
+const schedulePetDockedIdle = (delay = PET_DOCK_IDLE_DELAY_MS) => {
+  clearPetDockTimer()
+
+  if (!canEnterDockedIdle.value || typeof window === 'undefined') {
+    return
+  }
+
+  petDockTimer = window.setTimeout(() => {
+    void enterDockedIdle()
+  }, delay)
+}
+
+const handlePetInteract = () => {
+  clearPetDockTimer()
+  if (dockState.value !== 'normal') {
+    void restoreDockedPet(false)
+  }
+}
+
 const syncPetWindowFrame = async () => {
-  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
+  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value || isPetDocked.value) {
     return
   }
 
@@ -957,6 +1083,10 @@ const syncBubbleWindow = async () => {
     return
   }
 
+  if (dockState.value !== 'normal' && bubbleText.value.trim()) {
+    await restoreDockedPet(false)
+  }
+
   const nextState = await buildBubbleWindowState()
   bubbleWindowState.value = nextState
   await publishBubbleWindowState(nextState)
@@ -965,6 +1095,10 @@ const syncBubbleWindow = async () => {
 const revealComposer = async () => {
   if (isSettingsView.value || isBubbleView.value) {
     return
+  }
+
+  if (dockState.value !== 'normal') {
+    await restoreDockedPet(false)
   }
 
   composerVisible.value = true
@@ -1012,6 +1146,7 @@ const resetVisualModeSoon = (delay = 700) => {
 }
 
 const showBubble = (content: string, mode: PetMode = 'speaking', duration?: number | null) => {
+  clearPetDockTimer()
   const session = ++speechSession
   if (voiceReplySupported.value) {
     window.speechSynthesis.cancel()
@@ -2725,6 +2860,11 @@ const handleWhisperDelete = async (model: WhisperModel) => {
 }
 
 const handleInputFocus = () => {
+  if (dockState.value !== 'normal') {
+    void restoreDockedPet(false)
+  }
+
+  clearPetDockTimer()
   composerVisible.value = true
   textInputFocused.value = true
   clearAutoListenTimer()
@@ -2747,6 +2887,7 @@ const handleInputBlur = () => {
     void syncPetWindowFrame()
   }
   scheduleAutoListening(320)
+  schedulePetDockedIdle()
 }
 
 const setupPetWindowListeners = async () => {
@@ -2757,10 +2898,16 @@ const setupPetWindowListeners = async () => {
   const appWindow = getCurrentWindow()
   windowMovedCleanup = await appWindow.onMoved(() => {
     void syncBubbleWindow()
-    schedulePetWindowClamp()
+    if (dockState.value === 'normal') {
+      schedulePetWindowClamp()
+      schedulePetDockedIdle()
+    }
   })
   windowResizedCleanup = await appWindow.onResized(() => {
-    void clampPetWindowToMonitor()
+    if (dockState.value === 'normal') {
+      void clampPetWindowToMonitor()
+      schedulePetDockedIdle()
+    }
   })
 }
 
@@ -2836,6 +2983,26 @@ watch(
 )
 
 watch(
+  canEnterDockedIdle,
+  (canDock) => {
+    if (!isTauriDesktop()) {
+      return
+    }
+
+    if (canDock) {
+      schedulePetDockedIdle()
+      return
+    }
+
+    clearPetDockTimer()
+    if (dockState.value !== 'normal') {
+      void restoreDockedPet()
+    }
+  },
+  { immediate: false }
+)
+
+watch(
   () => bubbleText.value,
   () => {
     void syncBubbleWindow()
@@ -2891,6 +3058,7 @@ onMounted(() => {
   if (!isSettingsView.value) {
     void syncPetWindowFrame().then(() => syncBubbleWindow())
     void setupPetWindowListeners()
+    schedulePetDockedIdle()
   }
 })
 
@@ -2900,6 +3068,7 @@ onBeforeUnmount(() => {
   clearAutoListenTimer()
   clearWhisperCaptureTimer()
   clearPetClampTimer()
+  clearPetDockTimer()
   clearControlPendingTimer()
   clearShellConfirmationTimer()
   clearPendingCommandTimer()
@@ -3022,7 +3191,13 @@ onBeforeUnmount(() => {
 
   <div v-else class="app-shell">
     <div class="pet-stack">
-      <Penguin ref="penguinRef" :mode="activeMode" @activate="revealComposer" />
+      <Penguin
+        ref="penguinRef"
+        :mode="activeMode"
+        :dock-state="dockState"
+        @activate="revealComposer"
+        @interact="handlePetInteract"
+      />
 
       <transition name="composer">
         <InputBox
