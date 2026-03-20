@@ -133,6 +133,7 @@ export interface AssistantSnapshot {
   mode: PetMode
   messages: ChatMessage[]
   provider: ProviderConfig
+  launchAtStartup: boolean
   workspaceRoot: string | null
   visionChannel: VisionChannelConfig
   visionChannelStatus: VisionProviderStatus
@@ -150,6 +151,7 @@ export interface ProviderConfigInput {
   baseUrl: string | null
   systemPrompt: string
   allowNetwork: boolean
+  launchAtStartup: boolean
   voiceReply: boolean
   retainHistory: boolean
   voiceInputMode: VoiceInputMode

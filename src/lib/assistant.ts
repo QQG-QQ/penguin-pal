@@ -224,6 +224,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     authMode: 'apiKey',
     oauth: defaultOAuthState()
   },
+  launchAtStartup: false,
   workspaceRoot: null,
   visionChannel: defaultVisionChannel(),
   visionChannelStatus: fallbackVisionStatus(defaultVisionChannel()),
@@ -813,6 +814,7 @@ const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapsho
 
   return {
     ...snapshot,
+    launchAtStartup: Boolean(snapshot.launchAtStartup),
     workspaceRoot: snapshot.workspaceRoot?.trim() || null,
     provider: {
       ...provider,
@@ -919,6 +921,7 @@ export const saveProviderConfig = async (
 
     fallbackSnapshot = {
       ...fallbackSnapshot,
+      launchAtStartup: input.launchAtStartup,
       provider: {
         ...fallbackSnapshot.provider,
         kind: input.kind,
@@ -1581,6 +1584,20 @@ export const startMainWindowDrag = async (): Promise<void> => {
   }
 
   await safeInvoke<void>('start_main_window_drag')
+}
+
+export const rememberMainWindowPosition = async (
+  x: number,
+  y: number
+): Promise<boolean> => {
+  if (!isTauriRuntime()) {
+    return false
+  }
+
+  return await safeInvoke<boolean>('remember_main_window_position', {
+    x,
+    y
+  })
 }
 
 // ============================================================================

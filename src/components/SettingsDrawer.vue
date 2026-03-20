@@ -994,6 +994,11 @@ onBeforeUnmount(() => {
         </label>
 
         <label class="toggle">
+          <input v-model="localDraft.launchAtStartup" type="checkbox" />
+          开机自启
+        </label>
+
+        <label class="toggle">
           <input v-model="localDraft.voiceReply" type="checkbox" />
           启用语音回复
         </label>
@@ -1014,6 +1019,7 @@ onBeforeUnmount(() => {
           }}
         </p>
         <p>按键说话使用 Tauri 全局快捷键格式，例如：{{ DEFAULT_PUSH_TO_TALK_SHORTCUT }}。</p>
+        <p>桌宠会自动记住你上次拖动后的主窗口位置，下次启动时优先在该位置打开。</p>
         <p>隐藏到托盘只能通过主桌宠窗口中的输入或语音命令触发。</p>
         <p>高风险桌面动作仍然必须经过一次性人工确认，不会开放自由命令执行。</p>
       </div>

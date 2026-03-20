@@ -62,6 +62,7 @@ import {
   publishAssistantSnapshot,
   readWindowView,
   readRequestedSettingsSection,
+  rememberMainWindowPosition,
   resolveMemoryConflict,
   requestDesktopAction,
   saveProviderConfig,
@@ -194,6 +195,7 @@ const emptySnapshot = (): AssistantSnapshot => ({
       expiresAt: null
     }
   },
+  launchAtStartup: false,
   workspaceRoot: null,
   visionChannel: {
     enabled: false,
@@ -265,6 +267,7 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   baseUrl: state.provider.baseUrl,
   systemPrompt: state.provider.systemPrompt,
   allowNetwork: state.provider.allowNetwork,
+  launchAtStartup: state.launchAtStartup,
   voiceReply: state.provider.voiceReply,
   retainHistory: state.provider.retainHistory,
   voiceInputMode: state.provider.voiceInputMode,
@@ -378,6 +381,7 @@ let speechPlaybackActive = false
 let petClampTimer: number | null = null
 let petDockTimer: number | null = null
 let petHitTestTimer: number | null = null
+let persistWindowPositionTimer: number | null = null
 let controlPendingTimer: number | null = null
 let shellConfirmationTimer: number | null = null
 let pendingCommandTimer: number | null = null
@@ -889,6 +893,13 @@ const clearPetHitTestTimer = () => {
   }
 }
 
+const clearPersistWindowPositionTimer = () => {
+  if (persistWindowPositionTimer !== null) {
+    window.clearTimeout(persistWindowPositionTimer)
+    persistWindowPositionTimer = null
+  }
+}
+
 const resolveCurrentWorkArea = async () => {
   const monitor = await currentMonitor()
   const position = monitor?.workArea.position ?? { x: 0, y: 0 }
@@ -972,6 +983,28 @@ const captureCurrentPetFrame = async (): Promise<PetWindowFrame | null> => {
     width: size.width,
     height: size.height
   }
+}
+
+const persistCurrentMainWindowPosition = async () => {
+  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value || dockState.value !== 'normal') {
+    return
+  }
+
+  const appWindow = getCurrentWindow()
+  const position = await appWindow.outerPosition()
+  await rememberMainWindowPosition(position.x, position.y)
+}
+
+const schedulePersistMainWindowPosition = (delay = 220) => {
+  clearPersistWindowPositionTimer()
+
+  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value || dockState.value !== 'normal') {
+    return
+  }
+
+  persistWindowPositionTimer = window.setTimeout(() => {
+    void persistCurrentMainWindowPosition()
+  }, delay)
 }
 
 const clampPetWindowToMonitor = async () => {
@@ -3057,6 +3090,7 @@ const setupPetWindowListeners = async () => {
     void syncBubbleWindow()
     if (dockState.value === 'normal') {
       schedulePetWindowClamp()
+      schedulePersistMainWindowPosition()
     }
     schedulePetDockedIdle()
   })
@@ -3236,6 +3270,7 @@ onBeforeUnmount(() => {
   clearPetClampTimer()
   clearPetDockTimer()
   clearPetHitTestTimer()
+  clearPersistWindowPositionTimer()
   clearControlPendingTimer()
   clearShellConfirmationTimer()
   clearPendingCommandTimer()

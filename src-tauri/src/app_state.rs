@@ -398,6 +398,7 @@ pub struct AssistantSnapshot {
     pub mode: PetMode,
     pub messages: Vec<ChatMessage>,
     pub provider: ProviderConfig,
+    pub launch_at_startup: bool,
     pub workspace_root: Option<String>,
     pub vision_channel: VisionChannelConfig,
     pub vision_channel_status: VisionProviderStatus,
@@ -418,6 +419,8 @@ pub struct ProviderConfigInput {
     pub base_url: Option<String>,
     pub system_prompt: String,
     pub allow_network: bool,
+    #[serde(default)]
+    pub launch_at_startup: bool,
     pub voice_reply: bool,
     pub retain_history: bool,
     #[serde(default)]
@@ -548,6 +551,8 @@ pub struct RuntimeState {
     pub session_thread_id: Option<String>,
     pub codex_thread_id: Option<String>,
     pub provider: ProviderConfig,
+    pub launch_at_startup: bool,
+    pub main_window_position: Option<SavedWindowPosition>,
     pub workspace_root: Option<String>,
     pub vision_channel: VisionChannelConfig,
     pub vision_channel_status: VisionProviderStatus,
@@ -575,6 +580,13 @@ pub struct PendingShellCommand {
     pub command: String,
     pub risk_description: String,
     pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedWindowPosition {
+    pub x: i32,
+    pub y: i32,
 }
 
 /// Shell Agent 权限设置
@@ -621,6 +633,8 @@ impl Default for RuntimeState {
             session_thread_id: None,
             codex_thread_id: None,
             provider: ProviderConfig::default(),
+            launch_at_startup: false,
+            main_window_position: None,
             workspace_root: None,
             vision_channel: VisionChannelConfig::default(),
             vision_channel_status: current_vision_channel_status(&VisionChannelConfig::default(), None),
@@ -695,6 +709,7 @@ impl RuntimeState {
             mode: self.mode,
             messages: self.messages.clone(),
             provider,
+            launch_at_startup: self.launch_at_startup,
             workspace_root: self.workspace_root.clone(),
             vision_channel,
             vision_channel_status: self.vision_channel_status.clone(),
@@ -718,6 +733,10 @@ struct PersistedState {
     #[serde(default)]
     codex_thread_id: Option<String>,
     provider: ProviderConfig,
+    #[serde(default)]
+    launch_at_startup: bool,
+    #[serde(default)]
+    main_window_position: Option<SavedWindowPosition>,
     #[serde(default)]
     workspace_root: Option<String>,
     #[serde(default)]
@@ -826,6 +845,8 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         session_thread_id: persisted.session_thread_id,
         codex_thread_id: persisted.codex_thread_id,
         provider: persisted.provider,
+        launch_at_startup: persisted.launch_at_startup,
+        main_window_position: persisted.main_window_position,
         workspace_root: persisted.workspace_root,
         vision_channel,
         vision_channel_status,
@@ -912,6 +933,8 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
             None
         },
         provider,
+        launch_at_startup: runtime.launch_at_startup,
+        main_window_position: runtime.main_window_position.clone(),
         workspace_root: runtime.workspace_root.clone(),
         vision_channel,
         permission_level: runtime.permission_level.min(2),

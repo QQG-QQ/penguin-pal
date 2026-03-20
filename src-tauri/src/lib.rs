@@ -49,7 +49,7 @@ use crate::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
         AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult,
         PendingShellCommand, PendingShellConfirmationInfo, PetMode, ProviderConfigInput,
-        ProviderKind, RuntimeState, ShellPermissionSettings, VoiceInputMode,
+        ProviderKind, RuntimeState, SavedWindowPosition, ShellPermissionSettings, VoiceInputMode,
         DEFAULT_OAUTH_REDIRECT_URL,
     },
     audio::{types as audio_types, TranscriberService},
@@ -113,6 +113,37 @@ fn whisper_push_to_talk_shortcut(runtime: &RuntimeState) -> Option<String> {
     } else {
         None
     }
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn sync_launch_at_startup(app: &AppHandle, enabled: bool) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    let autostart_manager = app.autolaunch();
+    let current = autostart_manager
+        .is_enabled()
+        .map_err(|error| format!("读取开机自启状态失败: {error}"))?;
+
+    if current != enabled {
+        if enabled {
+            autostart_manager
+                .enable()
+                .map_err(|error| format!("启用开机自启失败: {error}"))?;
+        } else {
+            autostart_manager
+                .disable()
+                .map_err(|error| format!("关闭开机自启失败: {error}"))?;
+        }
+    }
+
+    autostart_manager
+        .is_enabled()
+        .map_err(|error| format!("确认开机自启状态失败: {error}"))
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+fn sync_launch_at_startup(_app: &AppHandle, enabled: bool) -> Result<bool, String> {
+    Ok(enabled)
 }
 
 #[cfg(desktop)]
@@ -541,6 +572,25 @@ fn start_main_window_drag(app: AppHandle) -> Result<(), String> {
     window.start_dragging().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn remember_main_window_position(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+    x: i32,
+    y: i32,
+) -> Result<bool, String> {
+    let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+    let next_position = SavedWindowPosition { x, y };
+
+    if runtime.main_window_position.as_ref() == Some(&next_position) {
+        return Ok(false);
+    }
+
+    runtime.main_window_position = Some(next_position);
+    save(&app, &runtime)?;
+    Ok(true)
+}
+
 fn normalize_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -633,6 +683,7 @@ fn save_provider_config(
         input.system_prompt.trim().to_string()
     };
     runtime.provider.allow_network = input.allow_network;
+    runtime.launch_at_startup = input.launch_at_startup;
     runtime.provider.voice_reply = input.voice_reply;
     runtime.provider.retain_history = input.retain_history;
     runtime.provider.voice_input_mode = input.voice_input_mode;
@@ -723,12 +774,18 @@ fn save_provider_config(
     }
 
     sync_codex_provider_view(&app, &mut runtime);
+    if let Err(error) = sync_launch_at_startup(&app, runtime.launch_at_startup) {
+        *runtime = previous_runtime;
+        return Err(error);
+    }
     if let Err(error) = sync_whisper_input_shortcut(&app, Some(&previous_runtime), &runtime) {
+        let _ = sync_launch_at_startup(&app, previous_runtime.launch_at_startup);
         *runtime = previous_runtime;
         return Err(error);
     }
     if let Err(error) = sync_shell_permissions_to_checker(&app, &input.shell_permissions) {
         let _ = sync_shell_permissions_to_checker(&app, &previous_runtime.shell_permissions);
+        let _ = sync_launch_at_startup(&app, previous_runtime.launch_at_startup);
         let _ = sync_whisper_input_shortcut(&app, Some(&runtime), &previous_runtime);
         *runtime = previous_runtime;
         return Err(error);
@@ -753,6 +810,7 @@ fn save_provider_config(
 
     if let Err(error) = save(&app, &runtime) {
         let _ = sync_shell_permissions_to_checker(&app, &previous_runtime.shell_permissions);
+        let _ = sync_launch_at_startup(&app, previous_runtime.launch_at_startup);
         let _ = sync_whisper_input_shortcut(&app, Some(&runtime), &previous_runtime);
         *runtime = previous_runtime;
         return Err(error);
@@ -2134,9 +2192,16 @@ fn clear_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, S
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_shell::init());
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        None::<Vec<&str>>,
+    ));
+
+    builder
         .setup(|app| {
             eprintln!("[Setup] Starting application setup...");
 
@@ -2151,6 +2216,7 @@ pub fn run() {
                     RuntimeState::default()
                 }
             };
+            let initial_window_position = runtime.main_window_position.clone();
             app.manage(Mutex::new(runtime));
             eprintln!("[Setup] RuntimeState managed");
 
@@ -2190,6 +2256,10 @@ pub fn run() {
                     eprintln!("Session thread bootstrap failed: {error}");
                 }
                 sync_codex_provider_view(&app.handle(), &mut runtime);
+                match sync_launch_at_startup(&app.handle(), runtime.launch_at_startup) {
+                    Ok(enabled) => runtime.launch_at_startup = enabled,
+                    Err(error) => eprintln!("Autostart sync failed: {error}"),
+                }
                 if let Err(error) = sync_whisper_input_shortcut(&app.handle(), None, &runtime) {
                     eprintln!("Whisper push-to-talk shortcut sync failed: {error}");
                 }
@@ -2232,7 +2302,7 @@ pub fn run() {
             tray::create_tray(app)?;
 
             if let Some(window) = app.get_webview_window("main") {
-                window::setup_window(&window)?;
+                window::setup_window(&window, initial_window_position.as_ref())?;
             }
 
             // 启动三层架构维护后台任务（记忆 + 规则 + 权限）
@@ -2290,6 +2360,7 @@ pub fn run() {
             hide_settings_window,
             hide_main_window,
             start_main_window_drag,
+            remember_main_window_position,
             get_assistant_snapshot,
             save_provider_config,
             start_oauth_sign_in,
