@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition } from '@tauri-apps/api/window'
+import { cursorPosition, currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition } from '@tauri-apps/api/window'
 import FloatingBubble from './components/FloatingBubble.vue'
 import InputBox from './components/InputBox.vue'
 import Penguin from './components/Penguin.vue'
@@ -16,7 +16,9 @@ import {
 import { findModelCatalogEntry, modelCatalog } from './lib/modelCatalog'
 import {
   PET_DOCK_IDLE_DELAY_MS,
+  PET_DOCK_EDGE_THRESHOLD_PX,
   choosePetDockState,
+  isPetNearDockEdge,
   planDockedWindowFrame,
   type PetWindowFrame
 } from './lib/petDocking'
@@ -344,7 +346,10 @@ const microphoneAvailable = ref(false)
 const textInputFocused = ref(false)
 const composerVisible = ref(false)
 const inputBoxRef = ref<{ focusComposer: () => void } | null>(null)
-const penguinRef = ref<{ getLayoutMetrics: () => PetLayoutMetrics | null } | null>(null)
+const penguinRef = ref<{
+  getLayoutMetrics: () => PetLayoutMetrics | null
+  isOpaqueClientHit: (clientX: number, clientY: number) => boolean
+} | null>(null)
 
 let recognition: SpeechRecognition | null = null
 let recognitionBuffer = ''
@@ -372,6 +377,7 @@ let whisperCaptureTimer: number | null = null
 let speechPlaybackActive = false
 let petClampTimer: number | null = null
 let petDockTimer: number | null = null
+let petHitTestTimer: number | null = null
 let controlPendingTimer: number | null = null
 let shellConfirmationTimer: number | null = null
 let pendingCommandTimer: number | null = null
@@ -383,6 +389,7 @@ const bubbleInteractionActive = ref(false)
 let lastBubbleDebugKey = ''
 const dockState = ref<PetDockState>('normal')
 let restorePetFrame: PetWindowFrame | null = null
+let cursorPassthroughEnabled = false
 
 const isSettingsView = computed(() => windowView.value === 'settings')
 const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWindowView())
@@ -463,7 +470,6 @@ const canEnterDockedIdle = computed(
     isTauriDesktop() &&
     !isSettingsView.value &&
     !isBubbleView.value &&
-    !isPetDocked.value &&
     activeMode.value === 'idle' &&
     !busy.value &&
     !listening.value &&
@@ -474,6 +480,9 @@ const canEnterDockedIdle = computed(
     !hasPendingCommand.value &&
     !pendingApproval.value &&
     !pendingShellConfirmation.value
+)
+const shouldEnterDockedIdle = computed(
+  () => canEnterDockedIdle.value && !isPetDocked.value
 )
 
 const canSubmitApproval = computed(() => {
@@ -872,6 +881,13 @@ const clearPetDockTimer = () => {
   }
 }
 
+const clearPetHitTestTimer = () => {
+  if (petHitTestTimer !== null) {
+    window.clearInterval(petHitTestTimer)
+    petHitTestTimer = null
+  }
+}
+
 const resolveCurrentWorkArea = async () => {
   const monitor = await currentMonitor()
   const position = monitor?.workArea.position ?? { x: 0, y: 0 }
@@ -886,6 +902,23 @@ const resolveCurrentWorkArea = async () => {
 const collectPetLayoutMetrics = async (): Promise<PetLayoutMetrics | null> => {
   await nextTick()
   return penguinRef.value?.getLayoutMetrics() ?? null
+}
+
+const collectGlobalPetBounds = async (): Promise<PetWindowFrame | null> => {
+  const petLayout = await collectPetLayoutMetrics()
+  if (!petLayout || !isTauriDesktop()) {
+    return null
+  }
+
+  const appWindow = getCurrentWindow()
+  const position = await appWindow.outerPosition()
+
+  return {
+    left: Math.round(position.x + petLayout.petLeft),
+    top: Math.round(position.y + petLayout.petTop),
+    width: Math.round(petLayout.petRight - petLayout.petLeft),
+    height: Math.round(petLayout.petBottom - petLayout.petTop)
+  }
 }
 
 const captureCurrentPetFrame = async (): Promise<PetWindowFrame | null> => {
@@ -922,16 +955,31 @@ const clampPetWindowToMonitor = async () => {
     const appWindow = getCurrentWindow()
     const workArea = await resolveCurrentWorkArea()
     const position = await appWindow.outerPosition()
-    const size = await appWindow.outerSize()
-    const nextPosition = clampWindowPositionToWorkArea(
-      {
-        left: position.x,
-        top: position.y,
-        width: size.width,
-        height: size.height
-      },
-      workArea
-    )
+    const visibleBounds = await collectGlobalPetBounds()
+    const nextPosition = visibleBounds
+      ? {
+          left:
+            visibleBounds.left < workArea.left
+              ? position.x + (workArea.left - visibleBounds.left)
+              : visibleBounds.left + visibleBounds.width > workArea.right
+                ? position.x - (visibleBounds.left + visibleBounds.width - workArea.right)
+                : position.x,
+          top:
+            visibleBounds.top < workArea.top
+              ? position.y + (workArea.top - visibleBounds.top)
+              : visibleBounds.top + visibleBounds.height > workArea.bottom
+                ? position.y - (visibleBounds.top + visibleBounds.height - workArea.bottom)
+                : position.y
+        }
+      : clampWindowPositionToWorkArea(
+          {
+            left: position.x,
+            top: position.y,
+            width: (await appWindow.outerSize()).width,
+            height: (await appWindow.outerSize()).height
+          },
+          workArea
+        )
 
     if (nextPosition.left !== position.x || nextPosition.top !== position.y) {
       await appWindow.setPosition(new PhysicalPosition(nextPosition.left, nextPosition.top))
@@ -968,6 +1016,7 @@ const restoreDockedPet = async (syncBubble = true) => {
   }
 
   restorePetFrame = null
+  cursorPassthroughEnabled = false
 
   if (syncBubble) {
     await syncBubbleWindow()
@@ -979,7 +1028,7 @@ const restoreDockedPet = async (syncBubble = true) => {
 }
 
 const enterDockedIdle = async () => {
-  if (!canEnterDockedIdle.value || dockState.value !== 'normal') {
+  if (!shouldEnterDockedIdle.value || dockState.value !== 'normal') {
     return
   }
 
@@ -989,7 +1038,13 @@ const enterDockedIdle = async () => {
   }
 
   const workArea = await resolveCurrentWorkArea()
-  const nextDockState = choosePetDockState(currentFrame, workArea)
+  const visibleBounds = await collectGlobalPetBounds()
+  const dockBaseFrame = visibleBounds ?? currentFrame
+  if (!isPetNearDockEdge(dockBaseFrame, workArea, PET_DOCK_EDGE_THRESHOLD_PX)) {
+    return
+  }
+
+  const nextDockState = choosePetDockState(dockBaseFrame, workArea)
   const dockedFrame = planDockedWindowFrame(nextDockState, workArea, currentFrame)
   restorePetFrame = currentFrame
   dockState.value = nextDockState
@@ -1003,7 +1058,7 @@ const enterDockedIdle = async () => {
 const schedulePetDockedIdle = (delay = PET_DOCK_IDLE_DELAY_MS) => {
   clearPetDockTimer()
 
-  if (!canEnterDockedIdle.value || typeof window === 'undefined') {
+  if (!shouldEnterDockedIdle.value || typeof window === 'undefined') {
     return
   }
 
@@ -1017,6 +1072,64 @@ const handlePetInteract = () => {
   if (dockState.value !== 'normal') {
     void restoreDockedPet(false)
   }
+}
+
+const shouldKeepWindowInteractive = (localX: number, localY: number) => {
+  const element = document.elementFromPoint(localX, localY) as HTMLElement | null
+  if (
+    element?.closest(
+      '.input-shell, .command-confirm-strip, .task-status-strip, .confirm-shell, .settings-window-shell'
+    )
+  ) {
+    return true
+  }
+
+  return penguinRef.value?.isOpaqueClientHit(localX, localY) ?? false
+}
+
+const updatePetWindowCursorPassthrough = async () => {
+  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
+    return
+  }
+
+  const appWindow = getCurrentWindow()
+  const windowPosition = await appWindow.outerPosition()
+  const windowSize = await appWindow.outerSize()
+  const cursor = await cursorPosition()
+  const localX = cursor.x - windowPosition.x
+  const localY = cursor.y - windowPosition.y
+  const insideWindow =
+    localX >= 0 && localX <= windowSize.width && localY >= 0 && localY <= windowSize.height
+
+  const shouldIgnore =
+    insideWindow &&
+    !textInputFocused.value &&
+    !showComposer.value &&
+    !hasControlPending.value &&
+    !hasPendingCommand.value &&
+    !showAgentTaskStrip.value &&
+    !bubbleInteractionActive.value &&
+    !busy.value &&
+    !listening.value &&
+    !shouldKeepWindowInteractive(localX, localY)
+
+  if (shouldIgnore === cursorPassthroughEnabled) {
+    return
+  }
+
+  await appWindow.setIgnoreCursorEvents(shouldIgnore)
+  cursorPassthroughEnabled = shouldIgnore
+}
+
+const setupPetHitTestLoop = () => {
+  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value || typeof window === 'undefined') {
+    return
+  }
+
+  clearPetHitTestTimer()
+  petHitTestTimer = window.setInterval(() => {
+    void updatePetWindowCursorPassthrough()
+  }, 80)
 }
 
 const syncPetWindowFrame = async () => {
@@ -1147,6 +1260,9 @@ const resetVisualModeSoon = (delay = 700) => {
 
 const showBubble = (content: string, mode: PetMode = 'speaking', duration?: number | null) => {
   clearPetDockTimer()
+  if (dockState.value !== 'normal') {
+    void restoreDockedPet(false)
+  }
   const session = ++speechSession
   if (voiceReplySupported.value) {
     window.speechSynthesis.cancel()
@@ -2900,14 +3016,14 @@ const setupPetWindowListeners = async () => {
     void syncBubbleWindow()
     if (dockState.value === 'normal') {
       schedulePetWindowClamp()
-      schedulePetDockedIdle()
     }
+    schedulePetDockedIdle()
   })
   windowResizedCleanup = await appWindow.onResized(() => {
     if (dockState.value === 'normal') {
       void clampPetWindowToMonitor()
-      schedulePetDockedIdle()
     }
+    schedulePetDockedIdle()
   })
 }
 
@@ -2983,7 +3099,7 @@ watch(
 )
 
 watch(
-  canEnterDockedIdle,
+  shouldEnterDockedIdle,
   (canDock) => {
     if (!isTauriDesktop()) {
       return
@@ -2996,6 +3112,16 @@ watch(
 
     clearPetDockTimer()
     if (dockState.value !== 'normal') {
+      void restoreDockedPet()
+    }
+  },
+  { immediate: false }
+)
+
+watch(
+  canEnterDockedIdle,
+  (eligible) => {
+    if (!eligible && dockState.value !== 'normal') {
       void restoreDockedPet()
     }
   },
@@ -3058,6 +3184,7 @@ onMounted(() => {
   if (!isSettingsView.value) {
     void syncPetWindowFrame().then(() => syncBubbleWindow())
     void setupPetWindowListeners()
+    setupPetHitTestLoop()
     schedulePetDockedIdle()
   }
 })
@@ -3069,6 +3196,7 @@ onBeforeUnmount(() => {
   clearWhisperCaptureTimer()
   clearPetClampTimer()
   clearPetDockTimer()
+  clearPetHitTestTimer()
   clearControlPendingTimer()
   clearShellConfirmationTimer()
   clearPendingCommandTimer()
@@ -3085,6 +3213,9 @@ onBeforeUnmount(() => {
   whisperPushToTalkCleanup?.()
   windowMovedCleanup?.()
   windowResizedCleanup?.()
+  if (isTauriDesktop() && cursorPassthroughEnabled) {
+    void getCurrentWindow().setIgnoreCursorEvents(false)
+  }
   if (useLocalWhisperInput.value && whisperStatus.value.recordingState === 'recording') {
     void stopLocalWhisperListening({ shouldSend: false, silent: true, reschedule: false })
   }

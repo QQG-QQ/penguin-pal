@@ -89,7 +89,15 @@ const getLayoutMetrics = (): PetLayoutMetrics | null => {
 }
 
 defineExpose({
-  getLayoutMetrics
+  getLayoutMetrics,
+  isOpaqueClientHit: (clientX: number, clientY: number) => {
+    const rect = readArtworkRect()
+    if (!rect) {
+      return false
+    }
+
+    return isPetOpaqueHit(artwork.value, rect, alphaMask.value, clientX, clientY)
+  }
 })
 
 const isOpaquePointerHit = (event: PointerEvent) => {

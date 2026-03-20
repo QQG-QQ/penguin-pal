@@ -15,6 +15,7 @@ export interface PetWindowSize {
 }
 
 export const PET_DOCK_IDLE_DELAY_MS = 12000
+export const PET_DOCK_EDGE_THRESHOLD_PX = 52
 
 const SCREEN_MARGIN = 12
 
@@ -38,6 +39,20 @@ export const choosePetDockState = (
 
   distances.sort((left, right) => left.distance - right.distance)
   return distances[0]?.dockState ?? 'dockedRight'
+}
+
+export const isPetNearDockEdge = (
+  frame: PetWindowFrame,
+  workArea: WorkAreaRect,
+  threshold = PET_DOCK_EDGE_THRESHOLD_PX
+) => {
+  const distances = [
+    Math.abs(frame.left - workArea.left),
+    Math.abs(workArea.right - (frame.left + frame.width)),
+    Math.abs(frame.top - workArea.top)
+  ]
+
+  return distances.some((distance) => distance <= threshold)
 }
 
 export const getDockedWindowSize = (
