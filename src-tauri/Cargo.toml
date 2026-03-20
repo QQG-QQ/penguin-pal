@@ -1,6 +1,6 @@
 [package]
 name = "penguin-pal"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI Desktop Pet Assistant"
 authors = ["PenguinPal Team"]
 edition = "2021"
