@@ -2,11 +2,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    ai::provider,
     app_state::{DesktopAction, ProviderConfig},
 };
 
-use super::{prompt, types::TopLevelIntent};
+use super::{model_adapter, prompt, types::TopLevelIntent};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,7 +24,7 @@ pub async fn classify_user_intent(
     allowed_actions: &[DesktopAction],
     user_input: &str,
 ) -> Result<IntentDecision, String> {
-    let raw = provider::plan_control_request(
+    let raw = model_adapter::request_structured_agent_output(
         provider_config,
         api_key,
         oauth_access_token,

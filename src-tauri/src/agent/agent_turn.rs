@@ -2,28 +2,35 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    ai::provider,
     app_state::{DesktopAction, ProviderConfig},
 };
 
-use super::prompt;
+use super::{model_adapter, prompt};
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentTurnKind {
-    Reply,
-    DesktopTask,
-    TestTask,
-    WorkspaceTask,
-    MemoryRequest,
+pub enum AgentTurnMode {
+    ReplyOnly,
+    ExecuteDomain,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentExecutionDomain {
+    Desktop,
+    Test,
+    Workspace,
+    Memory,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTurnDecision {
-    pub kind: AgentTurnKind,
+    pub mode: AgentTurnMode,
     #[serde(default)]
-    pub reply: Option<String>,
+    pub assistant_message: Option<String>,
+    #[serde(default)]
+    pub execution_domain: Option<AgentExecutionDomain>,
     #[serde(default)]
     pub task_title: Option<String>,
 }
@@ -60,7 +67,7 @@ pub async fn decide_agent_turn(
         message = user_input.trim(),
     );
 
-    let raw = provider::plan_control_request(
+    let raw = model_adapter::request_structured_agent_output(
         provider_config,
         api_key,
         oauth_access_token,
@@ -83,14 +90,20 @@ fn parse_agent_turn_decision(raw: &str) -> Result<AgentTurnDecision, String> {
     let decision = serde_json::from_str::<AgentTurnDecision>(&payload)
         .map_err(|error| format!("统一 agent turn JSON 解析失败：{error}"))?;
 
-    if matches!(decision.kind, AgentTurnKind::Reply)
+    if matches!(decision.mode, AgentTurnMode::ReplyOnly)
         && decision
-            .reply
+            .assistant_message
             .as_ref()
             .map(|value| value.trim().is_empty())
             .unwrap_or(true)
     {
-        return Err("统一 agent turn 选择了 reply，但没有返回 reply 文本。".to_string());
+        return Err("统一 agent turn 选择了 reply_only，但没有返回 assistantMessage。".to_string());
+    }
+
+    if matches!(decision.mode, AgentTurnMode::ExecuteDomain)
+        && decision.execution_domain.is_none()
+    {
+        return Err("统一 agent turn 选择了 execute_domain，但没有返回 executionDomain。".to_string());
     }
 
     Ok(decision)
@@ -120,22 +133,33 @@ fn extract_json(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_agent_turn_decision, AgentTurnKind};
+    use super::{parse_agent_turn_decision, AgentExecutionDomain, AgentTurnMode};
 
     #[test]
-    fn parse_workspace_task_decision() {
+    fn parse_workspace_domain_decision() {
         let raw =
-            r#"{"kind":"workspace_task","reply":"我先检查仓库状态。","taskTitle":"审查当前项目"}"#;
+            r#"{"mode":"execute_domain","executionDomain":"workspace","assistantMessage":"我先检查仓库状态。","taskTitle":"审查当前项目"}"#;
         let decision = parse_agent_turn_decision(raw).expect("workspace decision should parse");
-        assert_eq!(decision.kind, AgentTurnKind::WorkspaceTask);
-        assert_eq!(decision.reply.as_deref(), Some("我先检查仓库状态。"));
+        assert_eq!(decision.mode, AgentTurnMode::ExecuteDomain);
+        assert_eq!(decision.execution_domain, Some(AgentExecutionDomain::Workspace));
+        assert_eq!(
+            decision.assistant_message.as_deref(),
+            Some("我先检查仓库状态。")
+        );
         assert_eq!(decision.task_title.as_deref(), Some("审查当前项目"));
     }
 
     #[test]
     fn reject_reply_without_text() {
-        let raw = r#"{"kind":"reply"}"#;
+        let raw = r#"{"mode":"reply_only"}"#;
         let error = parse_agent_turn_decision(raw).expect_err("reply without text should fail");
-        assert!(error.contains("reply"));
+        assert!(error.contains("reply_only"));
+    }
+
+    #[test]
+    fn reject_execute_without_domain() {
+        let raw = r#"{"mode":"execute_domain","assistantMessage":"我开始处理。"}"#;
+        let error = parse_agent_turn_decision(raw).expect_err("missing domain should fail");
+        assert!(error.contains("executionDomain"));
     }
 }

@@ -1,11 +1,10 @@
 use serde_json::Value;
 
 use crate::{
-    ai::provider,
     app_state::{DesktopAction, ProviderConfig},
 };
 
-use super::types::{AgentPlan, AgentRoute};
+use super::{model_adapter, types::{AgentPlan, AgentRoute}};
 
 pub async fn plan_with_model_input(
     provider_config: &ProviderConfig,
@@ -19,7 +18,7 @@ pub async fn plan_with_model_input(
     planner_prompt: &str,
     planner_input: &str,
 ) -> Result<AgentPlan, String> {
-    let raw = provider::plan_control_request(
+    let raw = model_adapter::request_structured_agent_output(
         provider_config,
         api_key,
         oauth_access_token,

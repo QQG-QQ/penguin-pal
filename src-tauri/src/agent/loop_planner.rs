@@ -1,17 +1,18 @@
 use serde_json::Value;
 
 use crate::{
-    ai::provider,
     app_state::{DesktopAction, ProviderConfig},
     control::registry,
 };
 
 use super::{
     loop_prompt,
+    model_adapter,
     runtime_context::render_runtime_context_for_prompt,
     types::{
-        empty_json_object, is_agent_tool_allowed, AgentLoopDecision, AgentNextAction, AgentPlan,
-        AgentRoute, AgentTaskRun, AgentTaskStatus, RuntimeContext, TopLevelIntent,
+        empty_json_object, is_agent_tool_allowed, AgentAction, AgentActionPayload,
+        AgentLoopDecision, AgentPlan, AgentRoute, AgentTaskRun, AgentTaskStatus,
+        AgentLoopSummary, RuntimeContext, TopLevelIntent,
     },
 };
 
@@ -73,7 +74,7 @@ pub async fn plan_next_action(
         memory_section,
     );
 
-    let raw = provider::plan_control_request(
+    let raw = model_adapter::request_structured_agent_output(
         provider_config,
         api_key,
         oauth_access_token,
@@ -116,36 +117,66 @@ fn normalize_loop_decision(mut payload: Value) -> Result<Value, String> {
         .get_mut("next")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "桌面 agent loop 返回缺少 next 对象。".to_string())?;
-    let kind = next
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "桌面 agent loop 返回缺少 next.kind。".to_string())?;
-    let kind = kind.to_string();
+    let kind = normalize_next_action_protocol(next, "桌面 agent loop")?;
 
     match kind.as_str() {
-        "execute_tool" | "request_confirmation" => {
+        "tool" | "confirm" => {
             if let Some(step_summary) = next.remove("stepSummary") {
                 next.entry("summary".to_string()).or_insert(step_summary);
             }
             ensure_step_summary(next, &kind);
             normalize_step_summary(next);
         }
-        "finish_task" | "fail_task" => {
+        "finish" | "fail" => {
             if let Some(final_summary) = next.remove("finalSummary") {
                 next.entry("summary".to_string()).or_insert(final_summary);
             }
             ensure_final_summary_seed(next, &kind);
             normalize_final_summary(next, &goal, &kind);
         }
-        "observe_context" | "assert_condition" | "retry_step" => {
+        "observe" | "assert" | "retry" => {
             // 这些 kind 也需要 summary 字段
             ensure_step_summary(next, &kind);
         }
-        "respond_to_user" => {}
+        "respond" => {}
         _ => {}
     }
 
     Ok(payload)
+}
+
+pub(crate) fn normalize_next_action_protocol(
+    next: &mut serde_json::Map<String, Value>,
+    scope: &str,
+) -> Result<String, String> {
+    if let Some(tool_args) = next.remove("toolArgs") {
+        next.entry("args".to_string()).or_insert(tool_args);
+    }
+    if let Some(reply_message) = next.remove("replyText") {
+        next.entry("message".to_string()).or_insert(reply_message);
+    }
+
+    let raw = next
+        .get("action")
+        .and_then(Value::as_str)
+        .or_else(|| next.get("kind").and_then(Value::as_str))
+        .ok_or_else(|| format!("{scope} 返回缺少 next.action/next.kind。"))?;
+
+    let normalized = match raw.trim() {
+        "respond" | "reply" | "respond_to_user" => "respond",
+        "tool" | "execute" | "execute_tool" => "tool",
+        "confirm" | "request_confirmation" => "confirm",
+        "observe" | "observe_context" => "observe",
+        "assert" | "assert_condition" => "assert",
+        "retry" | "retry_step" => "retry",
+        "finish" | "finish_task" => "finish",
+        "fail" | "fail_task" => "fail",
+        other => other,
+    }
+    .to_string();
+
+    next.insert("action".to_string(), Value::String(normalized.clone()));
+    Ok(normalized)
 }
 
 pub fn decision_from_plan(goal: &str, plan: AgentPlan) -> Result<AgentLoopDecision, String> {
@@ -162,33 +193,40 @@ pub fn decision_from_plan(goal: &str, plan: AgentPlan) -> Result<AgentLoopDecisi
     Ok(AgentLoopDecision {
         intent: TopLevelIntent::DesktopAction,
         goal: goal.trim().to_string(),
-        next: AgentNextAction::ExecuteTool {
-            tool: first.tool,
-            summary: first
-                .summary
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "执行桌面动作".to_string()),
+        next: AgentActionPayload {
+            action: AgentAction::Tool,
+            message: None,
+            tool: Some(first.tool),
+            summary: Some(Value::String(
+                first
+                    .summary
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "执行桌面动作".to_string()),
+            )),
             args: if first.args.is_null() {
                 empty_json_object()
             } else {
                 first.args
             },
+            target: None,
+            assertion_type: None,
+            params: empty_json_object(),
         },
     })
 }
 
-fn validate_next_action(action: &AgentNextAction) -> Result<(), String> {
-    match action {
-        AgentNextAction::RespondToUser { message } => {
-            if message.trim().is_empty() {
+fn validate_next_action(action: &AgentActionPayload) -> Result<(), String> {
+    match action.action {
+        AgentAction::Respond => {
+            if required_message(action)?.is_empty() {
                 return Err("next action message 不能为空。".to_string());
             }
         }
-        AgentNextAction::FinishTask { message, summary }
-        | AgentNextAction::FailTask { message, summary } => {
-            if message.trim().is_empty() {
+        AgentAction::Finish | AgentAction::Fail => {
+            if required_message(action)?.is_empty() {
                 return Err("next action message 不能为空。".to_string());
             }
+            let summary = required_final_summary(action)?;
             if summary.goal.trim().is_empty() {
                 return Err("finish_task/fail_task.summary.goal 不能为空。".to_string());
             }
@@ -196,42 +234,37 @@ fn validate_next_action(action: &AgentNextAction) -> Result<(), String> {
                 return Err("finish_task/fail_task.summary.finalStatus 非法。".to_string());
             }
         }
-        AgentNextAction::ObserveContext { summary } => {
-            // AI-first: desktop loop 现在支持 observe_context
-            if summary.trim().is_empty() {
+        AgentAction::Observe => {
+            if required_step_summary(action)?.is_empty() {
                 return Err("observe_context.summary 不能为空。".to_string());
             }
         }
-        AgentNextAction::RetryStep { summary, .. } => {
-            // AI-first: desktop loop 现在支持 retry_step
-            if summary.trim().is_empty() {
+        AgentAction::Retry => {
+            if required_step_summary(action)?.is_empty() {
                 return Err("retry_step.summary 不能为空。".to_string());
             }
         }
-        AgentNextAction::AssertCondition { .. } => {
-            // assert_condition 仅测试循环使用
+        AgentAction::Assert => {
             return Err("desktop_action loop 不接受 assert_condition。".to_string());
         }
-        AgentNextAction::RequestConfirmation { tool, args, .. } => {
+        AgentAction::Confirm => {
+            let tool = required_tool(action)?;
             if !is_agent_tool_allowed(tool) {
                 return Err(format!("request_confirmation 包含未授权工具：{tool}"));
             }
-            if !args.is_object() {
+            if !action.args.is_object() {
                 return Err("request_confirmation.args 必须是 object。".to_string());
             }
         }
-        AgentNextAction::ExecuteTool {
-            tool,
-            summary,
-            args,
-        } => {
+        AgentAction::Tool => {
+            let tool = required_tool(action)?;
             if !is_agent_tool_allowed(tool) {
                 return Err(format!("execute_tool 包含未授权工具：{tool}"));
             }
-            if summary.trim().is_empty() {
+            if required_step_summary(action)?.is_empty() {
                 return Err("execute_tool.summary 不能为空。".to_string());
             }
-            if !args.is_object() {
+            if !action.args.is_object() {
                 return Err("execute_tool.args 必须是 object。".to_string());
             }
         }
@@ -240,7 +273,45 @@ fn validate_next_action(action: &AgentNextAction) -> Result<(), String> {
     Ok(())
 }
 
-fn extract_json_value(raw: &str) -> Option<Value> {
+fn required_message(action: &AgentActionPayload) -> Result<&str, String> {
+    action
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "message 不能为空。".to_string())
+}
+
+fn required_tool(action: &AgentActionPayload) -> Result<&str, String> {
+    action
+        .tool
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "tool 不能为空。".to_string())
+}
+
+fn required_step_summary(action: &AgentActionPayload) -> Result<&str, String> {
+    action
+        .summary
+        .as_ref()
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "summary 不能为空。".to_string())
+}
+
+fn required_final_summary(action: &AgentActionPayload) -> Result<AgentLoopSummary, String> {
+    let value = action
+        .summary
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "summary 不能为空。".to_string())?;
+    serde_json::from_value::<AgentLoopSummary>(value)
+        .map_err(|_| "summary 必须是对象。".to_string())
+}
+
+pub(crate) fn extract_json_value(raw: &str) -> Option<Value> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -260,7 +331,7 @@ fn extract_json_value(raw: &str) -> Option<Value> {
     serde_json::from_str::<Value>(candidate).ok()
 }
 
-fn normalize_step_summary(next: &mut serde_json::Map<String, Value>) {
+pub(crate) fn normalize_step_summary(next: &mut serde_json::Map<String, Value>) {
     let Some(summary) = next.get_mut("summary") else {
         return;
     };
@@ -282,7 +353,7 @@ fn normalize_step_summary(next: &mut serde_json::Map<String, Value>) {
     *summary = Value::String(normalized);
 }
 
-fn ensure_step_summary(next: &mut serde_json::Map<String, Value>, kind: &str) {
+pub(crate) fn ensure_step_summary(next: &mut serde_json::Map<String, Value>, kind: &str) {
     if next.contains_key("summary") {
         return;
     }
@@ -302,7 +373,7 @@ fn ensure_step_summary(next: &mut serde_json::Map<String, Value>, kind: &str) {
     next.insert("summary".to_string(), Value::String(fallback));
 }
 
-fn ensure_final_summary_seed(next: &mut serde_json::Map<String, Value>, kind: &str) {
+pub(crate) fn ensure_final_summary_seed(next: &mut serde_json::Map<String, Value>, kind: &str) {
     if next.contains_key("summary") {
         return;
     }
@@ -316,7 +387,7 @@ fn ensure_final_summary_seed(next: &mut serde_json::Map<String, Value>, kind: &s
     next.insert("summary".to_string(), Value::String(fallback));
 }
 
-fn normalize_final_summary(
+pub(crate) fn normalize_final_summary(
     next: &mut serde_json::Map<String, Value>,
     goal: &str,
     kind: &str,
@@ -380,17 +451,17 @@ fn normalize_final_summary(
     } else {
         message
     };
-    let final_status = if kind == "finish_task" {
+    let final_status = if kind == "finish" {
         "completed"
     } else {
         "failed"
     };
-    let failure_stage = if kind == "finish_task" {
+    let failure_stage = if kind == "finish" {
         Value::Null
     } else {
         Value::String("finish".to_string())
     };
-    let failure_reason_code = if kind == "finish_task" {
+    let failure_reason_code = if kind == "finish" {
         "none"
     } else {
         map_failure_reason_code(&fallback_message)
@@ -411,7 +482,7 @@ fn normalize_final_summary(
 }
 
 fn normalize_final_status_value(value: Option<&Value>, kind: &str) -> Value {
-    let fallback = if kind == "finish_task" {
+    let fallback = if kind == "finish" {
         "completed"
     } else {
         "failed"
@@ -425,7 +496,7 @@ fn normalize_final_status_value(value: Option<&Value>, kind: &str) -> Value {
 }
 
 fn normalize_failure_stage_value(value: Option<&Value>, kind: &str) -> Value {
-    if kind == "finish_task" {
+    if kind == "finish" {
         return Value::Null;
     }
 
@@ -444,7 +515,7 @@ fn normalize_failure_stage_value(value: Option<&Value>, kind: &str) -> Value {
 }
 
 fn normalize_failure_reason_code_value(value: Option<&Value>, message: &str, kind: &str) -> Value {
-    if kind == "finish_task" {
+    if kind == "finish" {
         return Value::String("none".to_string());
     }
 
@@ -488,5 +559,53 @@ fn map_failure_reason_code(message: &str) -> &'static str {
         "tool_failed"
     } else {
         "invalid_action"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_next_action;
+    use crate::agent::types::AgentAction;
+
+    #[test]
+    fn parse_generic_action_protocol_for_tool_step() {
+        let raw = r#"{
+          "intent":"desktop_action",
+          "goal":"打开记事本",
+          "next":{
+            "action":"tool",
+            "tool":"launch_program",
+            "stepSummary":"启动记事本",
+            "toolArgs":{"program":"notepad"}
+          }
+        }"#;
+
+        let decision = parse_next_action(raw).expect("generic action protocol should parse");
+        assert_eq!(decision.next.action, AgentAction::Tool);
+        assert_eq!(decision.next.tool.as_deref(), Some("launch_program"));
+        assert_eq!(
+            decision.next.summary.as_ref().and_then(|v| v.as_str()),
+            Some("启动记事本")
+        );
+        assert_eq!(
+            decision.next.args.get("program").and_then(|v| v.as_str()),
+            Some("notepad")
+        );
+    }
+
+    #[test]
+    fn parse_generic_action_protocol_for_reply() {
+        let raw = r#"{
+          "intent":"desktop_action",
+          "goal":"解释状态",
+          "next":{
+            "action":"respond",
+            "replyText":"当前没有可执行动作。"
+          }
+        }"#;
+
+        let decision = parse_next_action(raw).expect("generic respond action should parse");
+        assert_eq!(decision.next.action, AgentAction::Respond);
+        assert_eq!(decision.next.message.as_deref(), Some("当前没有可执行动作。"));
     }
 }

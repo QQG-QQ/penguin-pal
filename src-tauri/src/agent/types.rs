@@ -257,51 +257,40 @@ pub struct AgentStepRecord {
 pub struct AgentLoopDecision {
     pub intent: TopLevelIntent,
     pub goal: String,
-    pub next: AgentNextAction,
+    pub next: AgentActionPayload,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAction {
+    Respond,
+    Observe,
+    Assert,
+    Confirm,
+    Tool,
+    Retry,
+    Finish,
+    Fail,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AgentNextAction {
-    RespondToUser {
-        message: String,
-    },
-    ObserveContext {
-        summary: String,
-    },
-    AssertCondition {
-        assertion_type: AssertionType,
-        summary: String,
-        #[serde(default = "empty_json_object")]
-        params: Value,
-    },
-    RequestConfirmation {
-        tool: String,
-        #[serde(default)]
-        summary: Option<String>,
-        #[serde(default = "empty_json_object")]
-        args: Value,
-        #[serde(default)]
-        message: Option<String>,
-    },
-    ExecuteTool {
-        tool: String,
-        summary: String,
-        #[serde(default = "empty_json_object")]
-        args: Value,
-    },
-    RetryStep {
-        target: RetryTarget,
-        summary: String,
-    },
-    FinishTask {
-        message: String,
-        summary: AgentLoopSummary,
-    },
-    FailTask {
-        message: String,
-        summary: AgentLoopSummary,
-    },
+#[serde(rename_all = "camelCase")]
+pub struct AgentActionPayload {
+    pub action: AgentAction,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub summary: Option<Value>,
+    #[serde(default = "empty_json_object")]
+    pub args: Value,
+    #[serde(default)]
+    pub target: Option<RetryTarget>,
+    #[serde(default)]
+    pub assertion_type: Option<AssertionType>,
+    #[serde(default = "empty_json_object")]
+    pub params: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

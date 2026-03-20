@@ -2,11 +2,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    ai::provider,
     app_state::{DesktopAction, ProviderConfig},
 };
 
-use super::prompt;
+use super::{model_adapter, prompt};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -52,7 +51,7 @@ pub async fn decide_session_turn(
         message = user_input.trim(),
     );
 
-    let raw = provider::plan_control_request(
+    let raw = model_adapter::request_structured_agent_output(
         provider_config,
         api_key,
         oauth_access_token,

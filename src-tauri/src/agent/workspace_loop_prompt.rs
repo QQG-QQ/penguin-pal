@@ -31,7 +31,8 @@ pub fn build_workspace_next_action_prompt(
   \"intent\":\"workspace_task\",\n\
   \"goal\":\"...\",\n\
   \"next\":{{\n\
-    \"kind\":\"respond_to_user|execute_tool|request_confirmation|retry_step|finish_task|fail_task\",\n\
+    \"action\":\"respond|tool|confirm|retry|finish|fail\",\n\
+    \"kind\":\"(兼容旧协议，可省略)\",\n\
     \"stepSummary\":\"...\",\n\
     \"message\":\"...\",\n\
     \"tool\":\"...\",\n\
@@ -61,6 +62,7 @@ pub fn build_workspace_next_action_prompt(
 9. request_confirmation 只用于真正会改写文件、移动/删除路径的高风险动作。\n\
 10. retry_step 只允许 target=last_tool，且最多一次；如果重试意义不大，直接 fail_task 并说明阻塞。\n\
 11. finish_task / fail_task 必须附带结构化 summary。\n\
-12. 不确定时优先先读取更多仓库上下文，而不是凭空下结论。"
+12. 优先输出通用动作协议：action=respond|tool|confirm|retry|finish|fail；kind 只是兼容字段，不必再主动使用。\n\
+13. 不确定时优先先读取更多仓库上下文，而不是凭空下结论。"
     )
 }

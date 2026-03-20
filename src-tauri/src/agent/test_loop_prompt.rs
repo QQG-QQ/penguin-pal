@@ -39,7 +39,8 @@ pub fn build_test_next_action_prompt(tools: &[ControlToolDefinition]) -> String 
   \"intent\":\"test_request\",\n\
   \"goal\":\"...\",\n\
   \"next\":{{\n\
-    \"kind\":\"respond_to_user|observe_context|execute_tool|assert_condition|request_confirmation|retry_step|finish_task|fail_task\",\n\
+    \"action\":\"respond|observe|tool|assert|confirm|retry|finish|fail\",\n\
+    \"kind\":\"(兼容旧协议，可省略)\",\n\
     \"stepSummary\":\"...\",\n\
     \"message\":\"...\",\n\
     \"tool\":\"...\",\n\
@@ -79,7 +80,8 @@ pub fn build_test_next_action_prompt(tools: &[ControlToolDefinition]) -> String 
 11. 测试目标是验证与归因，不是自由乱测。\n\
 12. 不能规划下载执行、隐私外发，也不能把 shell/installer/registry 的高风险动作伪装成低风险。\n\
 13. finish_task 时 failureStage 必须省略或使用 JSON null，不要输出字符串 \"null\"。\n\
-14. 不允许把可能提交、发送、删除、覆盖的动作伪装成低风险。\
+14. 优先输出通用动作协议：action=respond|observe|tool|assert|confirm|retry|finish|fail；kind 只是兼容字段，不必再主动使用。\n\
+15. 不允许把可能提交、发送、删除、覆盖的动作伪装成低风险。\
 ",
         schema = VISION_SCHEMA_VERSION
     )

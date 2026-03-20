@@ -38,7 +38,7 @@ pub fn request_memory_maintenance_shutdown() {
 
 use crate::{
     agent::{
-        agent_turn::{self, AgentTurnKind},
+        agent_turn::{self, AgentExecutionDomain, AgentTurnMode},
         router as agent_router,
         types::{AgentMessageMeta, AgentRoute},
         workspace_context,
@@ -1495,18 +1495,6 @@ fn render_workspace_context(workspace_root: Option<&str>) -> Option<String> {
         .map(|context| context.render_for_prompt())
 }
 
-fn merge_agent_reply(prefix: Option<String>, reply_text: String) -> String {
-    let prefix = prefix
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    match prefix {
-        Some(prefix) if !reply_text.trim().is_empty() => format!("{prefix}\n{reply_text}"),
-        Some(prefix) => prefix,
-        None => reply_text,
-    }
-}
-
 fn looks_like_control_confirmation_reply(input: &str) -> bool {
     let normalized = input.trim().to_lowercase();
     if normalized.is_empty() {
@@ -1725,12 +1713,12 @@ async fn send_chat_message(
         .await;
 
         match agent_turn {
-            Ok(decision) => match decision.kind {
-                AgentTurnKind::Reply => (
-                    decision.reply.unwrap_or_default(),
+            Ok(decision) => match decision.mode {
+                AgentTurnMode::ReplyOnly => (
+                    decision.assistant_message.unwrap_or_default(),
                     provider_config.kind.label().to_string(),
                     "chat_ok".to_string(),
-                    "agent_turn=reply".to_string(),
+                    "agent_turn=reply_only".to_string(),
                     Some(AgentMessageMeta {
                         route: AgentRoute::Chat,
                         planned_tools: vec![],
@@ -1742,9 +1730,11 @@ async fn send_chat_message(
                     false,
                     codex_thread_id,
                 ),
-                AgentTurnKind::DesktopTask => {
-                    let preface = decision.reply.clone();
-                    let result = agent_router::maybe_handle_control_message(
+                AgentTurnMode::ExecuteDomain => {
+                    let domain = decision
+                        .execution_domain
+                        .ok_or_else(|| "统一 agent turn 缺少 executionDomain。".to_string())?;
+                    let result = agent_router::execute_agent_turn_domain(
                         &app,
                         &provider_config,
                         api_key.clone(),
@@ -1758,90 +1748,22 @@ async fn send_chat_message(
                         &allowed_actions,
                         trimmed,
                         recent_conversation_context.as_deref(),
-                        true,
+                        domain,
+                        decision.assistant_message.as_deref(),
                     )
-                    .await?
-                    .ok_or_else(|| "桌面 agent 没有返回结果。".to_string())?;
+                    .await?;
+                    let detail = match domain {
+                        AgentExecutionDomain::Desktop => "agent_turn=execute_domain.desktop",
+                        AgentExecutionDomain::Test => "agent_turn=execute_domain.test",
+                        AgentExecutionDomain::Workspace => "agent_turn=execute_domain.workspace",
+                        AgentExecutionDomain::Memory => "agent_turn=execute_domain.memory",
+                    }
+                    .to_string();
                     (
-                        merge_agent_reply(preface, result.reply_text),
+                        result.reply_text,
                         result.provider_label,
                         result.outcome,
-                        result.detail,
-                        Some(result.meta),
-                        None,
-                        false,
-                        codex_thread_id,
-                    )
-                }
-                AgentTurnKind::TestTask => {
-                    let preface = decision.reply.clone();
-                    let result = agent_router::maybe_handle_test_message(
-                        &app,
-                        &provider_config,
-                        api_key.clone(),
-                        oauth_access_token.clone(),
-                        &vision_channel,
-                        vision_api_key.clone(),
-                        codex_command.clone(),
-                        codex_home.clone(),
-                        &mut codex_thread_id,
-                        permission_level,
-                        &allowed_actions,
-                        trimmed,
-                        recent_conversation_context.as_deref(),
-                        true,
-                    )
-                    .await?
-                    .ok_or_else(|| "测试 agent 没有返回结果。".to_string())?;
-                    (
-                        merge_agent_reply(preface, result.reply_text),
-                        result.provider_label,
-                        result.outcome,
-                        result.detail,
-                        Some(result.meta),
-                        None,
-                        false,
-                        codex_thread_id,
-                    )
-                }
-                AgentTurnKind::WorkspaceTask => {
-                    let preface = decision.reply.clone();
-                    let result = agent_router::maybe_handle_workspace_message(
-                        &app,
-                        &provider_config,
-                        api_key.clone(),
-                        oauth_access_token.clone(),
-                        &vision_channel,
-                        vision_api_key.clone(),
-                        codex_command.clone(),
-                        codex_home.clone(),
-                        &mut codex_thread_id,
-                        permission_level,
-                        &allowed_actions,
-                        trimmed,
-                        recent_conversation_context.as_deref(),
-                        true,
-                    )
-                    .await?
-                    .ok_or_else(|| "workspace agent 没有返回结果。".to_string())?;
-                    (
-                        merge_agent_reply(preface, result.reply_text),
-                        result.provider_label,
-                        result.outcome,
-                        result.detail,
-                        Some(result.meta),
-                        None,
-                        false,
-                        codex_thread_id,
-                    )
-                }
-                AgentTurnKind::MemoryRequest => {
-                    let result = agent_router::handle_memory_request(&app)?;
-                    (
-                        merge_agent_reply(decision.reply.clone(), result.reply_text),
-                        result.provider_label,
-                        result.outcome,
-                        result.detail,
+                        detail,
                         Some(result.meta),
                         None,
                         false,

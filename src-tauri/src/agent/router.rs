@@ -11,21 +11,20 @@ use crate::{
 };
 
 use super::{
+    agent_turn::AgentExecutionDomain,
+    domain_loop_planner,
     executor::{self, LoopToolExecution},
     intent,
-    loop_planner,
     runtime_binding,
     runtime_context,
     screen_context,
     task_store,
     test_assertions,
-    test_loop_planner,
     workspace_context,
-    workspace_loop_planner,
     types::{
-        AgentLoopSummary, AgentLoopTaskStatus, AgentMessageMeta, AgentNextAction, AgentRoute,
-        AgentTaskProgress, AgentTaskRun, AgentTaskStatus, FailureReasonCode, FailureStage,
-        RetryTarget, TopLevelIntent,
+        AgentAction, AgentActionPayload, AgentLoopSummary, AgentLoopTaskStatus,
+        AgentMessageMeta, AgentRoute, AgentTaskProgress, AgentTaskRun, AgentTaskStatus,
+        FailureReasonCode, FailureStage, RetryTarget, RuntimeContext, TopLevelIntent,
     },
 };
 
@@ -36,6 +35,216 @@ const TEST_LOOP_STEP_BUDGET: usize = 12;
 const TEST_LOOP_RETRY_BUDGET: usize = 1;
 const WORKSPACE_LOOP_STEP_BUDGET: usize = 24;
 const WORKSPACE_LOOP_RETRY_BUDGET: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DomainLoopActionKind {
+    RespondToUser,
+    ObserveContext,
+    AssertCondition,
+    RequestConfirmation,
+    ExecuteTool,
+    RetryStep,
+    FinishTask,
+    FailTask,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DomainRuntimeContextMode {
+    RefreshEachStep,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DomainMemoryContextMode {
+    TaskMemory,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DomainWorkspaceDefaultsMode {
+    DetectWorkspace,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DomainObservationPolicy {
+    RuntimeContextSnapshot,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DomainAssertionPolicy {
+    TestAssertion,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DomainToolArgsPolicy {
+    WorkspaceDefaults,
+    None,
+}
+
+#[derive(Clone, Copy)]
+struct DomainPersistencePolicy {
+    on_reply: bool,
+    on_terminal: bool,
+}
+
+#[derive(Clone, Copy)]
+struct DomainLoopSpec {
+    domain: AgentExecutionDomain,
+    route: AgentRoute,
+    provider_label: &'static str,
+    response_outcome: &'static str,
+    planner_error_prefix: &'static str,
+    budget_exhausted_reason: &'static str,
+    budget_exhausted_message: &'static str,
+    budget_exhausted_warning: Option<&'static str>,
+    runtime_context_mode: DomainRuntimeContextMode,
+    memory_context_mode: DomainMemoryContextMode,
+    workspace_defaults_mode: DomainWorkspaceDefaultsMode,
+    observation_policy: DomainObservationPolicy,
+    assertion_policy: DomainAssertionPolicy,
+    tool_args_policy: DomainToolArgsPolicy,
+    allowed_actions: &'static [DomainLoopActionKind],
+    persistence: DomainPersistencePolicy,
+    auto_complete_on_budget_exhausted: bool,
+}
+
+struct DomainLoopStaticContext {
+    memory_context: Option<String>,
+    workspace_prompt: Option<String>,
+    default_workdir: Option<String>,
+}
+
+enum DomainLoopControl {
+    Continue,
+    Break,
+    Return(AgentHandleResult),
+}
+
+const DESKTOP_ALLOWED_ACTIONS: &[DomainLoopActionKind] = &[
+    DomainLoopActionKind::RespondToUser,
+    DomainLoopActionKind::ObserveContext,
+    DomainLoopActionKind::RequestConfirmation,
+    DomainLoopActionKind::ExecuteTool,
+    DomainLoopActionKind::RetryStep,
+    DomainLoopActionKind::FinishTask,
+    DomainLoopActionKind::FailTask,
+];
+
+const TEST_ALLOWED_ACTIONS: &[DomainLoopActionKind] = &[
+    DomainLoopActionKind::RespondToUser,
+    DomainLoopActionKind::ObserveContext,
+    DomainLoopActionKind::AssertCondition,
+    DomainLoopActionKind::RequestConfirmation,
+    DomainLoopActionKind::ExecuteTool,
+    DomainLoopActionKind::RetryStep,
+    DomainLoopActionKind::FinishTask,
+    DomainLoopActionKind::FailTask,
+];
+
+const WORKSPACE_ALLOWED_ACTIONS: &[DomainLoopActionKind] = &[
+    DomainLoopActionKind::RespondToUser,
+    DomainLoopActionKind::RequestConfirmation,
+    DomainLoopActionKind::ExecuteTool,
+    DomainLoopActionKind::RetryStep,
+    DomainLoopActionKind::FinishTask,
+    DomainLoopActionKind::FailTask,
+];
+
+fn domain_loop_spec(domain: AgentExecutionDomain) -> DomainLoopSpec {
+    match domain {
+        AgentExecutionDomain::Desktop => DomainLoopSpec {
+            domain,
+            route: AgentRoute::Control,
+            provider_label: "Desktop Agent",
+            response_outcome: "agent_response",
+            planner_error_prefix: "桌面 agent 没能基于当前上下文生成下一步动作。",
+            budget_exhausted_reason: "当前桌面任务已经耗尽 step budget。",
+            budget_exhausted_message: "当前桌面任务已经耗尽 step budget，已停止继续规划。",
+            budget_exhausted_warning: Some("⚠️ step budget 已耗尽，请在下一轮输出 finish_task 或 fail_task"),
+            runtime_context_mode: DomainRuntimeContextMode::RefreshEachStep,
+            memory_context_mode: DomainMemoryContextMode::TaskMemory,
+            workspace_defaults_mode: DomainWorkspaceDefaultsMode::None,
+            observation_policy: DomainObservationPolicy::RuntimeContextSnapshot,
+            assertion_policy: DomainAssertionPolicy::Unsupported,
+            tool_args_policy: DomainToolArgsPolicy::None,
+            allowed_actions: DESKTOP_ALLOWED_ACTIONS,
+            persistence: DomainPersistencePolicy {
+                on_reply: false,
+                on_terminal: true,
+            },
+            auto_complete_on_budget_exhausted: false,
+        },
+        AgentExecutionDomain::Test => DomainLoopSpec {
+            domain,
+            route: AgentRoute::Test,
+            provider_label: "Test Agent",
+            response_outcome: "test_response",
+            planner_error_prefix: "测试 agent 没能生成下一步动作：",
+            budget_exhausted_reason: "当前测试任务已经耗尽 step budget。",
+            budget_exhausted_message: "当前测试任务已经耗尽 step budget，已停止继续规划。",
+            budget_exhausted_warning: None,
+            runtime_context_mode: DomainRuntimeContextMode::RefreshEachStep,
+            memory_context_mode: DomainMemoryContextMode::None,
+            workspace_defaults_mode: DomainWorkspaceDefaultsMode::None,
+            observation_policy: DomainObservationPolicy::RuntimeContextSnapshot,
+            assertion_policy: DomainAssertionPolicy::TestAssertion,
+            tool_args_policy: DomainToolArgsPolicy::None,
+            allowed_actions: TEST_ALLOWED_ACTIONS,
+            persistence: DomainPersistencePolicy {
+                on_reply: false,
+                on_terminal: false,
+            },
+            auto_complete_on_budget_exhausted: true,
+        },
+        AgentExecutionDomain::Workspace => DomainLoopSpec {
+            domain,
+            route: AgentRoute::Workspace,
+            provider_label: "Workspace Agent",
+            response_outcome: "workspace_response",
+            planner_error_prefix: "workspace agent 没能生成下一步动作：",
+            budget_exhausted_reason: "当前工作区任务已经耗尽 step budget。",
+            budget_exhausted_message: "当前工作区任务已经耗尽 step budget，已停止继续规划。",
+            budget_exhausted_warning: None,
+            runtime_context_mode: DomainRuntimeContextMode::None,
+            memory_context_mode: DomainMemoryContextMode::TaskMemory,
+            workspace_defaults_mode: DomainWorkspaceDefaultsMode::DetectWorkspace,
+            observation_policy: DomainObservationPolicy::Unsupported,
+            assertion_policy: DomainAssertionPolicy::Unsupported,
+            tool_args_policy: DomainToolArgsPolicy::WorkspaceDefaults,
+            allowed_actions: WORKSPACE_ALLOWED_ACTIONS,
+            persistence: DomainPersistencePolicy {
+                on_reply: true,
+                on_terminal: true,
+            },
+            auto_complete_on_budget_exhausted: false,
+        },
+        AgentExecutionDomain::Memory => DomainLoopSpec {
+            domain,
+            route: AgentRoute::Chat,
+            provider_label: "Memory Agent",
+            response_outcome: "memory_response",
+            planner_error_prefix: "memory domain 不通过 loop 执行：",
+            budget_exhausted_reason: "当前记忆查询任务已经耗尽 step budget。",
+            budget_exhausted_message: "当前记忆查询任务已经耗尽 step budget。",
+            budget_exhausted_warning: None,
+            runtime_context_mode: DomainRuntimeContextMode::None,
+            memory_context_mode: DomainMemoryContextMode::None,
+            workspace_defaults_mode: DomainWorkspaceDefaultsMode::None,
+            observation_policy: DomainObservationPolicy::Unsupported,
+            assertion_policy: DomainAssertionPolicy::Unsupported,
+            tool_args_policy: DomainToolArgsPolicy::None,
+            allowed_actions: &[],
+            persistence: DomainPersistencePolicy {
+                on_reply: false,
+                on_terminal: false,
+            },
+            auto_complete_on_budget_exhausted: false,
+        },
+    }
+}
 
 fn render_recent_conversation_context(messages: &[ChatMessage]) -> Option<String> {
     let rendered = messages
@@ -160,13 +369,100 @@ pub struct AgentHandleResult {
     pub meta: AgentMessageMeta,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfirmationIntent {
-    Confirm,
-    Cancel,
+fn merge_assistant_preface(preface: Option<&str>, reply_text: String) -> String {
+    let prefix = preface
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match prefix {
+        Some(prefix) if !reply_text.trim().is_empty() => format!("{prefix}\n{reply_text}"),
+        Some(prefix) => prefix.to_string(),
+        None => reply_text,
+    }
 }
 
-pub async fn maybe_handle_control_message(
+fn domain_to_intent(domain: AgentExecutionDomain) -> TopLevelIntent {
+    match domain {
+        AgentExecutionDomain::Desktop => TopLevelIntent::DesktopAction,
+        AgentExecutionDomain::Test => TopLevelIntent::TestRequest,
+        AgentExecutionDomain::Workspace => TopLevelIntent::WorkspaceTask,
+        AgentExecutionDomain::Memory => TopLevelIntent::MemoryRequest,
+    }
+}
+
+fn intent_to_domain(intent: TopLevelIntent) -> Option<AgentExecutionDomain> {
+    match intent {
+        TopLevelIntent::DesktopAction => Some(AgentExecutionDomain::Desktop),
+        TopLevelIntent::TestRequest => Some(AgentExecutionDomain::Test),
+        TopLevelIntent::WorkspaceTask => Some(AgentExecutionDomain::Workspace),
+        TopLevelIntent::MemoryRequest => Some(AgentExecutionDomain::Memory),
+        _ => None,
+    }
+}
+
+fn domain_to_route(domain: AgentExecutionDomain) -> AgentRoute {
+    match domain {
+        AgentExecutionDomain::Desktop => AgentRoute::Control,
+        AgentExecutionDomain::Test => AgentRoute::Test,
+        AgentExecutionDomain::Workspace => AgentRoute::Workspace,
+        AgentExecutionDomain::Memory => AgentRoute::Chat,
+    }
+}
+
+fn domain_loop_budget(domain: AgentExecutionDomain) -> (usize, usize) {
+    match domain {
+        AgentExecutionDomain::Desktop => (AI_FIRST_STEP_SAFETY_CAP, AI_FIRST_RETRY_BUDGET),
+        AgentExecutionDomain::Test => (TEST_LOOP_STEP_BUDGET, TEST_LOOP_RETRY_BUDGET),
+        AgentExecutionDomain::Workspace => (WORKSPACE_LOOP_STEP_BUDGET, WORKSPACE_LOOP_RETRY_BUDGET),
+        AgentExecutionDomain::Memory => (1, 0),
+    }
+}
+
+fn blocked_message_for_domain(active_task: &AgentTaskRun, target_domain: AgentExecutionDomain) -> String {
+    let target_label = match target_domain {
+        AgentExecutionDomain::Desktop => "桌面动作",
+        AgentExecutionDomain::Test => "测试任务",
+        AgentExecutionDomain::Workspace => "工作区任务",
+        AgentExecutionDomain::Memory => "记忆查询",
+    };
+    format!(
+        "当前还有一个未完成的{}，请先完成当前任务后再发起新的{}。",
+        task_kind_label(active_task.intent.clone()),
+        target_label
+    )
+}
+
+fn domain_action_kind(next: &AgentActionPayload) -> DomainLoopActionKind {
+    match next.action {
+        AgentAction::Respond => DomainLoopActionKind::RespondToUser,
+        AgentAction::Observe => DomainLoopActionKind::ObserveContext,
+        AgentAction::Assert => DomainLoopActionKind::AssertCondition,
+        AgentAction::Confirm => DomainLoopActionKind::RequestConfirmation,
+        AgentAction::Tool => DomainLoopActionKind::ExecuteTool,
+        AgentAction::Retry => DomainLoopActionKind::RetryStep,
+        AgentAction::Finish => DomainLoopActionKind::FinishTask,
+        AgentAction::Fail => DomainLoopActionKind::FailTask,
+    }
+}
+
+fn domain_supports_action(spec: DomainLoopSpec, action: DomainLoopActionKind) -> bool {
+    spec.allowed_actions.contains(&action)
+}
+
+fn domain_action_label(action: DomainLoopActionKind) -> &'static str {
+    match action {
+        DomainLoopActionKind::RespondToUser => "respond_to_user",
+        DomainLoopActionKind::ObserveContext => "observe_context",
+        DomainLoopActionKind::AssertCondition => "assert_condition",
+        DomainLoopActionKind::RequestConfirmation => "request_confirmation",
+        DomainLoopActionKind::ExecuteTool => "execute_tool",
+        DomainLoopActionKind::RetryStep => "retry_step",
+        DomainLoopActionKind::FinishTask => "finish_task",
+        DomainLoopActionKind::FailTask => "fail_task",
+    }
+}
+
+async fn continue_domain_loop(
     app: &AppHandle,
     provider_config: &ProviderConfig,
     api_key: Option<String>,
@@ -180,62 +476,16 @@ pub async fn maybe_handle_control_message(
     allowed_actions: &[DesktopAction],
     user_input: &str,
     conversation_context: Option<&str>,
-    force_route: bool,
-) -> Result<Option<AgentHandleResult>, String> {
-    let trimmed = user_input.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
+    domain: AgentExecutionDomain,
+    task: &mut AgentTaskRun,
+) -> Result<AgentHandleResult, String> {
+    if matches!(domain, AgentExecutionDomain::Memory) {
+        return Err("memory domain 不通过 loop 执行。".to_string());
     }
 
-    // AI-first: 完全依赖上游 lib.rs 的 AI 分类结果 (force_route)
-    // 不再使用 looks_like_control_request() 关键词预检
-    #[allow(deprecated)]
-    let _ = intent::looks_like_control_request(trimmed); // 保留调用以避免 dead_code 警告
-    if !force_route {
-        return Ok(None);
-    }
-
-    if let Some(mut task) = task_store::current_task(app)? {
-        if matches!(task.intent, TopLevelIntent::DesktopAction) {
-            if task.pending_action_id.is_some() || task.waiting_pending_id.is_some() {
-                return Ok(Some(active_task_waiting_result(&task)));
-            }
-
-            let result = continue_loop_for_task(
-                app,
-                provider_config,
-                api_key,
-                oauth_access_token,
-                vision_channel,
-                vision_api_key,
-                codex_command,
-                codex_home,
-                codex_thread_id,
-                permission_level,
-                allowed_actions,
-                trimmed,
-                &mut task,
-            )
-            .await?;
-            return Ok(Some(result));
-        }
-
-        return Ok(Some(blocked_result(
-            format!(
-                "当前还有一个未完成的{}，请先完成当前任务后再发起新的桌面动作。",
-                task_kind_label(task.intent.clone())
-            ),
-        )));
-    }
-
-    let mut task = AgentTaskRun::new_loop(
-        TopLevelIntent::DesktopAction,
-        trimmed,
-        AI_FIRST_STEP_SAFETY_CAP,
-        AI_FIRST_RETRY_BUDGET,
-    );
-    let result = continue_desktop_loop(
+    continue_domain_loop_generic(
         app,
+        domain_loop_spec(domain),
         provider_config,
         api_key,
         oauth_access_token,
@@ -246,15 +496,14 @@ pub async fn maybe_handle_control_message(
         codex_thread_id,
         permission_level,
         allowed_actions,
-        trimmed,
+        user_input,
         conversation_context,
-        &mut task,
+        task,
     )
-    .await?;
-    Ok(Some(result))
+    .await
 }
 
-pub async fn maybe_handle_test_message(
+async fn maybe_handle_domain_message(
     app: &AppHandle,
     provider_config: &ProviderConfig,
     api_key: Option<String>,
@@ -269,91 +518,7 @@ pub async fn maybe_handle_test_message(
     user_input: &str,
     conversation_context: Option<&str>,
     force_route: bool,
-) -> Result<Option<AgentHandleResult>, String> {
-    let trimmed = user_input.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-
-    let looks_test = force_route || looks_like_test_request(trimmed);
-    if !looks_test {
-        return Ok(None);
-    }
-
-    if let Some(mut task) = task_store::current_task(app)? {
-        if matches!(task.intent, TopLevelIntent::TestRequest) {
-            if task.pending_action_id.is_some() || task.waiting_pending_id.is_some() {
-                return Ok(Some(active_task_waiting_result(&task)));
-            }
-
-            let result = continue_loop_for_task(
-                app,
-                provider_config,
-                api_key,
-                oauth_access_token,
-                vision_channel,
-                vision_api_key,
-                codex_command,
-                codex_home,
-                codex_thread_id,
-                permission_level,
-                allowed_actions,
-                trimmed,
-                &mut task,
-            )
-            .await?;
-            return Ok(Some(result));
-        }
-
-        return Ok(Some(blocked_result(
-            format!(
-                "当前还有一个未完成的{}，请先完成当前任务后再发起新的测试请求。",
-                task_kind_label(task.intent.clone())
-            ),
-        )));
-    }
-
-    let mut task = AgentTaskRun::new_loop(
-        TopLevelIntent::TestRequest,
-        trimmed,
-        TEST_LOOP_STEP_BUDGET,
-        TEST_LOOP_RETRY_BUDGET,
-    );
-    let result = continue_test_loop(
-        app,
-        provider_config,
-        api_key,
-        oauth_access_token,
-        vision_channel,
-        vision_api_key,
-        codex_command,
-        codex_home,
-        codex_thread_id,
-        permission_level,
-        allowed_actions,
-        trimmed,
-        conversation_context,
-        &mut task,
-    )
-    .await?;
-    Ok(Some(result))
-}
-
-pub async fn maybe_handle_workspace_message(
-    app: &AppHandle,
-    provider_config: &ProviderConfig,
-    api_key: Option<String>,
-    oauth_access_token: Option<String>,
-    vision_channel: &VisionChannelConfig,
-    vision_api_key: Option<String>,
-    codex_command: Option<String>,
-    codex_home: Option<String>,
-    codex_thread_id: &mut Option<String>,
-    permission_level: u8,
-    allowed_actions: &[DesktopAction],
-    user_input: &str,
-    conversation_context: Option<&str>,
-    force_route: bool,
+    domain: AgentExecutionDomain,
 ) -> Result<Option<AgentHandleResult>, String> {
     let trimmed = user_input.trim();
     if trimmed.is_empty() {
@@ -364,8 +529,17 @@ pub async fn maybe_handle_workspace_message(
         return Ok(None);
     }
 
+    let intent = domain_to_intent(domain);
+    let route = domain_to_route(domain);
+
     if let Some(mut task) = task_store::current_task(app)? {
-        if matches!(task.intent, TopLevelIntent::WorkspaceTask) {
+        if matches!(task.intent, TopLevelIntent::DesktopAction)
+            && matches!(intent, TopLevelIntent::DesktopAction)
+            || matches!(task.intent, TopLevelIntent::TestRequest)
+                && matches!(intent, TopLevelIntent::TestRequest)
+            || matches!(task.intent, TopLevelIntent::WorkspaceTask)
+                && matches!(intent, TopLevelIntent::WorkspaceTask)
+        {
             if task.pending_action_id.is_some() || task.waiting_pending_id.is_some() {
                 return Ok(Some(active_task_waiting_result(&task)));
             }
@@ -390,18 +564,14 @@ pub async fn maybe_handle_workspace_message(
         }
 
         return Ok(Some(blocked_result_for_route(
-            AgentRoute::Workspace,
-            "当前还有一个未完成的桌面或测试任务，请先完成当前任务后再发起新的工作区任务。".to_string(),
+            route,
+            blocked_message_for_domain(&task, domain),
         )));
     }
 
-    let mut task = AgentTaskRun::new_loop(
-        TopLevelIntent::WorkspaceTask,
-        trimmed,
-        WORKSPACE_LOOP_STEP_BUDGET,
-        WORKSPACE_LOOP_RETRY_BUDGET,
-    );
-    let result = continue_workspace_loop(
+    let (step_budget, retry_budget) = domain_loop_budget(domain);
+    let mut task = AgentTaskRun::new_loop(intent, trimmed, step_budget, retry_budget);
+    let result = continue_domain_loop(
         app,
         provider_config,
         api_key,
@@ -415,10 +585,217 @@ pub async fn maybe_handle_workspace_message(
         allowed_actions,
         trimmed,
         conversation_context,
+        domain,
         &mut task,
     )
     .await?;
     Ok(Some(result))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmationIntent {
+    Confirm,
+    Cancel,
+}
+
+pub async fn maybe_handle_control_message(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    conversation_context: Option<&str>,
+    force_route: bool,
+) -> Result<Option<AgentHandleResult>, String> {
+    // AI-first: 完全依赖上游 lib.rs 的 AI 分类结果 (force_route)
+    // 不再使用 looks_like_control_request() 关键词预检
+    #[allow(deprecated)]
+    let _ = intent::looks_like_control_request(user_input.trim()); // 保留调用以避免 dead_code 警告
+    maybe_handle_domain_message(
+        app,
+        provider_config,
+        api_key,
+        oauth_access_token,
+        vision_channel,
+        vision_api_key,
+        codex_command,
+        codex_home,
+        codex_thread_id,
+        permission_level,
+        allowed_actions,
+        user_input,
+        conversation_context,
+        force_route,
+        AgentExecutionDomain::Desktop,
+    )
+    .await
+}
+
+pub async fn maybe_handle_test_message(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    conversation_context: Option<&str>,
+    force_route: bool,
+) -> Result<Option<AgentHandleResult>, String> {
+    let looks_test = force_route || looks_like_test_request(user_input.trim());
+    if !looks_test {
+        return Ok(None);
+    }
+    maybe_handle_domain_message(
+        app,
+        provider_config,
+        api_key,
+        oauth_access_token,
+        vision_channel,
+        vision_api_key,
+        codex_command,
+        codex_home,
+        codex_thread_id,
+        permission_level,
+        allowed_actions,
+        user_input,
+        conversation_context,
+        true,
+        AgentExecutionDomain::Test,
+    )
+    .await
+}
+
+pub async fn maybe_handle_workspace_message(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    conversation_context: Option<&str>,
+    force_route: bool,
+) -> Result<Option<AgentHandleResult>, String> {
+    maybe_handle_domain_message(
+        app,
+        provider_config,
+        api_key,
+        oauth_access_token,
+        vision_channel,
+        vision_api_key,
+        codex_command,
+        codex_home,
+        codex_thread_id,
+        permission_level,
+        allowed_actions,
+        user_input,
+        conversation_context,
+        force_route,
+        AgentExecutionDomain::Workspace,
+    )
+    .await
+}
+
+pub async fn execute_agent_turn_domain(
+    app: &AppHandle,
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    conversation_context: Option<&str>,
+    domain: AgentExecutionDomain,
+    assistant_message: Option<&str>,
+) -> Result<AgentHandleResult, String> {
+    let result = match domain {
+        AgentExecutionDomain::Desktop => maybe_handle_control_message(
+            app,
+            provider_config,
+            api_key,
+            oauth_access_token,
+            vision_channel,
+            vision_api_key,
+            codex_command,
+            codex_home,
+            codex_thread_id,
+            permission_level,
+            allowed_actions,
+            user_input,
+            conversation_context,
+            true,
+        )
+        .await?
+        .ok_or_else(|| "桌面 agent 没有返回结果。".to_string())?,
+        AgentExecutionDomain::Test => maybe_handle_test_message(
+            app,
+            provider_config,
+            api_key,
+            oauth_access_token,
+            vision_channel,
+            vision_api_key,
+            codex_command,
+            codex_home,
+            codex_thread_id,
+            permission_level,
+            allowed_actions,
+            user_input,
+            conversation_context,
+            true,
+        )
+        .await?
+        .ok_or_else(|| "测试 agent 没有返回结果。".to_string())?,
+        AgentExecutionDomain::Workspace => maybe_handle_workspace_message(
+            app,
+            provider_config,
+            api_key,
+            oauth_access_token,
+            vision_channel,
+            vision_api_key,
+            codex_command,
+            codex_home,
+            codex_thread_id,
+            permission_level,
+            allowed_actions,
+            user_input,
+            conversation_context,
+            true,
+        )
+        .await?
+        .ok_or_else(|| "workspace agent 没有返回结果。".to_string())?,
+        AgentExecutionDomain::Memory => handle_memory_request(app)?,
+    };
+
+    Ok(AgentHandleResult {
+        reply_text: merge_assistant_preface(assistant_message, result.reply_text),
+        provider_label: result.provider_label,
+        outcome: result.outcome,
+        detail: result.detail,
+        meta: result.meta,
+    })
 }
 
 pub async fn handle_debug_request(
@@ -661,8 +1038,9 @@ pub async fn cancel_control_pending(app: &AppHandle, pending_id: &str) -> Result
     control_router::cancel(app, pending_id).map_err(|error| error.to_string())
 }
 
-async fn continue_desktop_loop(
+async fn continue_domain_loop_generic(
     app: &AppHandle,
+    spec: DomainLoopSpec,
     provider_config: &ProviderConfig,
     api_key: Option<String>,
     oauth_access_token: Option<String>,
@@ -677,23 +1055,28 @@ async fn continue_desktop_loop(
     conversation_context: Option<&str>,
     task: &mut AgentTaskRun,
 ) -> Result<AgentHandleResult, String> {
-    // 初始化 memory service 并构建 memory context
-    let memory_context = build_memory_context_for_task(app, user_input, task);
+    let static_context = build_domain_loop_static_context(spec, app, user_input, task);
 
     loop {
-        if task.step_budget == 0 {
-            // AI-first: budget 耗尽时注入警告到 completed_notes，让 AI 最终决定
-            // 不再自动调用 can_auto_complete_loop_task()
-            task.completed_notes.push("⚠️ step budget 已耗尽，请在下一轮输出 finish_task 或 fail_task".to_string());
-            break;
+        match handle_domain_budget_boundary(spec, app, task) {
+            DomainLoopControl::Continue => {}
+            DomainLoopControl::Break => break,
+            DomainLoopControl::Return(result) => return Ok(result),
         }
+
         task.task_status = AgentLoopTaskStatus::Planning;
-        let context =
-            runtime_context::refresh_runtime_context(app, task, vision_channel, vision_api_key.clone())
-                .await;
+        let runtime_context = refresh_domain_runtime_context(
+            spec,
+            app,
+            task,
+            vision_channel,
+            vision_api_key.clone(),
+        )
+        .await;
         task.updated_at = now_millis();
 
-        let decision = match loop_planner::plan_next_action(
+        let decision = match domain_loop_planner::plan_next_domain_action(
+            spec.domain,
             provider_config,
             api_key.clone(),
             oauth_access_token.clone(),
@@ -704,260 +1087,11 @@ async fn continue_desktop_loop(
             allowed_actions,
             user_input,
             task,
-            &context,
+            runtime_context.as_ref(),
             conversation_context,
-            memory_context.as_deref(),
-        )
-        .await
-        {
-            Ok(decision) => decision,
-            Err(primary_error) => {
-                task.task_status = AgentLoopTaskStatus::Failed;
-                task.failure_reason = Some(primary_error.clone());
-                task.failure_reason_code = FailureReasonCode::PlannerFailed;
-                task.failure_stage = Some(FailureStage::Planning);
-                // Write-back: 记录失败经验
-                write_back_task_memory(app, task);
-                return Ok(fail_result(
-                    AgentRoute::Control,
-                    "Desktop Agent",
-                    task,
-                    format!("桌面 agent 没能基于当前上下文生成下一步动作。\n主路径：{primary_error}"),
-                ));
-            }
-        };
-
-        match decision.next {
-            AgentNextAction::RespondToUser { message } => {
-                task.task_status = AgentLoopTaskStatus::Completed;
-                return Ok(simple_result(
-                    AgentRoute::Control,
-                    "Desktop Agent",
-                    "agent_response",
-                    message,
-                    task,
-                ));
-            }
-            AgentNextAction::FinishTask { message, summary } => {
-                task.task_status = AgentLoopTaskStatus::Completed;
-                task.final_summary = Some(summary.clone());
-                // Write-back: 记录成功经验
-                write_back_task_memory(app, task);
-                return Ok(complete_result(AgentRoute::Control, "Desktop Agent", task, message, summary));
-            }
-            AgentNextAction::FailTask { message, summary } => {
-                task.task_status = AgentLoopTaskStatus::Failed;
-                task.failure_reason = Some(message.clone());
-                task.failure_reason_code = summary.failure_reason_code.clone();
-                task.failure_stage = summary.failure_stage.clone();
-                task.final_summary = Some(summary.clone());
-                // Write-back: 记录失败经验
-                write_back_task_memory(app, task);
-                return Ok(fail_result(AgentRoute::Control, "Desktop Agent", task, message));
-            }
-            AgentNextAction::ObserveContext { summary } => {
-                // AI-first: desktop loop 现在支持 observe_context
-                task.task_status = AgentLoopTaskStatus::Observing;
-                task.used_probe = true;
-                task.step_budget = task.step_budget.saturating_sub(1);
-                task.completed_notes.push(summary.clone());
-                task.recent_steps.push(super::types::AgentStepRecord {
-                    summary: summary.clone(),
-                    tool: None,
-                    args: None,
-                    outcome: "success".to_string(),
-                    detail: Some("已刷新 runtime context。".to_string()),
-                });
-                runtime_context::append_runtime_observation(
-                    task,
-                    "observe_context",
-                    summary,
-                    task.runtime_context
-                        .as_ref()
-                        .and_then(|context| serde_json::to_value(context).ok()),
-                );
-            }
-            AgentNextAction::RetryStep { target, summary } => {
-                // AI-first: desktop loop 现在支持 retry_step
-                match perform_retry_step(
-                    app,
-                    task,
-                    target,
-                    summary,
-                    AgentRoute::Control,
-                    "Desktop Agent",
-                )? {
-                    LoopContinuation::Continue => {}
-                    LoopContinuation::Return(result) => return Ok(result),
-                }
-            }
-            AgentNextAction::AssertCondition { .. } => {
-                // assert_condition 仅测试循环使用
-                task.task_status = AgentLoopTaskStatus::Failed;
-                task.failure_reason = Some("desktop_action loop 不支持 assert_condition。".to_string());
-                task.failure_reason_code = FailureReasonCode::InvalidAction;
-                task.failure_stage = Some(FailureStage::Planning);
-                return Ok(fail_result(
-                    AgentRoute::Control,
-                    "Desktop Agent",
-                    task,
-                    "desktop_action loop 不支持 assert_condition。".to_string(),
-                ));
-            }
-            AgentNextAction::RequestConfirmation {
-                tool,
-                summary,
-                args,
-                message,
-            } => {
-                let action_args = args.clone();
-                match execute_tool_step(app, task, &tool, args, summary.clone())? {
-                LoopToolExecution::Success => {
-                    task.step_budget = task.step_budget.saturating_sub(1);
-                    task.task_status = AgentLoopTaskStatus::Observing;
-                    if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
-                        task.completed_notes.push(message);
-                    }
-                }
-                LoopToolExecution::Pending {
-                    note,
-                    pending_request,
-                } => {
-                    if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
-                        task.completed_notes.push(message);
-                    }
-                    task_store::replace_active_task(app, Some(task.clone()))?;
-                    return Ok(pending_result(
-                        task,
-                        pending_request,
-                        note,
-                        AgentRoute::Control,
-                        "Desktop Agent",
-                    ));
-                }
-                LoopToolExecution::Failure { reason } => {
-                    if let Some(result) = maybe_retry_or_fail(
-                        task,
-                        &tool,
-                        &reason,
-                        &action_args,
-                        AgentRoute::Control,
-                        "Desktop Agent",
-                    ) {
-                        return Ok(result);
-                    }
-                }
-            }
-            }
-            AgentNextAction::ExecuteTool {
-                tool,
-                summary,
-                args,
-            } => {
-                let action_args = args.clone();
-                match execute_tool_step(app, task, &tool, args, Some(summary.clone()))? {
-                LoopToolExecution::Success => {
-                    task.step_budget = task.step_budget.saturating_sub(1);
-                    task.task_status = AgentLoopTaskStatus::Observing;
-                }
-                LoopToolExecution::Pending {
-                    note,
-                    pending_request,
-                } => {
-                    task_store::replace_active_task(app, Some(task.clone()))?;
-                    return Ok(pending_result(
-                        task,
-                        pending_request,
-                        note,
-                        AgentRoute::Control,
-                        "Desktop Agent",
-                    ));
-                }
-                LoopToolExecution::Failure { reason } => {
-                    if let Some(result) = maybe_retry_or_fail(
-                        task,
-                        &tool,
-                        &reason,
-                        &action_args,
-                        AgentRoute::Control,
-                        "Desktop Agent",
-                    ) {
-                        return Ok(result);
-                    }
-                }
-            }
-            }
-        }
-    }
-
-    task.task_status = AgentLoopTaskStatus::Failed;
-    task.failure_reason = Some("当前桌面任务已经耗尽 step budget。".to_string());
-    task.failure_reason_code = FailureReasonCode::StepBudgetExceeded;
-    task.failure_stage = Some(FailureStage::Planning);
-    Ok(fail_result(
-        AgentRoute::Control,
-        "Desktop Agent",
-        task,
-        "当前桌面任务已经耗尽 step budget，已停止继续规划。".to_string(),
-    ))
-}
-
-async fn continue_test_loop(
-    app: &AppHandle,
-    provider_config: &ProviderConfig,
-    api_key: Option<String>,
-    oauth_access_token: Option<String>,
-    vision_channel: &VisionChannelConfig,
-    vision_api_key: Option<String>,
-    codex_command: Option<String>,
-    codex_home: Option<String>,
-    codex_thread_id: &mut Option<String>,
-    permission_level: u8,
-    allowed_actions: &[DesktopAction],
-    user_input: &str,
-    conversation_context: Option<&str>,
-    task: &mut AgentTaskRun,
-) -> Result<AgentHandleResult, String> {
-    loop {
-        if task.step_budget == 0 {
-            if can_auto_complete_loop_task(task) {
-                task.task_status = AgentLoopTaskStatus::Completed;
-                let summary = build_auto_completion_summary(task);
-                task.final_summary = Some(summary.clone());
-                let message = if task.completed_notes.is_empty() {
-                    "测试任务已完成。".to_string()
-                } else {
-                    task.completed_notes
-                        .last()
-                        .cloned()
-                        .unwrap_or_else(|| "测试任务已完成。".to_string())
-                };
-                return Ok(complete_result(
-                    AgentRoute::Test,
-                    "Test Agent",
-                    task,
-                    message,
-                    summary,
-                ));
-            }
-            break;
-        }
-        task.task_status = AgentLoopTaskStatus::Planning;
-        let context = runtime_context::refresh_runtime_context(app, task, vision_channel, vision_api_key.clone()).await;
-        task.updated_at = now_millis();
-
-        let decision = match test_loop_planner::plan_next_test_action(
-            provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
-            codex_command.clone(),
-            codex_home.clone(),
-            codex_thread_id,
-            permission_level,
-            allowed_actions,
-            user_input,
-            &context,
-            conversation_context,
+            static_context.memory_context.as_deref(),
+            static_context.workspace_prompt.as_deref(),
+            static_context.default_workdir.as_deref(),
         )
         .await
         {
@@ -967,421 +1101,552 @@ async fn continue_test_loop(
                 task.failure_reason = Some(error.clone());
                 task.failure_reason_code = FailureReasonCode::PlannerFailed;
                 task.failure_stage = Some(FailureStage::Planning);
+                persist_domain_memory(spec, app, task, false);
                 return Ok(fail_result(
-                    AgentRoute::Test,
-                    "Test Agent",
+                    spec.route,
+                    spec.provider_label,
                     task,
-                    format!("测试 agent 没能生成下一步动作：{error}"),
+                    format_planner_error(spec, &error),
                 ));
             }
         };
 
-        match decision.next {
-            AgentNextAction::RespondToUser { message } => {
-                task.task_status = AgentLoopTaskStatus::Completed;
-                return Ok(simple_result(
-                    AgentRoute::Test,
-                    "Test Agent",
-                    "test_response",
-                    message,
-                    task,
-                ));
-            }
-            AgentNextAction::ObserveContext { summary } => {
-                task.task_status = AgentLoopTaskStatus::Observing;
-                task.used_probe = true;
-                task.step_budget = task.step_budget.saturating_sub(1);
-                task.completed_notes.push(summary.clone());
-                task.recent_steps.push(super::types::AgentStepRecord {
-                    summary: summary.clone(),
-                    tool: None,
-                    args: None,
-                    outcome: "success".to_string(),
-                    detail: Some("已刷新 runtime context。".to_string()),
-                });
-                runtime_context::append_runtime_observation(
-                    task,
-                    "observe_context",
-                    summary,
-                    task.runtime_context
-                        .as_ref()
-                        .and_then(|context| serde_json::to_value(context).ok()),
-                );
-            }
-            AgentNextAction::ExecuteTool { tool, summary, args } => {
-                let action_args = args.clone();
-                match execute_tool_step(app, task, &tool, args, Some(summary.clone()))? {
-                    LoopToolExecution::Success => {
-                        task.step_budget = task.step_budget.saturating_sub(1);
-                        task.task_status = AgentLoopTaskStatus::Observing;
-                    }
-                    LoopToolExecution::Pending { note, pending_request } => {
-                        task_store::replace_active_task(app, Some(task.clone()))?;
-                        return Ok(pending_result(task, pending_request, note, AgentRoute::Test, "Test Agent"));
-                    }
-                    LoopToolExecution::Failure { reason } => {
-                    if let Some(result) = maybe_retry_or_fail(
-                        task,
-                        &tool,
-                        &reason,
-                        &action_args,
-                        AgentRoute::Test,
-                        "Test Agent",
-                    ) {
-                        return Ok(result);
-                    }
-                }
-                }
-            }
-            AgentNextAction::RequestConfirmation {
-                tool,
-                summary,
-                args,
-                message,
-            } => {
-                let action_args = args.clone();
-                match execute_tool_step(app, task, &tool, args, summary.clone())? {
-                    LoopToolExecution::Success => {
-                        task.step_budget = task.step_budget.saturating_sub(1);
-                        task.task_status = AgentLoopTaskStatus::Observing;
-                        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
-                            task.completed_notes.push(message);
-                        }
-                    }
-                    LoopToolExecution::Pending { note, pending_request } => {
-                        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
-                            task.completed_notes.push(message);
-                        }
-                        task_store::replace_active_task(app, Some(task.clone()))?;
-                        return Ok(pending_result(task, pending_request, note, AgentRoute::Test, "Test Agent"));
-                    }
-                    LoopToolExecution::Failure { reason } => {
-                    if let Some(result) = maybe_retry_or_fail(
-                        task,
-                        &tool,
-                        &reason,
-                        &action_args,
-                        AgentRoute::Test,
-                        "Test Agent",
-                    ) {
-                        return Ok(result);
-                    }
-                }
-                }
-            }
-            AgentNextAction::AssertCondition {
-                assertion_type,
-                summary,
-                params,
-            } => {
-                let result = test_assertions::evaluate(
-                    &assertion_type,
-                    &params,
-                    task.runtime_context
-                        .as_ref()
-                        .ok_or_else(|| "断言执行时缺少 runtime context。".to_string())?,
-                    task.pending_action_id.is_some(),
-                );
-                task.last_tool_result = serde_json::to_value(&result).ok();
-                runtime_context::append_runtime_observation(
-                    task,
-                    "assert_condition",
-                    summary.clone(),
-                    task.last_tool_result.clone(),
-                );
-                task.recent_steps.push(super::types::AgentStepRecord {
-                    summary: summary.clone(),
-                    tool: None,
-                    args: Some(params.clone()),
-                    outcome: if result.passed { "success" } else { "failure" }.to_string(),
-                    detail: Some(
-                        serde_json::to_string(&result)
-                            .unwrap_or_else(|_| "assertion_result".to_string()),
-                    ),
-                });
-                if result.passed {
-                    task.step_budget = task.step_budget.saturating_sub(1);
-                    task.task_status = AgentLoopTaskStatus::Observing;
-                    task.completed_notes.push(format!("断言通过：{summary}"));
-                } else {
-                    task.failure_reason = Some(format!("断言失败：{summary}"));
-                    task.failure_reason_code = result.failure_reason_code.clone();
-                    task.failure_stage = Some(FailureStage::Assertion);
-                    if task.retry_budget > 0 {
-                        task.retry_budget -= 1;
-                        task.used_retry = true;
-                        task.task_status = AgentLoopTaskStatus::Retrying;
-                        task.completed_notes.push(format!("断言失败，允许一次补测：{summary}"));
-                    } else {
-                        task.task_status = AgentLoopTaskStatus::Failed;
-                        return Ok(fail_result(
-                            AgentRoute::Test,
-                            "Test Agent",
-                            task,
-                            format!("断言失败：{summary}"),
-                        ));
-                    }
-                }
-            }
-            AgentNextAction::RetryStep { target, summary } => {
-                match perform_retry_step(
-                    app,
-                    task,
-                    target,
-                    summary,
-                    AgentRoute::Test,
-                    "Test Agent",
-                )? {
-                    LoopContinuation::Continue => {}
-                    LoopContinuation::Return(result) => return Ok(result),
-                }
-            }
-            AgentNextAction::FinishTask { message, summary } => {
-                task.task_status = AgentLoopTaskStatus::Completed;
-                task.final_summary = Some(summary.clone());
-                return Ok(complete_result(AgentRoute::Test, "Test Agent", task, message, summary));
-            }
-            AgentNextAction::FailTask { message, summary } => {
-                task.task_status = AgentLoopTaskStatus::Failed;
-                task.failure_reason = Some(message.clone());
-                task.failure_reason_code = summary.failure_reason_code.clone();
-                task.failure_stage = summary.failure_stage.clone();
-                task.final_summary = Some(summary.clone());
-                return Ok(fail_result(AgentRoute::Test, "Test Agent", task, message));
-            }
+        match handle_domain_next_action(
+            app,
+            spec,
+            &static_context,
+            task,
+            decision.next,
+        )? {
+            DomainLoopControl::Continue => {}
+            DomainLoopControl::Break => break,
+            DomainLoopControl::Return(result) => return Ok(result),
         }
     }
 
     task.task_status = AgentLoopTaskStatus::Failed;
-    task.failure_reason = Some("当前测试任务已经耗尽 step budget。".to_string());
+    task.failure_reason = Some(spec.budget_exhausted_reason.to_string());
     task.failure_reason_code = FailureReasonCode::StepBudgetExceeded;
     task.failure_stage = Some(FailureStage::Planning);
+    persist_domain_memory(spec, app, task, false);
     Ok(fail_result(
-        AgentRoute::Test,
-        "Test Agent",
+        spec.route,
+        spec.provider_label,
         task,
-        "当前测试任务已经耗尽 step budget，已停止继续规划。".to_string(),
+        spec.budget_exhausted_message.to_string(),
     ))
 }
 
-async fn continue_workspace_loop(
+fn build_domain_loop_static_context(
+    spec: DomainLoopSpec,
     app: &AppHandle,
-    provider_config: &ProviderConfig,
-    api_key: Option<String>,
-    oauth_access_token: Option<String>,
-    _vision_channel: &VisionChannelConfig,
-    _vision_api_key: Option<String>,
-    codex_command: Option<String>,
-    codex_home: Option<String>,
-    codex_thread_id: &mut Option<String>,
-    permission_level: u8,
-    allowed_actions: &[DesktopAction],
     user_input: &str,
-    conversation_context: Option<&str>,
+    task: &AgentTaskRun,
+) -> DomainLoopStaticContext {
+    let memory_context = if matches!(spec.memory_context_mode, DomainMemoryContextMode::TaskMemory) {
+        build_memory_context_for_task(app, user_input, task)
+    } else {
+        None
+    };
+
+    let (workspace_prompt, default_workdir) = if matches!(
+        spec.workspace_defaults_mode,
+        DomainWorkspaceDefaultsMode::DetectWorkspace
+    ) {
+        let configured_workspace_root = load(app).ok().and_then(|runtime| runtime.workspace_root);
+        let workspace = workspace_context::detect_workspace_context(configured_workspace_root.as_deref());
+        let prompt = workspace.as_ref().map(|item| item.render_for_prompt());
+        let workdir = workspace
+            .as_ref()
+            .map(|item| item.default_workdir().to_string_lossy().to_string())
+            .or_else(|| Some(".".to_string()));
+        (prompt, workdir)
+    } else {
+        (None, None)
+    };
+
+    DomainLoopStaticContext {
+        memory_context,
+        workspace_prompt,
+        default_workdir,
+    }
+}
+
+async fn refresh_domain_runtime_context(
+    spec: DomainLoopSpec,
+    app: &AppHandle,
     task: &mut AgentTaskRun,
-) -> Result<AgentHandleResult, String> {
-    let memory_context = build_memory_context_for_task(app, user_input, task);
-    let configured_workspace_root = load(app).ok().and_then(|runtime| runtime.workspace_root);
-    let workspace = workspace_context::detect_workspace_context(configured_workspace_root.as_deref());
-    let workspace_prompt = workspace.as_ref().map(|item| item.render_for_prompt());
-    let default_workdir = workspace
+    vision_channel: &VisionChannelConfig,
+    vision_api_key: Option<String>,
+) -> Option<RuntimeContext> {
+    if matches!(
+        spec.runtime_context_mode,
+        DomainRuntimeContextMode::RefreshEachStep
+    ) {
+        Some(
+            runtime_context::refresh_runtime_context(app, task, vision_channel, vision_api_key).await,
+        )
+    } else {
+        None
+    }
+}
+
+fn handle_domain_budget_boundary(
+    spec: DomainLoopSpec,
+    app: &AppHandle,
+    task: &mut AgentTaskRun,
+) -> DomainLoopControl {
+    if task.step_budget > 0 {
+        return DomainLoopControl::Continue;
+    }
+
+    if spec.auto_complete_on_budget_exhausted && can_auto_complete_loop_task(task) {
+        task.task_status = AgentLoopTaskStatus::Completed;
+        let summary = build_auto_completion_summary(task);
+        task.final_summary = Some(summary.clone());
+        persist_domain_memory(spec, app, task, false);
+        let message = if task.completed_notes.is_empty() {
+            "测试任务已完成。".to_string()
+        } else {
+            task.completed_notes
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "测试任务已完成。".to_string())
+        };
+        return DomainLoopControl::Return(complete_result(
+            spec.route,
+            spec.provider_label,
+            task,
+            message,
+            summary,
+        ));
+    }
+
+    if let Some(warning) = spec.budget_exhausted_warning {
+        task.completed_notes.push(warning.to_string());
+    }
+
+    DomainLoopControl::Break
+}
+
+fn handle_domain_next_action(
+    app: &AppHandle,
+    spec: DomainLoopSpec,
+    static_context: &DomainLoopStaticContext,
+    task: &mut AgentTaskRun,
+    next: AgentActionPayload,
+) -> Result<DomainLoopControl, String> {
+    let action_kind = domain_action_kind(&next);
+    if !domain_supports_action(spec, action_kind) {
+        return Ok(DomainLoopControl::Return(invalid_action_result(
+            spec,
+            app,
+            task,
+            &format!(
+                "{:?} loop 不支持 {}。",
+                spec.domain,
+                domain_action_label(action_kind)
+            ),
+        )));
+    }
+
+    match next.action {
+        AgentAction::Respond => {
+            let message = required_action_message(&next, "respond")?;
+            task.task_status = AgentLoopTaskStatus::Completed;
+            persist_domain_memory(spec, app, task, true);
+            Ok(DomainLoopControl::Return(simple_result(
+                spec.route,
+                spec.provider_label,
+                spec.response_outcome,
+                message,
+                task,
+            )))
+        }
+        AgentAction::Finish => {
+            let message = required_action_message(&next, "finish")?;
+            let summary = required_action_final_summary(&next, "finish")?;
+            task.task_status = AgentLoopTaskStatus::Completed;
+            task.final_summary = Some(summary.clone());
+            persist_domain_memory(spec, app, task, false);
+            Ok(DomainLoopControl::Return(complete_result(
+                spec.route,
+                spec.provider_label,
+                task,
+                message,
+                summary,
+            )))
+        }
+        AgentAction::Fail => {
+            let message = required_action_message(&next, "fail")?;
+            let summary = required_action_final_summary(&next, "fail")?;
+            task.task_status = AgentLoopTaskStatus::Failed;
+            task.failure_reason = Some(message.clone());
+            task.failure_reason_code = summary.failure_reason_code.clone();
+            task.failure_stage = summary.failure_stage.clone();
+            task.final_summary = Some(summary.clone());
+            persist_domain_memory(spec, app, task, false);
+            Ok(DomainLoopControl::Return(fail_result(
+                spec.route,
+                spec.provider_label,
+                task,
+                message,
+            )))
+        }
+        AgentAction::Observe => {
+            let summary = required_action_step_summary(&next, "observe")?;
+            execute_domain_observation(spec, task, summary)
+        }
+        AgentAction::Retry => {
+            let target = required_action_retry_target(&next)?;
+            let summary = required_action_step_summary(&next, "retry")?;
+            match perform_retry_step(
+                app,
+                task,
+                target,
+                summary,
+                spec.route,
+                spec.provider_label,
+            )? {
+                LoopContinuation::Continue => Ok(DomainLoopControl::Continue),
+                LoopContinuation::Return(result) => Ok(DomainLoopControl::Return(result)),
+            }
+        }
+        AgentAction::Assert => execute_domain_assertion(
+            spec,
+            task,
+            required_action_assertion_type(&next)?,
+            required_action_step_summary(&next, "assert")?,
+            next.params,
+        ),
+        AgentAction::Confirm => {
+            let tool = required_action_tool(&next, "confirm")?;
+            let summary = next
+                .summary
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            handle_domain_tool_step(
+                app,
+                spec,
+                static_context,
+                task,
+                tool,
+                next.args,
+                summary,
+                next.message,
+            )
+        }
+        AgentAction::Tool => {
+            let tool = required_action_tool(&next, "tool")?;
+            let summary = next
+                .summary
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            handle_domain_tool_step(
+                app,
+                spec,
+                static_context,
+                task,
+                tool,
+                next.args,
+                summary,
+                None,
+            )
+        }
+    }
+}
+
+fn required_action_message(
+    action: &AgentActionPayload,
+    action_label: &str,
+) -> Result<String, String> {
+    action
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("{action_label} action 缺少 message。"))
+}
+
+fn required_action_tool(
+    action: &AgentActionPayload,
+    action_label: &str,
+) -> Result<String, String> {
+    action
+        .tool
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("{action_label} action 缺少 tool。"))
+}
+
+fn required_action_step_summary(
+    action: &AgentActionPayload,
+    action_label: &str,
+) -> Result<String, String> {
+    action
+        .summary
         .as_ref()
-        .map(|item| item.default_workdir().to_string_lossy().to_string())
-        .unwrap_or_else(|| ".".to_string());
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("{action_label} action 缺少 string summary。"))
+}
 
-    loop {
-        if task.step_budget == 0 {
-            break;
+fn required_action_final_summary(
+    action: &AgentActionPayload,
+    action_label: &str,
+) -> Result<AgentLoopSummary, String> {
+    let summary = action
+        .summary
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| format!("{action_label} action 缺少 summary。"))?;
+    serde_json::from_value(summary)
+        .map_err(|_| format!("{action_label} action summary 必须是 AgentLoopSummary 对象。"))
+}
+
+fn required_action_retry_target(action: &AgentActionPayload) -> Result<RetryTarget, String> {
+    action
+        .target
+        .clone()
+        .ok_or_else(|| "retry action 缺少 target。".to_string())
+}
+
+fn required_action_assertion_type(
+    action: &AgentActionPayload,
+) -> Result<super::types::AssertionType, String> {
+    action
+        .assertion_type
+        .clone()
+        .ok_or_else(|| "assert action 缺少 assertion_type。".to_string())
+}
+
+fn handle_assert_condition(
+    spec: DomainLoopSpec,
+    task: &mut AgentTaskRun,
+    assertion_type: super::types::AssertionType,
+    summary: String,
+    params: Value,
+) -> Result<DomainLoopControl, String> {
+    let result = test_assertions::evaluate(
+        &assertion_type,
+        &params,
+        task.runtime_context
+            .as_ref()
+            .ok_or_else(|| "断言执行时缺少 runtime context。".to_string())?,
+        task.pending_action_id.is_some(),
+    );
+    task.last_tool_result = serde_json::to_value(&result).ok();
+    runtime_context::append_runtime_observation(
+        task,
+        "assert_condition",
+        summary.clone(),
+        task.last_tool_result.clone(),
+    );
+    task.recent_steps.push(super::types::AgentStepRecord {
+        summary: summary.clone(),
+        tool: None,
+        args: Some(params),
+        outcome: if result.passed { "success" } else { "failure" }.to_string(),
+        detail: Some(
+            serde_json::to_string(&result).unwrap_or_else(|_| "assertion_result".to_string()),
+        ),
+    });
+    if result.passed {
+        task.step_budget = task.step_budget.saturating_sub(1);
+        task.task_status = AgentLoopTaskStatus::Observing;
+        task.completed_notes.push(format!("断言通过：{summary}"));
+        Ok(DomainLoopControl::Continue)
+    } else {
+        task.failure_reason = Some(format!("断言失败：{summary}"));
+        task.failure_reason_code = result.failure_reason_code.clone();
+        task.failure_stage = Some(FailureStage::Assertion);
+        if task.retry_budget > 0 {
+            task.retry_budget -= 1;
+            task.used_retry = true;
+            task.task_status = AgentLoopTaskStatus::Retrying;
+            task.completed_notes.push(format!("断言失败，允许一次补测：{summary}"));
+            Ok(DomainLoopControl::Continue)
+        } else {
+            task.task_status = AgentLoopTaskStatus::Failed;
+            Ok(DomainLoopControl::Return(fail_result(
+                spec.route,
+                spec.provider_label,
+                task,
+                format!("断言失败：{summary}"),
+            )))
         }
+    }
+}
 
-        task.task_status = AgentLoopTaskStatus::Planning;
-        task.updated_at = now_millis();
-
-        let decision = match workspace_loop_planner::plan_next_workspace_action(
-            provider_config,
-            api_key.clone(),
-            oauth_access_token.clone(),
-            codex_command.clone(),
-            codex_home.clone(),
-            codex_thread_id,
-            permission_level,
-            allowed_actions,
-            user_input,
-            task,
-            conversation_context,
-            memory_context.as_deref(),
-            workspace_prompt.as_deref(),
-            &default_workdir,
-        )
-        .await
-        {
-            Ok(decision) => decision,
-            Err(error) => {
-                task.task_status = AgentLoopTaskStatus::Failed;
-                task.failure_reason = Some(error.clone());
-                task.failure_reason_code = FailureReasonCode::PlannerFailed;
-                task.failure_stage = Some(FailureStage::Planning);
-                write_back_task_memory(app, task);
-                return Ok(fail_result(
-                    AgentRoute::Workspace,
-                    "Workspace Agent",
-                    task,
-                    format!("workspace agent 没能生成下一步动作：{error}"),
-                ));
-            }
-        };
-
-        match decision.next {
-            AgentNextAction::RespondToUser { message } => {
-                task.task_status = AgentLoopTaskStatus::Completed;
-                write_back_task_memory(app, task);
-                return Ok(simple_result(
-                    AgentRoute::Workspace,
-                    "Workspace Agent",
-                    "workspace_response",
-                    message,
-                    task,
-                ));
-            }
-            AgentNextAction::ExecuteTool { tool, summary, args } => {
-                let action_args = apply_workspace_defaults(&tool, args.clone(), Some(&default_workdir));
-                match execute_tool_step(app, task, &tool, action_args.clone(), Some(summary.clone()))? {
-                    LoopToolExecution::Success => {
-                        task.step_budget = task.step_budget.saturating_sub(1);
-                        task.task_status = AgentLoopTaskStatus::Observing;
-                    }
-                    LoopToolExecution::Pending { note, pending_request } => {
-                        task_store::replace_active_task(app, Some(task.clone()))?;
-                        return Ok(pending_result(
-                            task,
-                            pending_request,
-                            note,
-                            AgentRoute::Workspace,
-                            "Workspace Agent",
-                        ));
-                    }
-                    LoopToolExecution::Failure { reason } => {
-                        if let Some(result) = maybe_retry_or_fail(
-                            task,
-                            &tool,
-                            &reason,
-                            &action_args,
-                            AgentRoute::Workspace,
-                            "Workspace Agent",
-                        ) {
-                            return Ok(result);
-                        }
-                    }
-                }
-            }
-            AgentNextAction::RequestConfirmation {
-                tool,
+fn execute_domain_observation(
+    spec: DomainLoopSpec,
+    task: &mut AgentTaskRun,
+    summary: String,
+) -> Result<DomainLoopControl, String> {
+    match spec.observation_policy {
+        DomainObservationPolicy::RuntimeContextSnapshot => {
+            task.task_status = AgentLoopTaskStatus::Observing;
+            task.used_probe = true;
+            task.step_budget = task.step_budget.saturating_sub(1);
+            task.completed_notes.push(summary.clone());
+            task.recent_steps.push(super::types::AgentStepRecord {
+                summary: summary.clone(),
+                tool: None,
+                args: None,
+                outcome: "success".to_string(),
+                detail: Some("已刷新 runtime context。".to_string()),
+            });
+            runtime_context::append_runtime_observation(
+                task,
+                "observe_context",
                 summary,
-                args,
-                message,
-            } => {
-                let action_args = apply_workspace_defaults(&tool, args.clone(), Some(&default_workdir));
-                match execute_tool_step(app, task, &tool, action_args.clone(), summary.clone())? {
-                    LoopToolExecution::Success => {
-                        task.step_budget = task.step_budget.saturating_sub(1);
-                        task.task_status = AgentLoopTaskStatus::Observing;
-                        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
-                            task.completed_notes.push(message);
-                        }
-                    }
-                    LoopToolExecution::Pending { note, pending_request } => {
-                        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
-                            task.completed_notes.push(message);
-                        }
-                        task_store::replace_active_task(app, Some(task.clone()))?;
-                        return Ok(pending_result(
-                            task,
-                            pending_request,
-                            note,
-                            AgentRoute::Workspace,
-                            "Workspace Agent",
-                        ));
-                    }
-                    LoopToolExecution::Failure { reason } => {
-                        if let Some(result) = maybe_retry_or_fail(
-                            task,
-                            &tool,
-                            &reason,
-                            &action_args,
-                            AgentRoute::Workspace,
-                            "Workspace Agent",
-                        ) {
-                            return Ok(result);
-                        }
-                    }
-                }
+                task.runtime_context
+                    .as_ref()
+                    .and_then(|context| serde_json::to_value(context).ok()),
+            );
+            Ok(DomainLoopControl::Continue)
+        }
+        DomainObservationPolicy::Unsupported => Err(format!(
+            "{:?} loop 未配置 observe_context 策略。",
+            spec.domain
+        )),
+    }
+}
+
+fn execute_domain_assertion(
+    spec: DomainLoopSpec,
+    task: &mut AgentTaskRun,
+    assertion_type: super::types::AssertionType,
+    summary: String,
+    params: Value,
+) -> Result<DomainLoopControl, String> {
+    match spec.assertion_policy {
+        DomainAssertionPolicy::TestAssertion => {
+            handle_assert_condition(spec, task, assertion_type, summary, params)
+        }
+        DomainAssertionPolicy::Unsupported => Err(format!(
+            "{:?} loop 未配置 assert_condition 策略。",
+            spec.domain
+        )),
+    }
+}
+
+fn handle_domain_tool_step(
+    app: &AppHandle,
+    spec: DomainLoopSpec,
+    static_context: &DomainLoopStaticContext,
+    task: &mut AgentTaskRun,
+    tool: String,
+    args: Value,
+    summary: Option<String>,
+    message: Option<String>,
+) -> Result<DomainLoopControl, String> {
+    let action_args = apply_domain_tool_defaults(spec, &tool, args, static_context);
+    match execute_tool_step(app, task, &tool, action_args.clone(), summary)? {
+        LoopToolExecution::Success => {
+            task.step_budget = task.step_budget.saturating_sub(1);
+            task.task_status = AgentLoopTaskStatus::Observing;
+            if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
+                task.completed_notes.push(message);
             }
-            AgentNextAction::RetryStep { target, summary } => {
-                match perform_retry_step(
-                    app,
-                    task,
-                    target,
-                    summary,
-                    AgentRoute::Workspace,
-                    "Workspace Agent",
-                )? {
-                    LoopContinuation::Continue => {}
-                    LoopContinuation::Return(result) => return Ok(result),
-                }
+            Ok(DomainLoopControl::Continue)
+        }
+        LoopToolExecution::Pending {
+            note,
+            pending_request,
+        } => {
+            if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
+                task.completed_notes.push(message);
             }
-            AgentNextAction::FinishTask { message, summary } => {
-                task.task_status = AgentLoopTaskStatus::Completed;
-                task.final_summary = Some(summary.clone());
-                write_back_task_memory(app, task);
-                return Ok(complete_result(
-                    AgentRoute::Workspace,
-                    "Workspace Agent",
-                    task,
-                    message,
-                    summary,
-                ));
-            }
-            AgentNextAction::FailTask { message, summary } => {
-                task.task_status = AgentLoopTaskStatus::Failed;
-                task.failure_reason = Some(message.clone());
-                task.failure_reason_code = summary.failure_reason_code.clone();
-                task.failure_stage = summary.failure_stage.clone();
-                task.final_summary = Some(summary);
-                write_back_task_memory(app, task);
-                return Ok(fail_result(
-                    AgentRoute::Workspace,
-                    "Workspace Agent",
-                    task,
-                    message,
-                ));
-            }
-            AgentNextAction::ObserveContext { .. } | AgentNextAction::AssertCondition { .. } => {
-                task.task_status = AgentLoopTaskStatus::Failed;
-                task.failure_reason = Some("workspace loop 不支持 observe_context/assert_condition。".to_string());
-                task.failure_reason_code = FailureReasonCode::InvalidAction;
-                task.failure_stage = Some(FailureStage::Planning);
-                write_back_task_memory(app, task);
-                return Ok(fail_result(
-                    AgentRoute::Workspace,
-                    "Workspace Agent",
-                    task,
-                    "workspace loop 不支持 observe_context/assert_condition。".to_string(),
-                ));
+            task_store::replace_active_task(app, Some(task.clone()))?;
+            Ok(DomainLoopControl::Return(pending_result(
+                task,
+                pending_request,
+                note,
+                spec.route,
+                spec.provider_label,
+            )))
+        }
+        LoopToolExecution::Failure { reason } => {
+            if let Some(result) = maybe_retry_or_fail(
+                task,
+                &tool,
+                &reason,
+                &action_args,
+                spec.route,
+                spec.provider_label,
+            ) {
+                Ok(DomainLoopControl::Return(result))
+            } else {
+                Ok(DomainLoopControl::Continue)
             }
         }
     }
+}
 
+fn apply_domain_tool_defaults(
+    spec: DomainLoopSpec,
+    tool: &str,
+    args: Value,
+    static_context: &DomainLoopStaticContext,
+) -> Value {
+    match spec.tool_args_policy {
+        DomainToolArgsPolicy::WorkspaceDefaults => {
+            apply_workspace_defaults(tool, args, static_context.default_workdir.as_deref())
+        }
+        DomainToolArgsPolicy::None => args,
+    }
+}
+
+fn invalid_action_result(
+    spec: DomainLoopSpec,
+    app: &AppHandle,
+    task: &mut AgentTaskRun,
+    reason: &str,
+) -> AgentHandleResult {
     task.task_status = AgentLoopTaskStatus::Failed;
-    task.failure_reason = Some("当前工作区任务已经耗尽 step budget。".to_string());
-    task.failure_reason_code = FailureReasonCode::StepBudgetExceeded;
+    task.failure_reason = Some(reason.to_string());
+    task.failure_reason_code = FailureReasonCode::InvalidAction;
     task.failure_stage = Some(FailureStage::Planning);
-    write_back_task_memory(app, task);
-    Ok(fail_result(
-        AgentRoute::Workspace,
-        "Workspace Agent",
+    persist_domain_memory(spec, app, task, false);
+    fail_result(
+        spec.route,
+        spec.provider_label,
         task,
-        "当前工作区任务已经耗尽 step budget，已停止继续规划。".to_string(),
-    ))
+        reason.to_string(),
+    )
+}
+
+fn persist_domain_memory(
+    spec: DomainLoopSpec,
+    app: &AppHandle,
+    task: &AgentTaskRun,
+    is_reply: bool,
+) {
+    let should_persist = if is_reply {
+        spec.persistence.on_reply
+    } else {
+        spec.persistence.on_terminal
+    };
+
+    if should_persist {
+        write_back_task_memory(app, task);
+    }
+}
+
+fn format_planner_error(spec: DomainLoopSpec, error: &str) -> String {
+    if spec.planner_error_prefix.ends_with('：') || spec.planner_error_prefix.ends_with(':') {
+        format!("{}{}", spec.planner_error_prefix, error)
+    } else {
+        format!("{}\n主路径：{}", spec.planner_error_prefix, error)
+    }
 }
 
 enum LoopContinuation {
@@ -2158,69 +2423,28 @@ async fn continue_loop_for_task(
     user_input: &str,
     task: &mut AgentTaskRun,
 ) -> Result<AgentHandleResult, String> {
-    match task.intent {
-        TopLevelIntent::DesktopAction => {
-            let conversation_context = load_recent_conversation_context(app);
-            continue_desktop_loop(
-                app,
-                provider_config,
-                api_key,
-                oauth_access_token,
-                vision_channel,
-                vision_api_key,
-                codex_command,
-                codex_home,
-                codex_thread_id,
-                permission_level,
-                allowed_actions,
-                user_input,
-                conversation_context.as_deref(),
-                task,
-            )
-            .await
-        }
-        TopLevelIntent::TestRequest => {
-            let conversation_context = load_recent_conversation_context(app);
-            continue_test_loop(
-                app,
-                provider_config,
-                api_key,
-                oauth_access_token,
-                vision_channel,
-                vision_api_key,
-                codex_command,
-                codex_home,
-                codex_thread_id,
-                permission_level,
-                allowed_actions,
-                user_input,
-                conversation_context.as_deref(),
-                task,
-            )
-            .await
-        }
-        TopLevelIntent::WorkspaceTask => {
-            let conversation_context = load_recent_conversation_context(app);
-            continue_workspace_loop(
-                app,
-                provider_config,
-                api_key,
-                oauth_access_token,
-                vision_channel,
-                vision_api_key,
-                codex_command,
-                codex_home,
-                codex_thread_id,
-                permission_level,
-                allowed_actions,
-                user_input,
-                conversation_context.as_deref(),
-                task,
-            )
-            .await
-        }
-        _ => Err("当前 loop task 的 intent 不支持继续执行。".to_string()),
-    }
+    let Some(domain) = intent_to_domain(task.intent.clone()) else {
+        return Err("当前 loop task 的 intent 不支持继续执行。".to_string());
+    };
+    let conversation_context = load_recent_conversation_context(app);
+    continue_domain_loop(
+        app,
+        provider_config,
+        api_key,
+        oauth_access_token,
+        vision_channel,
+        vision_api_key,
+        codex_command,
+        codex_home,
+        codex_thread_id,
+        permission_level,
+        allowed_actions,
+        user_input,
+        conversation_context.as_deref(),
+        domain,
+        task,
+    )
+    .await
 }
 
 fn is_retryable_risk(

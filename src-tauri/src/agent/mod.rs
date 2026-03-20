@@ -6,10 +6,12 @@
 
 pub mod executor;
 pub mod agent_turn;
+pub mod domain_loop_planner;
 pub mod intent;
 pub mod intent_classifier;
 pub mod loop_planner;
 pub mod loop_prompt;
+pub mod model_adapter;
 pub mod planner;
 pub mod prompt;
 pub mod runtime_binding;

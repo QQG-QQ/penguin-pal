@@ -1,17 +1,22 @@
 use serde_json::Value;
 
 use crate::{
-    ai::provider,
     app_state::{DesktopAction, ProviderConfig},
     control::registry,
 };
 
 use super::{
+    loop_planner::{
+        ensure_final_summary_seed, ensure_step_summary, extract_json_value,
+        normalize_next_action_protocol, normalize_step_summary,
+    },
+    model_adapter,
     runtime_context::render_runtime_context_for_prompt,
     test_loop_prompt,
     types::{
-        empty_json_object, is_agent_tool_allowed, AgentLoopDecision, AgentLoopSummary,
-        AgentNextAction, AgentTaskStatus, AssertionType, RetryTarget, RuntimeContext,
+        empty_json_object, is_agent_tool_allowed, AgentAction, AgentActionPayload,
+        AgentLoopDecision, AgentLoopSummary, AgentTaskStatus, AssertionType, RetryTarget,
+        RuntimeContext,
         TopLevelIntent,
     },
 };
@@ -49,7 +54,7 @@ pub async fn plan_next_test_action(
         render_runtime_context_for_prompt(context),
     );
 
-    let raw = provider::plan_control_request(
+    let raw = model_adapter::request_structured_agent_output(
         provider_config,
         api_key,
         oauth_access_token,
@@ -92,88 +97,107 @@ fn normalize_test_loop_decision(mut payload: Value) -> Result<Value, String> {
         .get_mut("next")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "测试 agent loop 返回缺少 next 对象。".to_string())?;
-    let kind = next
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "测试 agent loop 返回缺少 next.kind。".to_string())?;
-    let kind = kind.to_string();
+    let kind = normalize_next_action_protocol(next, "测试 agent loop")?;
 
     match kind.as_str() {
-        "observe_context"
-        | "execute_tool"
-        | "assert_condition"
-        | "request_confirmation"
-        | "retry_step" => {
+        "observe" | "tool" | "assert" | "confirm" | "retry" => {
             if let Some(step_summary) = next.remove("stepSummary") {
                 next.entry("summary".to_string()).or_insert(step_summary);
             }
             ensure_step_summary(next, &kind);
             normalize_step_summary(next);
         }
-        "finish_task" | "fail_task" => {
+        "finish" | "fail" => {
             if let Some(final_summary) = next.remove("finalSummary") {
                 next.entry("summary".to_string()).or_insert(final_summary);
             }
             ensure_final_summary_seed(next, &kind);
             normalize_final_summary(next, &goal, &kind);
         }
-        "respond_to_user" => {}
+        "respond" => {}
         _ => {}
     }
 
     Ok(payload)
 }
 
-fn validate_next_test_action(action: &AgentNextAction) -> Result<(), String> {
-    match action {
-        AgentNextAction::RespondToUser { message }
-        | AgentNextAction::ObserveContext { summary: message } => {
+fn validate_next_test_action(action: &AgentActionPayload) -> Result<(), String> {
+    match action.action {
+        AgentAction::Respond | AgentAction::Observe => {
+            let message = action
+                .message
+                .as_deref()
+                .or_else(|| action.summary.as_ref().and_then(Value::as_str))
+                .map(str::trim)
+                .unwrap_or_default();
             if message.trim().is_empty() {
                 return Err("测试 loop 文本字段不能为空。".to_string());
             }
         }
-        AgentNextAction::AssertCondition {
-            assertion_type: _,
-            summary,
-            params,
-        } => {
+        AgentAction::Assert => {
+            let summary = action
+                .summary
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
             if summary.trim().is_empty() {
                 return Err("assert_condition.summary 不能为空。".to_string());
             }
-            if !params.is_object() {
+            if !action.params.is_object() {
                 return Err("assert_condition.params 必须是 object。".to_string());
             }
         }
-        AgentNextAction::RequestConfirmation { tool, args, .. } => {
+        AgentAction::Confirm => {
+            let tool = action.tool.as_deref().unwrap_or_default();
             if !is_agent_tool_allowed(tool) {
                 return Err(format!("测试 loop 包含未授权工具：{tool}"));
             }
-            if !args.is_object() {
+            if !action.args.is_object() {
                 return Err("request_confirmation.args 必须是 object。".to_string());
             }
         }
-        AgentNextAction::ExecuteTool { tool, args, .. } => {
+        AgentAction::Tool => {
+            let tool = action.tool.as_deref().unwrap_or_default();
             if !is_agent_tool_allowed(tool) {
                 return Err(format!("测试 loop 包含未授权工具：{tool}"));
             }
-            if !args.is_object() {
+            if !action.args.is_object() {
                 return Err("execute_tool.args 必须是 object。".to_string());
             }
         }
-        AgentNextAction::RetryStep { target, summary } => {
+        AgentAction::Retry => {
+            let summary = action
+                .summary
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
             if summary.trim().is_empty() {
                 return Err("retry_step.summary 不能为空。".to_string());
             }
-            if !matches!(target, RetryTarget::ObserveContext | RetryTarget::LastTool) {
+            if !matches!(
+                action.target,
+                Some(RetryTarget::ObserveContext | RetryTarget::LastTool)
+            ) {
                 return Err("retry_step.target 非法。".to_string());
             }
         }
-        AgentNextAction::FinishTask { message, summary }
-        | AgentNextAction::FailTask { message, summary } => {
+        AgentAction::Finish | AgentAction::Fail => {
+            let message = action.message.as_deref().map(str::trim).unwrap_or_default();
             if message.trim().is_empty() {
                 return Err("finish_task/fail_task.message 不能为空。".to_string());
             }
-            validate_summary(summary)?;
+            let summary = action
+                .summary
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| "finish/fail.summary 不能为空。".to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<AgentLoopSummary>(value)
+                        .map_err(|_| "finish/fail.summary 必须是对象。".to_string())
+                })?;
+            validate_summary(&summary)?;
         }
     }
 
@@ -198,88 +222,17 @@ pub fn assert_decision(goal: &str, assertion_type: AssertionType, summary: &str,
     AgentLoopDecision {
         intent: TopLevelIntent::TestRequest,
         goal: goal.trim().to_string(),
-        next: AgentNextAction::AssertCondition {
-            assertion_type,
-            summary: summary.to_string(),
+        next: AgentActionPayload {
+            action: AgentAction::Assert,
+            message: None,
+            tool: None,
+            summary: Some(Value::String(summary.to_string())),
+            args: empty_json_object(),
+            target: None,
+            assertion_type: Some(assertion_type),
             params: if params.is_null() { empty_json_object() } else { params },
         },
     }
-}
-
-fn extract_json_value(raw: &str) -> Option<Value> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        return Some(value);
-    }
-
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-
-    let candidate = &trimmed[start..=end];
-    serde_json::from_str::<Value>(candidate).ok()
-}
-
-fn normalize_step_summary(next: &mut serde_json::Map<String, Value>) {
-    let Some(summary) = next.get_mut("summary") else {
-        return;
-    };
-
-    if summary.is_string() {
-        return;
-    }
-
-    let normalized = summary
-        .as_object()
-        .and_then(|map| {
-            map.get("message")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-                .or_else(|| map.get("text").and_then(Value::as_str).map(ToString::to_string))
-        })
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| summary.to_string());
-    *summary = Value::String(normalized);
-}
-
-fn ensure_step_summary(next: &mut serde_json::Map<String, Value>, kind: &str) {
-    if next.contains_key("summary") {
-        return;
-    }
-
-    let fallback = next
-        .get("message")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(ToString::to_string)
-        .or_else(|| {
-            next.get("tool")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| format!("执行工具 {value}"))
-        })
-        .unwrap_or_else(|| kind.to_string());
-    next.insert("summary".to_string(), Value::String(fallback));
-}
-
-fn ensure_final_summary_seed(next: &mut serde_json::Map<String, Value>, kind: &str) {
-    if next.contains_key("summary") {
-        return;
-    }
-
-    let fallback = next
-        .get("message")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| kind.to_string());
-    next.insert("summary".to_string(), Value::String(fallback));
 }
 
 fn normalize_final_summary(
@@ -346,12 +299,12 @@ fn normalize_final_summary(
     } else {
         message
     };
-    let final_status = if kind == "finish_task" {
+    let final_status = if kind == "finish" {
         "completed"
     } else {
         "failed"
     };
-    let failure_stage = if kind == "finish_task" {
+    let failure_stage = if kind == "finish" {
         Value::Null
     } else {
         Value::String("finish".to_string())
@@ -373,7 +326,7 @@ fn normalize_final_summary(
 }
 
 fn normalize_final_status_value(value: Option<&Value>, kind: &str) -> Value {
-    let fallback = if kind == "finish_task" {
+    let fallback = if kind == "finish" {
         "completed"
     } else {
         "failed"
@@ -387,7 +340,7 @@ fn normalize_final_status_value(value: Option<&Value>, kind: &str) -> Value {
 }
 
 fn normalize_failure_stage_value(value: Option<&Value>, kind: &str) -> Value {
-    if kind == "finish_task" {
+    if kind == "finish" {
         return Value::Null;
     }
 
@@ -406,7 +359,7 @@ fn normalize_failure_stage_value(value: Option<&Value>, kind: &str) -> Value {
 }
 
 fn normalize_failure_reason_code_value(value: Option<&Value>, message: &str, kind: &str) -> Value {
-    if kind == "finish_task" {
+    if kind == "finish" {
         return Value::String("none".to_string());
     }
 

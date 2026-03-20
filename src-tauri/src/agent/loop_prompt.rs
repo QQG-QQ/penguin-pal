@@ -40,7 +40,8 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
   \"intent\":\"desktop_action\",\n\
   \"goal\":\"...\",\n\
   \"next\":{{\n\
-    \"kind\":\"respond_to_user|request_confirmation|execute_tool|observe_context|retry_step|finish_task|fail_task\",\n\
+    \"action\":\"respond|confirm|tool|observe|retry|finish|fail\",\n\
+    \"kind\":\"(兼容旧协议，可省略)\",\n\
     \"message\":\"...\",\n\
     \"tool\":\"...\",\n\
     \"stepSummary\":\"...\",\n\
@@ -91,8 +92,9 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
 13. 当 stepBudget=0 时，**必须**输出 finish_task 或 fail_task，不能继续执行工具。\n\
 14. finish_task 时 failureStage 必须省略或使用 JSON null，不要输出字符串 \"null\"。\n\
 15. 不确定时宁可 fail_task，也不要瞎猜；不要尝试隐私外发。\n\
-16. observe_context 用于主动刷新上下文：kind=\"observe_context\", stepSummary=\"检查当前窗口状态\"。\n\
-17. retry_step 用于重试：kind=\"retry_step\", target=\"observe_context\"|\"last_tool\", stepSummary=\"重试上一步操作\"。",
+16. 优先输出通用动作协议：action=respond|confirm|tool|observe|retry|finish|fail；kind 只是兼容字段，不必再主动使用。\n\
+17. observe_context 用于主动刷新上下文：action=\"observe\", stepSummary=\"检查当前窗口状态\"。\n\
+18. retry_step 用于重试：action=\"retry\", target=\"observe_context\"|\"last_tool\", stepSummary=\"重试上一步操作\"。",
         cap = 50,
         schema = VISION_SCHEMA_VERSION,
         tool_lines = tool_lines,
