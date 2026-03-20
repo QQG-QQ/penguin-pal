@@ -71,6 +71,23 @@ cargo build
 npm run tauri build
 ```
 
+如果 Windows `release` 打包阶段出现这类错误：
+- `failed to mmap rmeta metadata`
+- `found invalid metadata files`
+- `页面文件太小，无法完成操作`
+
+先执行：
+
+```bash
+cd src-tauri
+cargo clean --release
+
+cd ..
+npm run tauri:build
+```
+
+当前项目的打包脚本在 Windows 发布模式下会自动改成单并发 Cargo，以降低 `rmeta` 损坏和分页文件压力导致的编译失败概率；如果仍然报相同错误，需要增大 Windows 虚拟内存（页面文件）。
+
 ## 目录结构
 
 ```text
