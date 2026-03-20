@@ -390,6 +390,7 @@ let lastBubbleDebugKey = ''
 const dockState = ref<PetDockState>('normal')
 let restorePetFrame: PetWindowFrame | null = null
 let cursorPassthroughEnabled = false
+let cursorPassthroughSuspendUntil = 0
 
 const isSettingsView = computed(() => windowView.value === 'settings')
 const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWindowView())
@@ -921,6 +922,41 @@ const collectGlobalPetBounds = async (): Promise<PetWindowFrame | null> => {
   }
 }
 
+const snapVisiblePetBoundsToEdges = (
+  position: { x: number; y: number },
+  visibleBounds: PetWindowFrame,
+  workArea: Awaited<ReturnType<typeof resolveCurrentWorkArea>>,
+  threshold = PET_DOCK_EDGE_THRESHOLD_PX
+) => {
+  let nextLeft = position.x
+  let nextTop = position.y
+  const visibleRight = visibleBounds.left + visibleBounds.width
+  const visibleBottom = visibleBounds.top + visibleBounds.height
+
+  if (
+    visibleBounds.left < workArea.left ||
+    Math.abs(visibleBounds.left - workArea.left) <= threshold
+  ) {
+    nextLeft += workArea.left - visibleBounds.left
+  } else if (
+    visibleRight > workArea.right ||
+    Math.abs(workArea.right - visibleRight) <= threshold
+  ) {
+    nextLeft -= visibleRight - workArea.right
+  }
+
+  if (
+    visibleBounds.top < workArea.top ||
+    Math.abs(visibleBounds.top - workArea.top) <= threshold
+  ) {
+    nextTop += workArea.top - visibleBounds.top
+  } else if (visibleBottom > workArea.bottom) {
+    nextTop -= visibleBottom - workArea.bottom
+  }
+
+  return { left: nextLeft, top: nextTop }
+}
+
 const captureCurrentPetFrame = async (): Promise<PetWindowFrame | null> => {
   if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
     return null
@@ -957,20 +993,7 @@ const clampPetWindowToMonitor = async () => {
     const position = await appWindow.outerPosition()
     const visibleBounds = await collectGlobalPetBounds()
     const nextPosition = visibleBounds
-      ? {
-          left:
-            visibleBounds.left < workArea.left
-              ? position.x + (workArea.left - visibleBounds.left)
-              : visibleBounds.left + visibleBounds.width > workArea.right
-                ? position.x - (visibleBounds.left + visibleBounds.width - workArea.right)
-                : position.x,
-          top:
-            visibleBounds.top < workArea.top
-              ? position.y + (workArea.top - visibleBounds.top)
-              : visibleBounds.top + visibleBounds.height > workArea.bottom
-                ? position.y - (visibleBounds.top + visibleBounds.height - workArea.bottom)
-                : position.y
-        }
+      ? snapVisiblePetBoundsToEdges(position, visibleBounds, workArea)
       : clampWindowPositionToWorkArea(
           {
             left: position.x,
@@ -991,7 +1014,7 @@ const clampPetWindowToMonitor = async () => {
   await syncBubbleWindow()
 }
 
-const schedulePetWindowClamp = (delay = 80) => {
+const schedulePetWindowClamp = (delay = 220) => {
   clearPetClampTimer()
 
   petClampTimer = window.setTimeout(() => {
@@ -1068,6 +1091,15 @@ const schedulePetDockedIdle = (delay = PET_DOCK_IDLE_DELAY_MS) => {
 }
 
 const handlePetInteract = () => {
+  cursorPassthroughSuspendUntil = Date.now() + 1200
+  if (isTauriDesktop() && cursorPassthroughEnabled) {
+    void getCurrentWindow()
+      .setIgnoreCursorEvents(false)
+      .then(() => {
+        cursorPassthroughEnabled = false
+      })
+      .catch(() => {})
+  }
   clearPetDockTimer()
   if (dockState.value !== 'normal') {
     void restoreDockedPet(false)
@@ -1093,6 +1125,14 @@ const updatePetWindowCursorPassthrough = async () => {
   }
 
   const appWindow = getCurrentWindow()
+  if (Date.now() < cursorPassthroughSuspendUntil) {
+    if (cursorPassthroughEnabled) {
+      await appWindow.setIgnoreCursorEvents(false)
+      cursorPassthroughEnabled = false
+    }
+    return
+  }
+
   const windowPosition = await appWindow.outerPosition()
   const windowSize = await appWindow.outerSize()
   const cursor = await cursorPosition()
@@ -3013,6 +3053,7 @@ const setupPetWindowListeners = async () => {
 
   const appWindow = getCurrentWindow()
   windowMovedCleanup = await appWindow.onMoved(() => {
+    cursorPassthroughSuspendUntil = Date.now() + 900
     void syncBubbleWindow()
     if (dockState.value === 'normal') {
       schedulePetWindowClamp()
@@ -3020,6 +3061,7 @@ const setupPetWindowListeners = async () => {
     schedulePetDockedIdle()
   })
   windowResizedCleanup = await appWindow.onResized(() => {
+    cursorPassthroughSuspendUntil = Date.now() + 900
     if (dockState.value === 'normal') {
       void clampPetWindowToMonitor()
     }
@@ -3111,9 +3153,6 @@ watch(
     }
 
     clearPetDockTimer()
-    if (dockState.value !== 'normal') {
-      void restoreDockedPet()
-    }
   },
   { immediate: false }
 )

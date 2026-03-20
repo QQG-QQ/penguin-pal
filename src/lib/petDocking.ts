@@ -14,8 +14,8 @@ export interface PetWindowSize {
   height: number
 }
 
-export const PET_DOCK_IDLE_DELAY_MS = 12000
-export const PET_DOCK_EDGE_THRESHOLD_PX = 52
+export const PET_DOCK_IDLE_DELAY_MS = 1500
+export const PET_DOCK_EDGE_THRESHOLD_PX = 72
 
 const SCREEN_MARGIN = 12
 
