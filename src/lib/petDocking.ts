@@ -73,8 +73,10 @@ export const planDockedWindowFrame = (
   const width = preset.width
   const height = preset.height
   const bboxLeft = width * normalized.left
+  const bboxTop = height * normalized.top
   const bboxRight = width * normalized.right
   const bboxBottom = height * normalized.bottom
+  const bboxWidth = bboxRight - bboxLeft
   const previousBottom = previousVisibleFrame.top + previousVisibleFrame.height
   const previousCenterX = previousVisibleFrame.left + previousVisibleFrame.width / 2
 
@@ -82,7 +84,11 @@ export const planDockedWindowFrame = (
     return {
       left: Math.round(workArea.left - bboxRight + preset.revealPx),
       top: Math.round(
-        clamp(previousBottom - height, workArea.top + SCREEN_MARGIN, workArea.bottom - height - SCREEN_MARGIN)
+        clamp(
+          previousBottom - bboxBottom,
+          workArea.top + SCREEN_MARGIN - bboxTop,
+          workArea.bottom - SCREEN_MARGIN - bboxBottom
+        )
       ),
       width,
       height
@@ -93,7 +99,11 @@ export const planDockedWindowFrame = (
     return {
       left: Math.round(workArea.right - preset.revealPx - bboxLeft),
       top: Math.round(
-        clamp(previousBottom - height, workArea.top + SCREEN_MARGIN, workArea.bottom - height - SCREEN_MARGIN)
+        clamp(
+          previousBottom - bboxBottom,
+          workArea.top + SCREEN_MARGIN - bboxTop,
+          workArea.bottom - SCREEN_MARGIN - bboxBottom
+        )
       ),
       width,
       height
@@ -102,7 +112,11 @@ export const planDockedWindowFrame = (
 
   return {
     left: Math.round(
-      clamp(previousCenterX - width / 2, workArea.left + SCREEN_MARGIN, workArea.right - width - SCREEN_MARGIN)
+      clamp(
+        previousCenterX - (bboxLeft + bboxWidth / 2),
+        workArea.left + SCREEN_MARGIN - bboxLeft,
+        workArea.right - SCREEN_MARGIN - bboxRight
+      )
     ),
     top: Math.round(workArea.top - bboxBottom + preset.revealPx),
     width,
