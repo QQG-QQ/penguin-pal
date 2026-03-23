@@ -292,6 +292,7 @@ const emptyResearchBrief = (): ResearchBriefSnapshot => ({
   summary: '开启本地投研模式后，这里会展示每日研究简报、基金风格比较和长期记忆提示。',
   sections: [],
   alerts: [],
+  fundQuotes: [],
   memoryHints: [],
   alertFingerprint: '',
   hasUpdates: false,

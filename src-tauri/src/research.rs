@@ -1,6 +1,7 @@
 use chrono::{Local, TimeZone};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 use crate::{
@@ -30,6 +31,18 @@ pub struct ResearchBriefAlert {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResearchFundQuote {
+    pub code: String,
+    pub name: String,
+    pub estimate_nav: Option<f64>,
+    pub previous_nav: Option<f64>,
+    pub change_percent: Option<f64>,
+    pub estimate_time: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResearchBriefSnapshot {
     pub generated_at: u64,
     pub day_key: String,
@@ -38,6 +51,7 @@ pub struct ResearchBriefSnapshot {
     pub summary: String,
     pub sections: Vec<ResearchBriefSection>,
     pub alerts: Vec<ResearchBriefAlert>,
+    pub fund_quotes: Vec<ResearchFundQuote>,
     pub memory_hints: Vec<String>,
     pub alert_fingerprint: String,
     pub has_updates: bool,
@@ -55,6 +69,16 @@ struct ResearchAiAnalysis {
     provider_label: Option<String>,
     result: Option<String>,
     notice: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FundEstimatePayload {
+    fundcode: Option<String>,
+    name: Option<String>,
+    dwjz: Option<String>,
+    gsz: Option<String>,
+    gszzl: Option<String>,
+    gztime: Option<String>,
 }
 
 pub fn normalize_config(config: &ResearchConfig) -> ResearchConfig {
@@ -105,6 +129,7 @@ pub async fn build_brief(
                 title: "投研模式未开启".to_string(),
                 summary: "开启后，桌宠会在独立弹窗里展示每日研究简报，并用长期记忆记住你的投资习惯。".to_string(),
             }],
+            fund_quotes: Vec::new(),
             memory_hints: Vec::new(),
             alert_fingerprint: String::new(),
             has_updates: false,
@@ -125,6 +150,7 @@ pub async fn build_brief(
         .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
     let memory_service = MemoryService::new(&app_data);
     let memory_hints = collect_investment_memory_hints(&memory_service);
+    let fund_quotes = fetch_fund_quotes(&config, runtime.provider.allow_network, generated_at).await;
 
     let watchlist_label = if config.watchlist.is_empty() {
         "未配置股票/ETF 自选".to_string()
@@ -156,6 +182,11 @@ pub async fn build_brief(
             title: "财报拆解逻辑".to_string(),
             summary: "先按统一财报框架看利润质量、现金流和管理层指引，再决定要不要继续深挖。".to_string(),
             bullets: build_watchlist_bullets(&config),
+        },
+        ResearchBriefSection {
+            title: "基金涨幅快照".to_string(),
+            summary: "先看你当前基金池的估算涨跌，再决定今天是做风格对比还是做仓位复核。".to_string(),
+            bullets: build_fund_quote_bullets(&fund_quotes),
         },
         ResearchBriefSection {
             title: "基金风格比较".to_string(),
@@ -228,6 +259,36 @@ pub async fn build_brief(
             summary: format!("本次简报已载入 {} 条投研偏好/主题记忆。", memory_hints.len()),
         });
     }
+    if let Some(quote) = fund_quotes
+        .iter()
+        .find(|item| item.change_percent.unwrap_or(0.0) >= 1.5)
+    {
+        alerts.push(ResearchBriefAlert {
+            id: generate_id("research_alert"),
+            severity: "watch".to_string(),
+            title: "基金池出现较大上行".to_string(),
+            summary: format!(
+                "{} 当前估算涨幅约 {:.2}%，建议确认是风格驱动、主题驱动还是单日情绪放大。",
+                quote.name,
+                quote.change_percent.unwrap_or_default()
+            ),
+        });
+    }
+    if let Some(quote) = fund_quotes
+        .iter()
+        .find(|item| item.change_percent.unwrap_or(0.0) <= -1.5)
+    {
+        alerts.push(ResearchBriefAlert {
+            id: generate_id("research_alert"),
+            severity: "watch".to_string(),
+            title: "基金池出现较大回撤".to_string(),
+            summary: format!(
+                "{} 当前估算跌幅约 {:.2}%，建议检查风格漂移、行业拖累或短线情绪回撤。",
+                quote.name,
+                quote.change_percent.unwrap_or_default()
+            ),
+        });
+    }
 
     let alert_fingerprint = build_alert_fingerprint(&alerts);
     let has_new_day = runtime
@@ -255,6 +316,7 @@ pub async fn build_brief(
         &memory_hints,
         &sections,
         &alerts,
+        &fund_quotes,
         &day_key,
     )
     .await;
@@ -269,6 +331,7 @@ pub async fn build_brief(
         ),
         sections,
         alerts,
+        fund_quotes,
         memory_hints,
         alert_fingerprint,
         has_updates,
@@ -478,6 +541,37 @@ fn build_analysis_actions(config: &ResearchConfig, memory_hints: &[String]) -> V
     bullets
 }
 
+fn build_fund_quote_bullets(fund_quotes: &[ResearchFundQuote]) -> Vec<String> {
+    if fund_quotes.is_empty() {
+        return vec!["当前还没有可用的基金涨幅快照，建议先填入 6 位基金代码。".to_string()];
+    }
+
+    fund_quotes
+        .iter()
+        .map(|quote| {
+            let change = quote
+                .change_percent
+                .map(|value| format!("{value:+.2}%"))
+                .unwrap_or_else(|| "暂无涨幅".to_string());
+            let estimate_nav = quote
+                .estimate_nav
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "--".to_string());
+            let estimate_time = quote
+                .estimate_time
+                .clone()
+                .unwrap_or_else(|| "暂无估值时间".to_string());
+            match quote.note.as_ref().filter(|value| !value.trim().is_empty()) {
+                Some(note) => format!("{}（{}）：{}，{}。", quote.name, quote.code, change, note),
+                None => format!(
+                    "{}（{}）：当前估算涨跌 {}，估算净值 {}，时间 {}。",
+                    quote.name, quote.code, change, estimate_nav, estimate_time
+                ),
+            }
+        })
+        .collect()
+}
+
 fn build_watchlist_bullets(config: &ResearchConfig) -> Vec<String> {
     let mut bullets = vec![
         "先看收入、毛利率、经营现金流、资本开支和净负债变化。".to_string(),
@@ -647,6 +741,7 @@ async fn build_ai_analysis(
     memory_hints: &[String],
     sections: &[ResearchBriefSection],
     alerts: &[ResearchBriefAlert],
+    fund_quotes: &[ResearchFundQuote],
     day_key: &str,
 ) -> ResearchAiAnalysis {
     if matches!(runtime.provider.kind, ProviderKind::Mock) {
@@ -676,7 +771,14 @@ async fn build_ai_analysis(
         .as_ref()
         .map(|item| item.home_root.to_string_lossy().to_string());
     let allowed_actions = policy::actions_for_level(runtime.permission_level);
-    let prompt = build_research_analysis_prompt(config, memory_hints, sections, alerts, day_key);
+    let prompt = build_research_analysis_prompt(
+        config,
+        memory_hints,
+        sections,
+        alerts,
+        fund_quotes,
+        day_key,
+    );
     let history = vec![
         ChatMessage::new(
             "system",
@@ -723,6 +825,7 @@ fn build_research_analysis_prompt(
     memory_hints: &[String],
     sections: &[ResearchBriefSection],
     alerts: &[ResearchBriefAlert],
+    fund_quotes: &[ResearchFundQuote],
     day_key: &str,
 ) -> String {
     let watchlist = if config.watchlist.is_empty() {
@@ -766,6 +869,31 @@ fn build_research_analysis_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let fund_quote_text = if fund_quotes.is_empty() {
+        "无".to_string()
+    } else {
+        fund_quotes
+            .iter()
+            .map(|quote| {
+                let change = quote
+                    .change_percent
+                    .map(|value| format!("{value:+.2}%"))
+                    .unwrap_or_else(|| "暂无涨幅".to_string());
+                let estimate_time = quote
+                    .estimate_time
+                    .clone()
+                    .unwrap_or_else(|| "暂无估值时间".to_string());
+                let note = quote
+                    .note
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| format!("；备注：{value}"))
+                    .unwrap_or_default();
+                format!("{}（{}）：{}，时间 {}{}", quote.name, quote.code, change, estimate_time, note)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
     format!(
         "你现在是桌宠内置的本地投研助手。请基于下面这些本地配置、长期记忆和简报骨架，直接给出一份中文研究分析。\n\
@@ -776,7 +904,8 @@ fn build_research_analysis_prompt(
         4. 禁止反问用户、禁止要求用户补充资料、禁止把结果写成待办提问；信息不足时，也必须基于现有配置先给出 best-effort 成品分析。\n\
         5. 禁止输出 JSON、代码块或键值对包装；直接输出自然中文正文。\n\
         6. 每个部分都要给出明确判断，不要只写方法论；即使结论保守，也要把当前倾向、风险和下一步观察点说清楚。\n\
-        7. 请严格使用下面格式输出，并保持简洁有信息量：\n\
+        7. 每个部分请拆成 2 到 3 个短段落，每段 1 到 3 句，不要把所有内容挤成一整段。\n\
+        8. 请严格使用下面格式输出，并保持简洁有信息量：\n\
         【总判断】\n\
         【财报拆解重点】\n\
         【基金风格比较】\n\
@@ -789,6 +918,8 @@ fn build_research_analysis_prompt(
         主题：{themes}\n\
         投资习惯备注：{}\n\
         决策框架：{}\n\n\
+        当前基金涨幅快照：\n\
+        {fund_quote_text}\n\n\
         已加载长期记忆：\n\
         - {memory_text}\n\n\
         当前静态简报骨架：\n\
@@ -801,5 +932,152 @@ fn build_research_analysis_prompt(
             config.habit_notes.trim()
         },
         config.decision_framework.trim(),
+        fund_quote_text = fund_quote_text,
     )
+}
+
+fn extract_fund_code(raw: &str) -> Option<String> {
+    let digits = raw
+        .chars()
+        .filter(|item| item.is_ascii_digit())
+        .collect::<String>();
+    if digits.len() >= 6 {
+        Some(digits[..6].to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_number(value: Option<&str>) -> Option<f64> {
+    value
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .and_then(|item| item.parse::<f64>().ok())
+}
+
+fn parse_fund_estimate_text(raw: &str) -> Result<FundEstimatePayload, String> {
+    let trimmed = raw.trim();
+    let payload = trimmed
+        .strip_prefix("jsonpgz(")
+        .and_then(|item| item.strip_suffix(");"))
+        .unwrap_or(trimmed);
+
+    serde_json::from_str::<FundEstimatePayload>(payload)
+        .map_err(|error| format!("解析基金估值数据失败: {error}"))
+}
+
+async fn fetch_fund_quotes(
+    config: &ResearchConfig,
+    allow_network: bool,
+    stamp: u64,
+) -> Vec<ResearchFundQuote> {
+    if !allow_network {
+        return config
+            .funds
+            .iter()
+            .map(|item| ResearchFundQuote {
+                code: extract_fund_code(item).unwrap_or_else(|| item.trim().to_string()),
+                name: item.trim().to_string(),
+                estimate_nav: None,
+                previous_nav: None,
+                change_percent: None,
+                estimate_time: None,
+                note: Some("当前已关闭网络访问，未获取实时基金涨幅。".to_string()),
+            })
+            .collect();
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .user_agent("PenguinPal Assistant/0.2.0")
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return config
+                .funds
+                .iter()
+                .map(|item| ResearchFundQuote {
+                    code: extract_fund_code(item).unwrap_or_else(|| item.trim().to_string()),
+                    name: item.trim().to_string(),
+                    estimate_nav: None,
+                    previous_nav: None,
+                    change_percent: None,
+                    estimate_time: None,
+                    note: Some(format!("创建基金行情客户端失败: {error}")),
+                })
+                .collect();
+        }
+    };
+
+    let mut quotes = Vec::new();
+    for item in &config.funds {
+        let label = item.trim();
+        if label.is_empty() {
+            continue;
+        }
+
+        let Some(code) = extract_fund_code(label) else {
+            quotes.push(ResearchFundQuote {
+                code: label.to_string(),
+                name: label.to_string(),
+                estimate_nav: None,
+                previous_nav: None,
+                change_percent: None,
+                estimate_time: None,
+                note: Some("未识别到 6 位基金代码，暂时无法拉取实时涨幅。".to_string()),
+            });
+            continue;
+        };
+
+        let url = format!("https://fundgz.1234567.com.cn/js/{code}.js?rt={stamp}");
+        let quote = match client.get(&url).send().await {
+            Ok(response) => match response.text().await {
+                Ok(text) => match parse_fund_estimate_text(&text) {
+                    Ok(payload) => ResearchFundQuote {
+                        code: payload.fundcode.unwrap_or_else(|| code.clone()),
+                        name: payload.name.unwrap_or_else(|| label.to_string()),
+                        estimate_nav: parse_number(payload.gsz.as_deref()),
+                        previous_nav: parse_number(payload.dwjz.as_deref()),
+                        change_percent: parse_number(payload.gszzl.as_deref()),
+                        estimate_time: payload
+                            .gztime
+                            .map(|value| value.trim().to_string())
+                            .filter(|value| !value.is_empty()),
+                        note: None,
+                    },
+                    Err(error) => ResearchFundQuote {
+                        code: code.clone(),
+                        name: label.to_string(),
+                        estimate_nav: None,
+                        previous_nav: None,
+                        change_percent: None,
+                        estimate_time: None,
+                        note: Some(error),
+                    },
+                },
+                Err(error) => ResearchFundQuote {
+                    code: code.clone(),
+                    name: label.to_string(),
+                    estimate_nav: None,
+                    previous_nav: None,
+                    change_percent: None,
+                    estimate_time: None,
+                    note: Some(format!("读取基金涨幅响应失败: {error}")),
+                },
+            },
+            Err(error) => ResearchFundQuote {
+                code: code.clone(),
+                name: label.to_string(),
+                estimate_nav: None,
+                previous_nav: None,
+                change_percent: None,
+                estimate_time: None,
+                note: Some(format!("获取基金涨幅失败: {error}")),
+            },
+        };
+        quotes.push(quote);
+    }
+
+    quotes
 }

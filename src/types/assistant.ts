@@ -485,6 +485,16 @@ export interface ResearchBriefAlert {
   summary: string
 }
 
+export interface ResearchFundQuote {
+  code: string
+  name: string
+  estimateNav?: number | null
+  previousNav?: number | null
+  changePercent?: number | null
+  estimateTime?: string | null
+  note?: string | null
+}
+
 export interface ResearchBriefSnapshot {
   generatedAt: number
   dayKey: string
@@ -493,6 +503,7 @@ export interface ResearchBriefSnapshot {
   summary: string
   sections: ResearchBriefSection[]
   alerts: ResearchBriefAlert[]
+  fundQuotes: ResearchFundQuote[]
   memoryHints: string[]
   alertFingerprint: string
   hasUpdates: boolean

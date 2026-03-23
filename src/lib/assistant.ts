@@ -1867,6 +1867,7 @@ export const getResearchBriefSnapshot = async (): Promise<ResearchBriefSnapshot>
       summary: '当前是浏览器调试模式，投研简报需要桌宠运行时。',
       sections: [],
       alerts: [],
+      fundQuotes: [],
       memoryHints: [],
       alertFingerprint: '',
       hasUpdates: false,

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ResearchBriefSnapshot } from '../types/assistant'
+import type { ResearchBriefSnapshot, ResearchFundQuote } from '../types/assistant'
 
 const props = defineProps<{
   brief: ResearchBriefSnapshot
@@ -15,6 +15,39 @@ const emit = defineEmits<{
 interface ParsedAnalysisSection {
   title: string
   paragraphs: string[]
+}
+
+const splitReadableParagraphs = (text: string) => {
+  const normalized = text.trim()
+  if (!normalized) return []
+
+  const paragraphs = normalized
+    .split(/\n{2,}/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  if (paragraphs.length > 1) {
+    return paragraphs
+  }
+
+  if (normalized.length < 120) {
+    return [normalized]
+  }
+
+  const sentences = normalized
+    .split(/(?<=[。！？；])/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  if (sentences.length <= 2) {
+    return [normalized]
+  }
+
+  const chunks: string[] = []
+  for (let index = 0; index < sentences.length; index += 2) {
+    chunks.push(sentences.slice(index, index + 2).join(' '))
+  }
+  return chunks
 }
 
 const analysisStatusText = computed(() => {
@@ -58,16 +91,53 @@ const parsedAnalysisSections = computed<ParsedAnalysisSection[]>(() => {
 
     return {
       title: match[1].trim(),
-      paragraphs: match[2]
-        .split(/\n{2,}/)
-        .map((item) => item.trim())
-        .filter(Boolean)
+      paragraphs: splitReadableParagraphs(match[2])
     }
   })
 })
 
 const leadSection = computed(() => parsedAnalysisSections.value[0] ?? null)
 const detailSections = computed(() => parsedAnalysisSections.value.slice(1))
+const fundQuotes = computed(() => props.brief.fundQuotes ?? [])
+const quotedFunds = computed(() =>
+  fundQuotes.value.filter((item) => typeof item.changePercent === 'number')
+)
+const fundChangeScale = computed(() => {
+  const max = Math.max(...quotedFunds.value.map((item) => Math.abs(item.changePercent ?? 0)), 0)
+  return max > 0 ? max : 1
+})
+
+const formatPercent = (value?: number | null) => {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '暂无'
+  }
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
+const fundTrend = (quote: ResearchFundQuote) => {
+  const value = quote.changePercent ?? 0
+  if (value > 0.01) return 'up'
+  if (value < -0.01) return 'down'
+  return 'flat'
+}
+
+const fundBarStyle = (quote: ResearchFundQuote) => {
+  const value = quote.changePercent ?? 0
+  const scale = fundChangeScale.value
+  const width = `${Math.max(8, (Math.abs(value) / scale) * 50)}%`
+
+  if (value >= 0) {
+    return {
+      left: '50%',
+      width
+    }
+  }
+
+  return {
+    left: `calc(50% - ${width})`,
+    width
+  }
+}
 </script>
 
 <template>
@@ -142,6 +212,48 @@ const detailSections = computed(() => parsedAnalysisSections.value.slice(1))
           {{ brief.analysisNotice }}
         </p>
       </aside>
+    </section>
+
+    <section v-if="fundQuotes.length" class="research-fund-card">
+      <div class="research-fund-header">
+        <div>
+          <p class="research-card-eyebrow">基金涨幅概览</p>
+          <h3>当前自选基金涨跌快照</h3>
+          <p>优先看今日估算涨跌和估值时间，再决定先查风格、仓位还是主题驱动。</p>
+        </div>
+      </div>
+
+      <div class="research-fund-list">
+        <article
+          v-for="quote in fundQuotes"
+          :key="`${quote.code}-${quote.name}`"
+          class="research-fund-row"
+          :data-trend="fundTrend(quote)"
+        >
+          <div class="research-fund-meta">
+            <strong>{{ quote.name }}</strong>
+            <span>{{ quote.code }}</span>
+          </div>
+
+          <div class="research-fund-chart">
+            <div class="research-fund-track">
+              <span class="research-fund-zero"></span>
+              <span
+                v-if="typeof quote.changePercent === 'number'"
+                class="research-fund-fill"
+                :style="fundBarStyle(quote)"
+              ></span>
+            </div>
+          </div>
+
+          <div class="research-fund-value">
+            <strong>{{ formatPercent(quote.changePercent) }}</strong>
+            <span>{{ quote.estimateTime ?? '暂无估值时间' }}</span>
+          </div>
+
+          <p v-if="quote.note" class="research-fund-note">{{ quote.note }}</p>
+        </article>
+      </div>
     </section>
 
     <section v-if="detailSections.length" class="research-grid">
@@ -260,6 +372,115 @@ const detailSections = computed(() => parsedAnalysisSections.value.slice(1))
   grid-template-columns: minmax(0, 2fr) minmax(280px, 0.9fr);
   gap: 16px;
   margin-bottom: 16px;
+}
+
+.research-fund-card {
+  margin-bottom: 16px;
+  padding: 20px;
+  border-radius: 22px;
+  border: 1px solid rgba(20, 34, 54, 0.08);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 20px 44px rgba(42, 76, 128, 0.09);
+}
+
+.research-fund-header h3 {
+  margin: 0 0 8px;
+  color: #12263c;
+  font-size: 21px;
+}
+
+.research-fund-header p:last-child {
+  margin-bottom: 0;
+  color: #5f7996;
+}
+
+.research-fund-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.research-fund-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.1fr) minmax(220px, 1.6fr) minmax(120px, 0.8fr);
+  gap: 14px;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(246, 250, 255, 0.88);
+}
+
+.research-fund-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.research-fund-meta strong {
+  font-size: 15px;
+  color: #18304a;
+}
+
+.research-fund-meta span,
+.research-fund-value span {
+  font-size: 12px;
+  color: #6d84a0;
+}
+
+.research-fund-chart {
+  width: 100%;
+}
+
+.research-fund-track {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(236, 94, 94, 0.1) 0 50%, rgba(72, 179, 118, 0.1) 50% 100%);
+  overflow: hidden;
+}
+
+.research-fund-zero {
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 1px;
+  background: rgba(23, 40, 61, 0.16);
+}
+
+.research-fund-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4ebf85 0%, #2e9d68 100%);
+}
+
+.research-fund-row[data-trend='down'] .research-fund-fill {
+  background: linear-gradient(90deg, #d86c6c 0%, #c94949 100%);
+}
+
+.research-fund-row[data-trend='flat'] .research-fund-fill {
+  background: linear-gradient(90deg, #7a97b8 0%, #6283a8 100%);
+}
+
+.research-fund-value {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+
+.research-fund-value strong {
+  font-size: 16px;
+  color: #19324d;
+}
+
+.research-fund-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 243, 228, 0.72);
+  color: #8c5a1f;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .research-hero-card,
@@ -405,6 +626,16 @@ const detailSections = computed(() => parsedAnalysisSections.value.slice(1))
   padding: 18px;
 }
 
+.research-section-copy {
+  display: grid;
+  gap: 10px;
+}
+
+.research-section-copy p,
+.research-lead-copy p {
+  max-width: 62ch;
+}
+
 @media (max-width: 720px) {
   .research-surface {
     padding: 18px;
@@ -416,6 +647,14 @@ const detailSections = computed(() => parsedAnalysisSections.value.slice(1))
 
   .research-overview {
     grid-template-columns: 1fr;
+  }
+
+  .research-fund-row {
+    grid-template-columns: 1fr;
+  }
+
+  .research-fund-value {
+    justify-items: start;
   }
 
   .research-hero-card h2 {
