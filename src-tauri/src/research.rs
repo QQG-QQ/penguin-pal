@@ -32,6 +32,7 @@ pub struct ResearchBriefAlert {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResearchFundQuote {
+    pub asset_type: String,
     pub code: String,
     pub name: String,
     pub estimate_nav: Option<f64>,
@@ -79,6 +80,34 @@ struct FundEstimatePayload {
     gsz: Option<String>,
     gszzl: Option<String>,
     gztime: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StockQuoteResponse {
+    data: Option<StockQuotePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StockQuotePayload {
+    f57: Option<String>,
+    f58: Option<String>,
+    f43: Option<f64>,
+    f170: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedResearchAsset {
+    code: String,
+    secid: Option<String>,
+    name: String,
+    asset_type: String,
+}
+
+#[derive(Debug, Clone)]
+struct FundCatalogEntry {
+    code: String,
+    name: String,
+    asset_type: String,
 }
 
 pub fn normalize_config(config: &ResearchConfig) -> ResearchConfig {
@@ -150,7 +179,8 @@ pub async fn build_brief(
         .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
     let memory_service = MemoryService::new(&app_data);
     let memory_hints = collect_investment_memory_hints(&memory_service);
-    let fund_quotes = fetch_fund_quotes(&config, runtime.provider.allow_network, generated_at).await;
+    let fund_quotes =
+        fetch_research_quotes(&config, runtime.provider.allow_network, generated_at).await;
 
     let watchlist_label = if config.watchlist.is_empty() {
         "未配置股票/ETF 自选".to_string()
@@ -184,8 +214,8 @@ pub async fn build_brief(
             bullets: build_watchlist_bullets(&config),
         },
         ResearchBriefSection {
-            title: "基金涨幅快照".to_string(),
-            summary: "先看你当前基金池的估算涨跌，再决定今天是做风格对比还是做仓位复核。".to_string(),
+            title: "自选涨幅快照".to_string(),
+            summary: "先看你当前股票、ETF、基金观察池的涨跌，再决定今天先查财报、风格还是主题驱动。".to_string(),
             bullets: build_fund_quote_bullets(&fund_quotes),
         },
         ResearchBriefSection {
@@ -266,9 +296,9 @@ pub async fn build_brief(
         alerts.push(ResearchBriefAlert {
             id: generate_id("research_alert"),
             severity: "watch".to_string(),
-            title: "基金池出现较大上行".to_string(),
+            title: "自选池出现较大上行".to_string(),
             summary: format!(
-                "{} 当前估算涨幅约 {:.2}%，建议确认是风格驱动、主题驱动还是单日情绪放大。",
+                "{} 当前涨幅约 {:.2}%，建议确认是风格驱动、主题驱动还是单日情绪放大。",
                 quote.name,
                 quote.change_percent.unwrap_or_default()
             ),
@@ -281,9 +311,9 @@ pub async fn build_brief(
         alerts.push(ResearchBriefAlert {
             id: generate_id("research_alert"),
             severity: "watch".to_string(),
-            title: "基金池出现较大回撤".to_string(),
+            title: "自选池出现较大回撤".to_string(),
             summary: format!(
-                "{} 当前估算跌幅约 {:.2}%，建议检查风格漂移、行业拖累或短线情绪回撤。",
+                "{} 当前跌幅约 {:.2}%，建议检查风格漂移、行业拖累或短线情绪回撤。",
                 quote.name,
                 quote.change_percent.unwrap_or_default()
             ),
@@ -325,9 +355,9 @@ pub async fn build_brief(
         generated_at,
         day_key,
         enabled: true,
-        title: "今日投研简报".to_string(),
-        summary: format!(
-            "当前是本地研究模式，会优先围绕你的自选池、基金风格关注点、地缘主题和长期记忆来组织分析。"
+            title: "今日投研简报".to_string(),
+            summary: format!(
+            "当前是本地研究模式，会优先围绕你的股票/ETF 自选池、基金观察池、地缘主题和长期记忆来组织分析。"
         ),
         sections,
         alerts,
@@ -543,7 +573,7 @@ fn build_analysis_actions(config: &ResearchConfig, memory_hints: &[String]) -> V
 
 fn build_fund_quote_bullets(fund_quotes: &[ResearchFundQuote]) -> Vec<String> {
     if fund_quotes.is_empty() {
-        return vec!["当前还没有可用的基金涨幅快照，建议先填入 6 位基金代码。".to_string()];
+        return vec!["当前还没有可用的自选资产涨跌快照，建议补充股票、ETF 或基金名称/代码。".to_string()];
     }
 
     fund_quotes
@@ -561,11 +591,15 @@ fn build_fund_quote_bullets(fund_quotes: &[ResearchFundQuote]) -> Vec<String> {
                 .estimate_time
                 .clone()
                 .unwrap_or_else(|| "暂无估值时间".to_string());
+            let asset_label = asset_type_label(&quote.asset_type);
             match quote.note.as_ref().filter(|value| !value.trim().is_empty()) {
-                Some(note) => format!("{}（{}）：{}，{}。", quote.name, quote.code, change, note),
+                Some(note) => format!(
+                    "{} {}（{}）：{}，{}。",
+                    asset_label, quote.name, quote.code, change, note
+                ),
                 None => format!(
-                    "{}（{}）：当前估算涨跌 {}，估算净值 {}，时间 {}。",
-                    quote.name, quote.code, change, estimate_nav, estimate_time
+                    "{} {}（{}）：当前涨跌 {}，价格/估值 {}，时间 {}。",
+                    asset_label, quote.name, quote.code, change, estimate_nav, estimate_time
                 ),
             }
         })
@@ -889,7 +923,15 @@ fn build_research_analysis_prompt(
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| format!("；备注：{value}"))
                     .unwrap_or_default();
-                format!("{}（{}）：{}，时间 {}{}", quote.name, quote.code, change, estimate_time, note)
+                format!(
+                    "{} {}（{}）：{}，时间 {}{}",
+                    asset_type_label(&quote.asset_type),
+                    quote.name,
+                    quote.code,
+                    change,
+                    estimate_time,
+                    note
+                )
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -918,7 +960,7 @@ fn build_research_analysis_prompt(
         主题：{themes}\n\
         投资习惯备注：{}\n\
         决策框架：{}\n\n\
-        当前基金涨幅快照：\n\
+        当前自选资产涨跌快照：\n\
         {fund_quote_text}\n\n\
         已加载长期记忆：\n\
         - {memory_text}\n\n\
@@ -966,16 +1008,27 @@ fn parse_fund_estimate_text(raw: &str) -> Result<FundEstimatePayload, String> {
         .map_err(|error| format!("解析基金估值数据失败: {error}"))
 }
 
-async fn fetch_fund_quotes(
+async fn fetch_research_quotes(
     config: &ResearchConfig,
     allow_network: bool,
     stamp: u64,
 ) -> Vec<ResearchFundQuote> {
+    let mut quotes = Vec::new();
+    quotes.extend(fetch_stock_like_quotes(&config.watchlist, allow_network, stamp).await);
+    quotes.extend(fetch_fund_quotes(&config.funds, allow_network, stamp).await);
+    quotes
+}
+
+async fn fetch_fund_quotes(
+    funds: &[String],
+    allow_network: bool,
+    stamp: u64,
+) -> Vec<ResearchFundQuote> {
     if !allow_network {
-        return config
-            .funds
+        return funds
             .iter()
             .map(|item| ResearchFundQuote {
+                asset_type: "fund".to_string(),
                 code: extract_fund_code(item).unwrap_or_else(|| item.trim().to_string()),
                 name: item.trim().to_string(),
                 estimate_nav: None,
@@ -994,10 +1047,10 @@ async fn fetch_fund_quotes(
     {
         Ok(client) => client,
         Err(error) => {
-            return config
-                .funds
+            return funds
                 .iter()
                 .map(|item| ResearchFundQuote {
+                    asset_type: "fund".to_string(),
                     code: extract_fund_code(item).unwrap_or_else(|| item.trim().to_string()),
                     name: item.trim().to_string(),
                     estimate_nav: None,
@@ -1010,33 +1063,48 @@ async fn fetch_fund_quotes(
         }
     };
 
+    let fund_catalog = load_fund_catalog(&client).await.ok();
     let mut quotes = Vec::new();
-    for item in &config.funds {
+    for item in funds {
         let label = item.trim();
         if label.is_empty() {
             continue;
         }
 
-        let Some(code) = extract_fund_code(label) else {
+        let resolved = if let Some(code) = extract_fund_code(label) {
+            ResolvedResearchAsset {
+                code,
+                secid: None,
+                name: label.to_string(),
+                asset_type: "fund".to_string(),
+            }
+        } else if let Some(asset) = fund_catalog
+            .as_ref()
+            .and_then(|catalog| resolve_fund_name(label, catalog))
+        {
+            asset
+        } else {
             quotes.push(ResearchFundQuote {
+                asset_type: "fund".to_string(),
                 code: label.to_string(),
                 name: label.to_string(),
                 estimate_nav: None,
                 previous_nav: None,
                 change_percent: None,
                 estimate_time: None,
-                note: Some("未识别到 6 位基金代码，暂时无法拉取实时涨幅。".to_string()),
+                note: Some("未识别到基金代码或名称，暂时无法拉取实时涨幅。".to_string()),
             });
             continue;
         };
 
-        let url = format!("https://fundgz.1234567.com.cn/js/{code}.js?rt={stamp}");
+        let url = format!("https://fundgz.1234567.com.cn/js/{}.js?rt={stamp}", resolved.code);
         let quote = match client.get(&url).send().await {
             Ok(response) => match response.text().await {
                 Ok(text) => match parse_fund_estimate_text(&text) {
                     Ok(payload) => ResearchFundQuote {
-                        code: payload.fundcode.unwrap_or_else(|| code.clone()),
-                        name: payload.name.unwrap_or_else(|| label.to_string()),
+                        asset_type: "fund".to_string(),
+                        code: payload.fundcode.unwrap_or_else(|| resolved.code.clone()),
+                        name: payload.name.unwrap_or_else(|| resolved.name.clone()),
                         estimate_nav: parse_number(payload.gsz.as_deref()),
                         previous_nav: parse_number(payload.dwjz.as_deref()),
                         change_percent: parse_number(payload.gszzl.as_deref()),
@@ -1047,8 +1115,9 @@ async fn fetch_fund_quotes(
                         note: None,
                     },
                     Err(error) => ResearchFundQuote {
-                        code: code.clone(),
-                        name: label.to_string(),
+                        asset_type: "fund".to_string(),
+                        code: resolved.code.clone(),
+                        name: resolved.name.clone(),
                         estimate_nav: None,
                         previous_nav: None,
                         change_percent: None,
@@ -1057,8 +1126,9 @@ async fn fetch_fund_quotes(
                     },
                 },
                 Err(error) => ResearchFundQuote {
-                    code: code.clone(),
-                    name: label.to_string(),
+                    asset_type: "fund".to_string(),
+                    code: resolved.code.clone(),
+                    name: resolved.name.clone(),
                     estimate_nav: None,
                     previous_nav: None,
                     change_percent: None,
@@ -1067,8 +1137,9 @@ async fn fetch_fund_quotes(
                 },
             },
             Err(error) => ResearchFundQuote {
-                code: code.clone(),
-                name: label.to_string(),
+                asset_type: "fund".to_string(),
+                code: resolved.code.clone(),
+                name: resolved.name.clone(),
                 estimate_nav: None,
                 previous_nav: None,
                 change_percent: None,
@@ -1080,4 +1151,400 @@ async fn fetch_fund_quotes(
     }
 
     quotes
+}
+
+async fn fetch_stock_like_quotes(
+    watchlist: &[String],
+    allow_network: bool,
+    stamp: u64,
+) -> Vec<ResearchFundQuote> {
+    if !allow_network {
+        return watchlist
+            .iter()
+            .map(|item| {
+                let label = item.trim();
+                let code = extract_cn_security_code(label).unwrap_or_else(|| label.to_string());
+                ResearchFundQuote {
+                    asset_type: infer_stock_asset_type_from_code(&code),
+                    code,
+                    name: label.to_string(),
+                    estimate_nav: None,
+                    previous_nav: None,
+                    change_percent: None,
+                    estimate_time: None,
+                    note: Some("当前已关闭网络访问，未获取股票/ETF 实时涨跌。".to_string()),
+                }
+            })
+            .collect();
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .user_agent("PenguinPal Assistant/0.2.0")
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return watchlist
+                .iter()
+                .map(|item| {
+                    let label = item.trim();
+                    let code = extract_cn_security_code(label).unwrap_or_else(|| label.to_string());
+                    ResearchFundQuote {
+                        asset_type: infer_stock_asset_type_from_code(&code),
+                        code,
+                        name: label.to_string(),
+                        estimate_nav: None,
+                        previous_nav: None,
+                        change_percent: None,
+                        estimate_time: None,
+                        note: Some(format!("创建股票/ETF 行情客户端失败: {error}")),
+                    }
+                })
+                .collect();
+        }
+    };
+
+    let mut quotes = Vec::new();
+    for item in watchlist {
+        let label = item.trim();
+        if label.is_empty() {
+            continue;
+        }
+
+        let resolved = if let Some(code) = extract_cn_security_code(label) {
+            ResolvedResearchAsset {
+                code: code.clone(),
+                secid: Some(infer_stock_secid(&code)),
+                name: label.to_string(),
+                asset_type: infer_stock_asset_type_from_code(&code),
+            }
+        } else {
+            match resolve_stock_like_name(&client, label).await {
+                Ok(Some(asset)) => asset,
+                Ok(None) => {
+                    quotes.push(ResearchFundQuote {
+                        asset_type: "stock".to_string(),
+                        code: label.to_string(),
+                        name: label.to_string(),
+                        estimate_nav: None,
+                        previous_nav: None,
+                        change_percent: None,
+                        estimate_time: None,
+                        note: Some("未识别到股票/ETF 代码或名称，暂时无法拉取实时涨跌。".to_string()),
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    quotes.push(ResearchFundQuote {
+                        asset_type: "stock".to_string(),
+                        code: label.to_string(),
+                        name: label.to_string(),
+                        estimate_nav: None,
+                        previous_nav: None,
+                        change_percent: None,
+                        estimate_time: None,
+                        note: Some(error),
+                    });
+                    continue;
+                }
+            }
+        };
+
+        quotes.push(fetch_stock_like_quote(&client, &resolved, stamp).await);
+    }
+
+    quotes
+}
+
+async fn fetch_stock_like_quote(
+    client: &reqwest::Client,
+    asset: &ResolvedResearchAsset,
+    stamp: u64,
+) -> ResearchFundQuote {
+    let secid = asset
+        .secid
+        .clone()
+        .unwrap_or_else(|| infer_stock_secid(&asset.code));
+
+    let stamp_string = stamp.to_string();
+    let response = client
+        .get("https://push2.eastmoney.com/api/qt/stock/get")
+        .query(&[
+            ("secid", secid.as_str()),
+            ("fields", "f43,f57,f58,f170"),
+            ("ut", "fa5fd1943c7b386f172d6893dbfba10b"),
+            ("_", stamp_string.as_str()),
+        ])
+        .send()
+        .await;
+
+    match response {
+        Ok(response) => match response.json::<StockQuoteResponse>().await {
+            Ok(payload) => {
+                let code = payload
+                    .data
+                    .as_ref()
+                    .and_then(|item| item.f57.clone())
+                    .unwrap_or_else(|| asset.code.clone());
+                let name = payload
+                    .data
+                    .as_ref()
+                    .and_then(|item| item.f58.clone())
+                    .unwrap_or_else(|| asset.name.clone());
+                let latest_price = payload
+                    .data
+                    .as_ref()
+                    .and_then(|item| item.f43)
+                    .map(normalize_stock_price);
+                let change_percent = payload.data.as_ref().and_then(|item| item.f170);
+                let previous_nav = match (latest_price, change_percent) {
+                    (Some(price), Some(percent)) if (percent + 100.0).abs() > f64::EPSILON => {
+                        Some(price / (1.0 + percent / 100.0))
+                    }
+                    _ => None,
+                };
+
+                ResearchFundQuote {
+                    asset_type: asset.asset_type.clone(),
+                    code,
+                    name,
+                    estimate_nav: latest_price,
+                    previous_nav,
+                    change_percent,
+                    estimate_time: Some(local_quote_time_label()),
+                    note: None,
+                }
+            }
+            Err(error) => ResearchFundQuote {
+                asset_type: asset.asset_type.clone(),
+                code: asset.code.clone(),
+                name: asset.name.clone(),
+                estimate_nav: None,
+                previous_nav: None,
+                change_percent: None,
+                estimate_time: None,
+                note: Some(format!("解析股票/ETF 行情失败: {error}")),
+            },
+        },
+        Err(error) => ResearchFundQuote {
+            asset_type: asset.asset_type.clone(),
+            code: asset.code.clone(),
+            name: asset.name.clone(),
+            estimate_nav: None,
+            previous_nav: None,
+            change_percent: None,
+            estimate_time: None,
+            note: Some(format!("获取股票/ETF 行情失败: {error}")),
+        },
+    }
+}
+
+async fn resolve_stock_like_name(
+    client: &reqwest::Client,
+    label: &str,
+) -> Result<Option<ResolvedResearchAsset>, String> {
+    let response = client
+        .get("https://searchadapter.eastmoney.com/api/suggest/get")
+        .query(&[
+            ("input", label),
+            ("type", "14"),
+            ("count", "8"),
+            ("token", "D43BF722C8E33BDC906FB84D85E326E8"),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("查询股票/ETF 名称失败: {error}"))?;
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("解析股票/ETF 名称查询结果失败: {error}"))?;
+
+    let candidates = payload
+        .pointer("/QuotationCodeTable/Data")
+        .and_then(Value::as_array)
+        .or_else(|| payload.get("Data").and_then(Value::as_array))
+        .or_else(|| payload.pointer("/result/data").and_then(Value::as_array));
+
+    let Some(candidates) = candidates else {
+        return Ok(None);
+    };
+
+    let normalized_label = normalize_name_key(label);
+    for candidate in candidates {
+        let code = candidate
+            .get("Code")
+            .or_else(|| candidate.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if code.len() != 6 {
+            continue;
+        }
+
+        let name = candidate
+            .get("Name")
+            .or_else(|| candidate.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(label)
+            .trim()
+            .to_string();
+        let name_key = normalize_name_key(&name);
+        let security_type = candidate
+            .get("SecurityTypeName")
+            .or_else(|| candidate.get("securityTypeName"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_lowercase();
+        let secid = candidate
+            .get("QuoteID")
+            .or_else(|| candidate.get("quoteId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.contains('.'))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| infer_stock_secid(&code));
+        let asset_type = if security_type.contains("etf") {
+            "etf".to_string()
+        } else {
+            infer_stock_asset_type_from_code(&code)
+        };
+
+        if name_key == normalized_label
+            || name_key.contains(&normalized_label)
+            || normalized_label.contains(&name_key)
+        {
+            return Ok(Some(ResolvedResearchAsset {
+                code: code.clone(),
+                secid: Some(secid),
+                name,
+                asset_type,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+async fn load_fund_catalog(client: &reqwest::Client) -> Result<Vec<FundCatalogEntry>, String> {
+    let response = client
+        .get("https://fund.eastmoney.com/js/fundcode_search.js")
+        .send()
+        .await
+        .map_err(|error| format!("下载基金名称索引失败: {error}"))?;
+    let raw = response
+        .text()
+        .await
+        .map_err(|error| format!("读取基金名称索引失败: {error}"))?;
+    let payload = raw
+        .trim()
+        .strip_prefix("var r =")
+        .and_then(|value| value.trim().strip_suffix(';'))
+        .unwrap_or(raw.trim())
+        .trim();
+    let rows = serde_json::from_str::<Vec<Vec<Value>>>(payload)
+        .map_err(|error| format!("解析基金名称索引失败: {error}"))?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let code = row.first()?.as_str()?.trim().to_string();
+            let name = row.get(2)?.as_str()?.trim().to_string();
+            if code.is_empty() || name.is_empty() {
+                return None;
+            }
+            let category = row
+                .get(3)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_lowercase();
+            Some(FundCatalogEntry {
+                code,
+                name,
+                asset_type: if category.contains("etf") {
+                    "etf".to_string()
+                } else {
+                    "fund".to_string()
+                },
+            })
+        })
+        .collect())
+}
+
+fn resolve_fund_name(label: &str, catalog: &[FundCatalogEntry]) -> Option<ResolvedResearchAsset> {
+    let normalized_label = normalize_name_key(label);
+    catalog
+        .iter()
+        .find(|entry| {
+            let name_key = normalize_name_key(&entry.name);
+            name_key == normalized_label
+                || name_key.contains(&normalized_label)
+                || normalized_label.contains(&name_key)
+        })
+        .map(|entry| ResolvedResearchAsset {
+            code: entry.code.clone(),
+            secid: None,
+            name: entry.name.clone(),
+            asset_type: entry.asset_type.clone(),
+        })
+}
+
+fn extract_cn_security_code(raw: &str) -> Option<String> {
+    let digits = raw
+        .chars()
+        .filter(|item| item.is_ascii_digit())
+        .collect::<String>();
+    if digits.len() >= 6 {
+        Some(digits[..6].to_string())
+    } else {
+        None
+    }
+}
+
+fn infer_stock_secid(code: &str) -> String {
+    let market = if code.starts_with('5')
+        || code.starts_with('6')
+        || code.starts_with('9')
+        || code.starts_with("11")
+    {
+        1
+    } else {
+        0
+    };
+    format!("{market}.{code}")
+}
+
+fn infer_stock_asset_type_from_code(code: &str) -> String {
+    if code.starts_with('1') || code.starts_with('5') {
+        "etf".to_string()
+    } else {
+        "stock".to_string()
+    }
+}
+
+fn normalize_stock_price(value: f64) -> f64 {
+    value / 100.0
+}
+
+fn local_quote_time_label() -> String {
+    Local::now().format("%H:%M:%S").to_string()
+}
+
+fn normalize_name_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '（' && *ch != '）' && *ch != '(' && *ch != ')')
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+}
+
+fn asset_type_label(asset_type: &str) -> &'static str {
+    match asset_type {
+        "stock" => "股票",
+        "etf" => "ETF",
+        "fund" => "基金",
+        _ => "资产",
+    }
 }

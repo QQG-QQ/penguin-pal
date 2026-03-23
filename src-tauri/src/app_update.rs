@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::security::oauth;
 
 const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/QQG-QQ/penguin-pal/releases/latest";
-const RELEASES_PAGE_URL: &str = "https://github.com/QQG-QQ/penguin-pal/releases/latest";
+const RELEASES_LATEST_URL: &str =
+    "https://api.github.com/repos/QQG-QQ/penguin-pal-releases/releases/latest";
+const RELEASES_PAGE_URL: &str = "https://github.com/QQG-QQ/penguin-pal-releases/releases/latest";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

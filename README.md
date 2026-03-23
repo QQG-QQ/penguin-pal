@@ -19,6 +19,7 @@
 - 语音输入（Web Speech / 本地 Whisper）与语音播报（系统 TTS）
 - Provider 配置（Mock / Codex CLI / OpenAI / Anthropic / OpenAI-compatible）
 - 本地 Whisper 语音识别（支持模型下载/加载/管理）
+- 本地投研模式（每日简报、AI 分析、自选资产图表、长期记忆联动）
 - Shell Agent 权限控制
 - 白名单动作网关、权限等级、人工确认与审计日志
 
@@ -88,6 +89,18 @@ npm run tauri:build
 
 当前项目的打包脚本在 Windows 发布模式下会自动改成单并发 Cargo，以降低 `rmeta` 损坏和分页文件压力导致的编译失败概率；如果仍然报相同错误，需要增大 Windows 虚拟内存（页面文件）。
 
+## 软件更新仓库
+
+开发与调试仍然使用当前源码仓库：
+
+- `https://github.com/QQG-QQ/penguin-pal`
+
+正式软件更新检查与下载页已经切到独立发布仓库：
+
+- `https://github.com/QQG-QQ/penguin-pal-releases`
+
+桌宠里的“软件更新”功能会从这个发布仓库读取最新 release，并优先打开适合当前平台的安装包资产。
+
 ## 目录结构
 
 ```text
@@ -141,6 +154,24 @@ penguin-pal/
 3. 加载模型后即可使用本地语音识别
 
 模型文件保存在 `%APPDATA%/com.penguinpal.app/whisper-models/`。
+
+## 本地投研模式
+
+桌宠支持本地投研模式，会在独立投研简报窗口里生成 AI 分析，并联动长期记忆记录你的研究习惯。
+
+当前支持：
+
+- 自选股票 / ETF / 基金统一研究
+- 每日启动弹出投研简报
+- AI 自动分析与分段展示
+- 自选资产涨跌图表
+- 名称输入与代码输入的 best-effort 解析
+
+说明：
+
+- 股票 / ETF / 基金都可以直接填名称或代码
+- 图表会尽量解析名称并拉取最新涨跌快照
+- 若名称未解析成功，会保留该条并显示原因，不会整项消失
 
 ## 安全边界
 

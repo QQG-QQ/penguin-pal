@@ -486,6 +486,7 @@ export interface ResearchBriefAlert {
 }
 
 export interface ResearchFundQuote {
+  assetType: string
   code: string
   name: string
   estimateNav?: number | null

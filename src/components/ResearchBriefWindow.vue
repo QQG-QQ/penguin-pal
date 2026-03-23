@@ -138,6 +138,32 @@ const fundBarStyle = (quote: ResearchFundQuote) => {
     width
   }
 }
+
+const assetTypeLabel = (quote: ResearchFundQuote) => {
+  switch (quote.assetType) {
+    case 'stock':
+      return '股票'
+    case 'etf':
+      return 'ETF'
+    case 'fund':
+      return '基金'
+    default:
+      return '资产'
+  }
+}
+
+const assetTypeIcon = (quote: ResearchFundQuote) => {
+  switch (quote.assetType) {
+    case 'stock':
+      return '📈'
+    case 'etf':
+      return '🧭'
+    case 'fund':
+      return '💹'
+    default:
+      return '📊'
+  }
+}
 </script>
 
 <template>
@@ -217,9 +243,9 @@ const fundBarStyle = (quote: ResearchFundQuote) => {
     <section v-if="fundQuotes.length" class="research-fund-card">
       <div class="research-fund-header">
         <div>
-          <p class="research-card-eyebrow">基金涨幅概览</p>
-          <h3>当前自选基金涨跌快照</h3>
-          <p>优先看今日估算涨跌和估值时间，再决定先查风格、仓位还是主题驱动。</p>
+          <p class="research-card-eyebrow">自选资产图表</p>
+          <h3>当前自选资产涨跌快照</h3>
+          <p>这里会统一显示股票、ETF 和基金的当前涨跌情况，先看波动，再决定今天先拆哪一类逻辑。</p>
         </div>
       </div>
 
@@ -231,8 +257,16 @@ const fundBarStyle = (quote: ResearchFundQuote) => {
           :data-trend="fundTrend(quote)"
         >
           <div class="research-fund-meta">
-            <strong>{{ quote.name }}</strong>
-            <span>{{ quote.code }}</span>
+            <strong>
+              <span class="research-asset-icon">{{ assetTypeIcon(quote) }}</span>
+              {{ quote.name }}
+            </strong>
+            <span>
+              <span class="research-asset-pill" :data-type="quote.assetType">
+                {{ assetTypeLabel(quote) }}
+              </span>
+              {{ quote.code }}
+            </span>
           </div>
 
           <div class="research-fund-chart">
@@ -416,6 +450,9 @@ const fundBarStyle = (quote: ResearchFundQuote) => {
 }
 
 .research-fund-meta strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-size: 15px;
   color: #18304a;
 }
@@ -424,6 +461,40 @@ const fundBarStyle = (quote: ResearchFundQuote) => {
 .research-fund-value span {
   font-size: 12px;
   color: #6d84a0;
+}
+
+.research-asset-icon {
+  font-size: 16px;
+}
+
+.research-asset-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 42px;
+  margin-right: 8px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(90, 128, 175, 0.12);
+  color: #35587f;
+}
+
+.research-asset-pill[data-type='stock'] {
+  background: rgba(76, 141, 255, 0.14);
+  color: #245fbb;
+}
+
+.research-asset-pill[data-type='etf'] {
+  background: rgba(83, 194, 165, 0.14);
+  color: #1c7f66;
+}
+
+.research-asset-pill[data-type='fund'] {
+  background: rgba(231, 159, 57, 0.14);
+  color: #946019;
 }
 
 .research-fund-chart {
