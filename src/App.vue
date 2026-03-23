@@ -465,6 +465,7 @@ let restorePetFrame: PetWindowFrame | null = null
 let cursorPassthroughEnabled = false
 let cursorPassthroughSuspendUntil = 0
 let researchStartupHandled = false
+let researchStartupRetryTimer: number | null = null
 let lastResearchAlertSignature = ''
 
 const isSettingsView = computed(() => windowView.value === 'settings')
@@ -708,6 +709,13 @@ const refreshMemoryDashboard = async () => {
 const buildResearchAlertSignature = (brief: ResearchBriefSnapshot) =>
   brief.alerts.map((alert) => `${alert.severity}:${alert.title}:${alert.summary}`).join('|')
 
+const clearResearchStartupRetryTimer = () => {
+  if (researchStartupRetryTimer !== null) {
+    window.clearTimeout(researchStartupRetryTimer)
+    researchStartupRetryTimer = null
+  }
+}
+
 const acknowledgeResearchBriefState = async (
   brief: ResearchBriefSnapshot,
   options: { markStartupPopup?: boolean } = {}
@@ -777,25 +785,50 @@ const refreshResearchBrief = async (options: { silent?: boolean } = {}) => {
   }
 }
 
+const scheduleResearchStartupPopupRetry = (loaded: AssistantSnapshot, delay = 1400) => {
+  if (researchStartupHandled || isNonPetWindowView.value) {
+    return
+  }
+
+  clearResearchStartupRetryTimer()
+  researchStartupRetryTimer = window.setTimeout(() => {
+    researchStartupRetryTimer = null
+    void maybeOpenResearchWindowOnStartup(loaded)
+  }, delay)
+}
+
 const maybeOpenResearchWindowOnStartup = async (loaded: AssistantSnapshot) => {
   if (researchStartupHandled || isNonPetWindowView.value) {
     return
   }
 
-  researchStartupHandled = true
-  if (!loaded.research.enabled || !loaded.research.startupPopup || !researchBrief.value.enabled) {
+  if (!loaded.research.enabled || !loaded.research.startupPopup) {
+    researchStartupHandled = true
+    return
+  }
+
+  if (!researchBrief.value.enabled) {
+    scheduleResearchStartupPopupRetry(loaded)
     return
   }
 
   try {
     if (!researchBrief.value.startupPopupDue) {
+      researchStartupHandled = true
       return
     }
 
-    await openResearchWindow()
+    const opened = await openResearchWindow()
+    if (!opened) {
+      scheduleResearchStartupPopupRetry(loaded, 1800)
+      return
+    }
+
     await acknowledgeResearchBriefState(researchBrief.value, { markStartupPopup: true })
     lastResearchAlertSignature = researchBrief.value.alertFingerprint || lastResearchAlertSignature
+    researchStartupHandled = true
   } catch (error) {
+    scheduleResearchStartupPopupRetry(loaded, 1800)
     announce(resolveErrorMessage(error, '打开投研简报窗口失败'), 'guarded')
   }
 }
@@ -3573,6 +3606,7 @@ onBeforeUnmount(() => {
   clearPetClampTimer()
   clearPetDockTimer()
   clearPetHitTestTimer()
+  clearResearchStartupRetryTimer()
   clearPersistWindowPositionTimer()
   clearControlPendingTimer()
   clearShellConfirmationTimer()

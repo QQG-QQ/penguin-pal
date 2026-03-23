@@ -1,6 +1,6 @@
 use chrono::{Local, TimeZone};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
 use crate::{
@@ -615,6 +615,31 @@ fn normalize_research_analysis_error(provider_kind: ProviderKind, raw: &str) -> 
     format!("AI 投研分析生成失败：{first_line}")
 }
 
+fn normalize_research_analysis_result(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(reply) = value.get("reply").and_then(Value::as_str) {
+            return reply.trim().to_string();
+        }
+        if let Some(message) = value.get("message").and_then(Value::as_str) {
+            return message.trim().to_string();
+        }
+        if let Some(content) = value
+            .get("output_text")
+            .or_else(|| value.get("content"))
+            .and_then(Value::as_str)
+        {
+            return content.trim().to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
 async fn build_ai_analysis(
     app: &AppHandle,
     runtime: &RuntimeState,
@@ -681,7 +706,7 @@ async fn build_ai_analysis(
         Ok((reply, label)) => ResearchAiAnalysis {
             status: "ready".to_string(),
             provider_label: Some(label),
-            result: Some(reply.trim().to_string()),
+            result: Some(normalize_research_analysis_result(&reply)),
             notice: None,
         },
         Err(error) => ResearchAiAnalysis {
@@ -748,7 +773,10 @@ fn build_research_analysis_prompt(
         1. 不要假装你看到了实时行情、实时新闻、最新财报或外部数据库；如果缺少实时数据，要明确写出“当前仅基于本地配置和长期记忆”。\n\
         2. 不要给出确定性的买卖指令、仓位建议或收益承诺。\n\
         3. 输出要面向个人研究使用，重点讲逻辑、比较、风险、失效条件和今天该先看什么。\n\
-        4. 请严格使用下面格式输出，并保持简洁有信息量：\n\
+        4. 禁止反问用户、禁止要求用户补充资料、禁止把结果写成待办提问；信息不足时，也必须基于现有配置先给出 best-effort 成品分析。\n\
+        5. 禁止输出 JSON、代码块或键值对包装；直接输出自然中文正文。\n\
+        6. 每个部分都要给出明确判断，不要只写方法论；即使结论保守，也要把当前倾向、风险和下一步观察点说清楚。\n\
+        7. 请严格使用下面格式输出，并保持简洁有信息量：\n\
         【总判断】\n\
         【财报拆解重点】\n\
         【基金风格比较】\n\
