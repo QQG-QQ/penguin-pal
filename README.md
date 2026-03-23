@@ -91,10 +91,6 @@ npm run tauri:build
 
 ## 软件更新仓库
 
-开发与调试仍然使用当前源码仓库：
-
-- `https://github.com/QQG-QQ/penguin-pal`
-
 正式软件更新检查与下载页已经切到独立发布仓库：
 
 - `https://github.com/QQG-QQ/penguin-pal-releases`
