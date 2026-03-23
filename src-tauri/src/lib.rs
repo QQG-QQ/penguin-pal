@@ -521,19 +521,22 @@ async fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
     )
     .await
     {
-        Ok(()) => CodexCliStatus {
-            installed: true,
-            version: basic.version,
-            logged_in: true,
-            credential_present: true,
-            auth_path: basic.auth_path,
-            runtime_path: basic.runtime_path,
-            source: basic.source,
-            status_kind: "ready".to_string(),
-            status_label: "已可用".to_string(),
-            relogin_recommended: false,
-            message: format!("Codex CLI 当前可用，当前来源：{}。", basic.source),
-        },
+        Ok(()) => {
+            let source = basic.source.clone();
+            CodexCliStatus {
+                installed: true,
+                version: basic.version,
+                logged_in: true,
+                credential_present: true,
+                auth_path: basic.auth_path,
+                runtime_path: basic.runtime_path,
+                source,
+                status_kind: "ready".to_string(),
+                status_label: "已可用".to_string(),
+                relogin_recommended: false,
+                message: format!("Codex CLI 当前可用，当前来源：{}。", basic.source),
+            }
+        }
         Err(error) => {
             let (kind, label, relogin_recommended, message) =
                 normalize_codex_status_probe_error(&error);
