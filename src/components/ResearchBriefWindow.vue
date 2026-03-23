@@ -48,6 +48,35 @@ const emit = defineEmits<{
     </section>
 
     <section class="research-grid">
+      <article
+        class="research-card research-analysis"
+        :data-status="brief.analysisStatus"
+      >
+        <div class="research-analysis-header">
+          <div>
+            <h2>AI 自动分析</h2>
+            <p v-if="brief.analysisProviderLabel">
+              当前由 {{ brief.analysisProviderLabel }} 生成
+            </p>
+          </div>
+          <span class="research-analysis-badge" :data-status="brief.analysisStatus">
+            {{
+              brief.analysisStatus === 'ready'
+                ? '已生成'
+                : brief.analysisStatus === 'error'
+                  ? '生成失败'
+                  : brief.analysisStatus === 'disabled'
+                    ? '未启用'
+                    : '暂不可用'
+            }}
+          </span>
+        </div>
+        <p v-if="brief.analysisNotice" class="research-analysis-notice">
+          {{ brief.analysisNotice }}
+        </p>
+        <pre v-if="brief.analysisResult" class="research-analysis-text">{{ brief.analysisResult }}</pre>
+      </article>
+
       <article v-for="section in brief.sections" :key="section.title" class="research-card">
         <h2>{{ section.title }}</h2>
         <p>{{ section.summary }}</p>
@@ -184,6 +213,48 @@ const emit = defineEmits<{
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 14px;
+}
+
+.research-analysis {
+  grid-column: 1 / -1;
+}
+
+.research-analysis-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.research-analysis-badge {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(237, 244, 255, 0.9);
+  color: #35617d;
+}
+
+.research-analysis-badge[data-status='ready'] {
+  background: rgba(227, 248, 233, 0.92);
+  color: #286246;
+}
+
+.research-analysis-badge[data-status='error'] {
+  background: rgba(255, 232, 232, 0.92);
+  color: #a24646;
+}
+
+.research-analysis-notice {
+  color: #58789b;
+}
+
+.research-analysis-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  line-height: 1.72;
+  color: #1f3347;
 }
 
 .research-card,

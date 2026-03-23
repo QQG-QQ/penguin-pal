@@ -492,5 +492,10 @@ export interface ResearchBriefSnapshot {
   memoryHints: string[]
   alertFingerprint: string
   hasUpdates: boolean
+  startupPopupDue: boolean
   updateSummary?: string | null
+  analysisStatus: 'disabled' | 'unavailable' | 'error' | 'ready' | string
+  analysisProviderLabel?: string | null
+  analysisResult?: string | null
+  analysisNotice?: string | null
 }

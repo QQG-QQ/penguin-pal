@@ -557,6 +557,8 @@ pub struct ResearchRuntimeStatus {
     pub last_alert_fingerprint: Option<String>,
     #[serde(default)]
     pub last_brief_generated_at: Option<u64>,
+    #[serde(default)]
+    pub last_startup_popup_day: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

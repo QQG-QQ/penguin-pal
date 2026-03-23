@@ -1854,19 +1854,26 @@ export const getResearchBriefSnapshot = async (): Promise<ResearchBriefSnapshot>
       memoryHints: [],
       alertFingerprint: '',
       hasUpdates: false,
-      updateSummary: null
+      startupPopupDue: false,
+      updateSummary: null,
+      analysisStatus: 'unavailable',
+      analysisProviderLabel: null,
+      analysisResult: null,
+      analysisNotice: '当前是浏览器调试模式，无法生成 AI 投研分析。'
     }
   }
 }
 
 export const acknowledgeResearchBrief = async (
   dayKey: string,
-  alertFingerprint?: string | null
+  alertFingerprint?: string | null,
+  markStartupPopup?: boolean
 ): Promise<boolean> => {
   try {
     return await safeInvoke<boolean>('acknowledge_research_brief', {
       dayKey,
-      alertFingerprint: alertFingerprint ?? null
+      alertFingerprint: alertFingerprint ?? null,
+      markStartupPopup: markStartupPopup ?? false
     })
   } catch (error) {
     rethrowIfDesktopRuntime(error)

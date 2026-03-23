@@ -290,7 +290,12 @@ const emptyResearchBrief = (): ResearchBriefSnapshot => ({
   memoryHints: [],
   alertFingerprint: '',
   hasUpdates: false,
-  updateSummary: null
+  startupPopupDue: false,
+  updateSummary: null,
+  analysisStatus: 'disabled',
+  analysisProviderLabel: null,
+  analysisResult: null,
+  analysisNotice: '开启本地投研模式后，这里会展示 AI 自动生成的研究分析。'
 })
 
 const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
@@ -698,13 +703,20 @@ const refreshMemoryDashboard = async () => {
 const buildResearchAlertSignature = (brief: ResearchBriefSnapshot) =>
   brief.alerts.map((alert) => `${alert.severity}:${alert.title}:${alert.summary}`).join('|')
 
-const acknowledgeResearchBriefState = async (brief: ResearchBriefSnapshot) => {
+const acknowledgeResearchBriefState = async (
+  brief: ResearchBriefSnapshot,
+  options: { markStartupPopup?: boolean } = {}
+) => {
   if (!brief.enabled) {
     return false
   }
 
   try {
-    return await acknowledgeResearchBrief(brief.dayKey, brief.alertFingerprint)
+    return await acknowledgeResearchBrief(
+      brief.dayKey,
+      brief.alertFingerprint,
+      options.markStartupPopup ?? false
+    )
   } catch {
     return false
   }
@@ -771,12 +783,12 @@ const maybeOpenResearchWindowOnStartup = async (loaded: AssistantSnapshot) => {
   }
 
   try {
-    if (!researchBrief.value.hasUpdates) {
+    if (!researchBrief.value.startupPopupDue) {
       return
     }
 
     await openResearchWindow()
-    await acknowledgeResearchBriefState(researchBrief.value)
+    await acknowledgeResearchBriefState(researchBrief.value, { markStartupPopup: true })
     lastResearchAlertSignature = researchBrief.value.alertFingerprint || lastResearchAlertSignature
   } catch (error) {
     announce(resolveErrorMessage(error, '打开投研简报窗口失败'), 'guarded')

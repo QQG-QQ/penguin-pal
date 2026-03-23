@@ -2236,12 +2236,15 @@ fn clear_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, S
 }
 
 #[tauri::command]
-fn get_research_brief_snapshot(
+async fn get_research_brief_snapshot(
     app: AppHandle,
     state: State<'_, Mutex<RuntimeState>>,
 ) -> Result<research::ResearchBriefSnapshot, String> {
-    let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
-    research::build_brief(&app, &runtime)
+    let runtime = state
+        .lock()
+        .map_err(|_| "助手状态锁定失败".to_string())?
+        .clone();
+    research::build_brief(&app, &runtime).await
 }
 
 #[tauri::command]
@@ -2250,6 +2253,7 @@ fn acknowledge_research_brief(
     state: State<'_, Mutex<RuntimeState>>,
     day_key: String,
     alert_fingerprint: Option<String>,
+    mark_startup_popup: Option<bool>,
 ) -> Result<bool, String> {
     let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
     research::acknowledge_brief(
@@ -2257,6 +2261,7 @@ fn acknowledge_research_brief(
         &mut runtime,
         &day_key,
         alert_fingerprint.as_deref().unwrap_or(""),
+        mark_startup_popup.unwrap_or(false),
     )?;
     Ok(true)
 }

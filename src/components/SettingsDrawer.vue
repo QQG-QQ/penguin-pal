@@ -98,6 +98,12 @@ const applyingPreset = ref(false)
 const isCodexProvider = ref(localDraft.value.kind === 'codexCli')
 const shortcutRecording = ref(false)
 const shortcutPreview = ref('')
+type MemoryPanelKey = 'stable' | 'candidate' | 'conflicts'
+const memoryPanelOpen = ref<Record<MemoryPanelKey, boolean>>({
+  stable: true,
+  candidate: false,
+  conflicts: false
+})
 
 const modifierOrder = ['CommandOrControl', 'Alt', 'Shift']
 
@@ -201,6 +207,10 @@ const stopShortcutCapture = () => {
     window.removeEventListener('keyup', handleShortcutCaptureKeyup, true)
     window.removeEventListener('blur', handleShortcutCaptureBlur)
   }
+}
+
+const toggleMemoryPanel = (panel: MemoryPanelKey) => {
+  memoryPanelOpen.value[panel] = !memoryPanelOpen.value[panel]
 }
 
 const commitShortcutCapture = (value: string) => {
@@ -1300,45 +1310,56 @@ onBeforeUnmount(() => {
                 <h3>稳定长期记忆</h3>
                 <p>这些条目当前会参与检索和 prompt 注入。</p>
               </div>
-            </div>
-
-            <div v-if="!memoryDashboard.stableRecords.length" class="memory-empty">
-              还没有稳定长期记忆。
-            </div>
-
-            <div v-else class="memory-list">
-              <article
-                v-for="record in memoryDashboard.stableRecords"
-                :key="record.id"
-                class="memory-entry"
+              <button
+                type="button"
+                class="memory-toggle"
+                :aria-expanded="memoryPanelOpen.stable"
+                @click="toggleMemoryPanel('stable')"
               >
-                <div class="memory-entry-top">
-                  <div>
-                    <strong>{{ record.title }}</strong>
-                    <p>{{ record.summary }}</p>
+                <span>{{ memoryPanelOpen.stable ? '收起' : '展开' }}</span>
+                <span class="memory-toggle-count">{{ memoryDashboard.stableRecords.length }}</span>
+              </button>
+            </div>
+
+            <div v-if="memoryPanelOpen.stable" class="memory-scroll-frame">
+              <div v-if="!memoryDashboard.stableRecords.length" class="memory-empty">
+                还没有稳定长期记忆。
+              </div>
+
+              <div v-else class="memory-list">
+                <article
+                  v-for="record in memoryDashboard.stableRecords"
+                  :key="record.id"
+                  class="memory-entry"
+                >
+                  <div class="memory-entry-top">
+                    <div>
+                      <strong>{{ record.title }}</strong>
+                      <p>{{ record.summary }}</p>
+                    </div>
+                    <span class="constraint-status">{{ memoryKindLabel(record.memoryType) }}</span>
                   </div>
-                  <span class="constraint-status">{{ memoryKindLabel(record.memoryType) }}</span>
-                </div>
-                <p class="memory-detail">{{ record.detail }}</p>
-                <div class="memory-meta-row">
-                  <span>状态：{{ memoryStatusLabel(record.status) }}</span>
-                  <span>置信度：{{ Math.round(record.confidence * 100) }}%</span>
-                  <span>更新：{{ formatMemoryTime(record.updatedAt) }}</span>
-                </div>
-                <div v-if="record.tags.length" class="memory-tags">
-                  <span v-for="tag in record.tags" :key="tag" class="memory-tag">{{ tag }}</span>
-                </div>
-                <div class="compact-actions">
-                  <button
-                    type="button"
-                    class="ghost-button"
-                    :disabled="memoryBusy"
-                    @click="emit('memoryDelete', record.memoryType, record.id)"
-                  >
-                    删除
-                  </button>
-                </div>
-              </article>
+                  <p class="memory-detail">{{ record.detail }}</p>
+                  <div class="memory-meta-row">
+                    <span>状态：{{ memoryStatusLabel(record.status) }}</span>
+                    <span>置信度：{{ Math.round(record.confidence * 100) }}%</span>
+                    <span>更新：{{ formatMemoryTime(record.updatedAt) }}</span>
+                  </div>
+                  <div v-if="record.tags.length" class="memory-tags">
+                    <span v-for="tag in record.tags" :key="tag" class="memory-tag">{{ tag }}</span>
+                  </div>
+                  <div class="compact-actions">
+                    <button
+                      type="button"
+                      class="ghost-button"
+                      :disabled="memoryBusy"
+                      @click="emit('memoryDelete', record.memoryType, record.id)"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </article>
+              </div>
             </div>
           </article>
 
@@ -1348,53 +1369,64 @@ onBeforeUnmount(() => {
                 <h3>候选记忆</h3>
                 <p>这类条目通常是对话中推断出的隐式事实，默认不会立即长期生效。</p>
               </div>
-            </div>
-
-            <div v-if="!memoryDashboard.candidateRecords.length" class="memory-empty">
-              当前没有候选记忆。
-            </div>
-
-            <div v-else class="memory-list">
-              <article
-                v-for="record in memoryDashboard.candidateRecords"
-                :key="record.id"
-                class="memory-entry"
+              <button
+                type="button"
+                class="memory-toggle"
+                :aria-expanded="memoryPanelOpen.candidate"
+                @click="toggleMemoryPanel('candidate')"
               >
-                <div class="memory-entry-top">
-                  <div>
-                    <strong>{{ record.title }}</strong>
-                    <p>{{ record.summary }}</p>
+                <span>{{ memoryPanelOpen.candidate ? '收起' : '展开' }}</span>
+                <span class="memory-toggle-count">{{ memoryDashboard.candidateRecords.length }}</span>
+              </button>
+            </div>
+
+            <div v-if="memoryPanelOpen.candidate" class="memory-scroll-frame">
+              <div v-if="!memoryDashboard.candidateRecords.length" class="memory-empty">
+                当前没有候选记忆。
+              </div>
+
+              <div v-else class="memory-list">
+                <article
+                  v-for="record in memoryDashboard.candidateRecords"
+                  :key="record.id"
+                  class="memory-entry"
+                >
+                  <div class="memory-entry-top">
+                    <div>
+                      <strong>{{ record.title }}</strong>
+                      <p>{{ record.summary }}</p>
+                    </div>
+                    <span class="constraint-status">候选</span>
                   </div>
-                  <span class="constraint-status">候选</span>
-                </div>
-                <p class="memory-detail">{{ record.detail }}</p>
-                <div class="memory-meta-row">
-                  <span>提及次数：{{ record.mentionCount }}</span>
-                  <span>置信度：{{ Math.round(record.confidence * 100) }}%</span>
-                  <span v-if="record.expiresAt">过期：{{ formatMemoryTime(record.expiresAt) }}</span>
-                </div>
-                <div v-if="record.tags.length" class="memory-tags">
-                  <span v-for="tag in record.tags" :key="tag" class="memory-tag">{{ tag }}</span>
-                </div>
-                <div class="compact-actions">
-                  <button
-                    type="button"
-                    class="ghost-button"
-                    :disabled="memoryBusy"
-                    @click="emit('memoryPromote', record.id)"
-                  >
-                    提升为长期记忆
-                  </button>
-                  <button
-                    type="button"
-                    class="ghost-button"
-                    :disabled="memoryBusy"
-                    @click="emit('memoryDelete', record.memoryType, record.id)"
-                  >
-                    删除
-                  </button>
-                </div>
-              </article>
+                  <p class="memory-detail">{{ record.detail }}</p>
+                  <div class="memory-meta-row">
+                    <span>提及次数：{{ record.mentionCount }}</span>
+                    <span>置信度：{{ Math.round(record.confidence * 100) }}%</span>
+                    <span v-if="record.expiresAt">过期：{{ formatMemoryTime(record.expiresAt) }}</span>
+                  </div>
+                  <div v-if="record.tags.length" class="memory-tags">
+                    <span v-for="tag in record.tags" :key="tag" class="memory-tag">{{ tag }}</span>
+                  </div>
+                  <div class="compact-actions">
+                    <button
+                      type="button"
+                      class="ghost-button"
+                      :disabled="memoryBusy"
+                      @click="emit('memoryPromote', record.id)"
+                    >
+                      提升为长期记忆
+                    </button>
+                    <button
+                      type="button"
+                      class="ghost-button"
+                      :disabled="memoryBusy"
+                      @click="emit('memoryDelete', record.memoryType, record.id)"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </article>
+              </div>
             </div>
           </article>
         </div>
@@ -1405,65 +1437,76 @@ onBeforeUnmount(() => {
               <h3>冲突记忆</h3>
               <p>当系统发现同一类事实上下文互相冲突时，会先暂停自动采用，等待你明确选择保留哪一条。</p>
             </div>
-          </div>
-
-          <div v-if="!memoryDashboard.conflicts.length" class="memory-empty">
-            当前没有待处理的冲突记忆。
-          </div>
-
-          <div v-else class="memory-conflicts">
-            <article
-              v-for="group in memoryDashboard.conflicts"
-              :key="group.id"
-              class="memory-conflict-group"
+            <button
+              type="button"
+              class="memory-toggle"
+              :aria-expanded="memoryPanelOpen.conflicts"
+              @click="toggleMemoryPanel('conflicts')"
             >
-              <div class="memory-entry-top">
-                <div>
-                  <strong>{{ group.title }}</strong>
-                  <p>{{ memoryKindLabel(group.memoryType) }} · 冲突组 {{ group.id }}</p>
-                </div>
-                <span class="constraint-status">待裁决</span>
-              </div>
+              <span>{{ memoryPanelOpen.conflicts ? '收起' : '展开' }}</span>
+              <span class="memory-toggle-count">{{ memoryDashboard.conflicts.length }}</span>
+            </button>
+          </div>
 
-              <div class="memory-list">
-                <article
-                  v-for="record in group.entries"
-                  :key="record.id"
-                  class="memory-entry conflicted"
-                >
-                  <div class="memory-entry-top">
-                    <div>
-                      <strong>{{ record.title }}</strong>
-                      <p>{{ record.summary }}</p>
+          <div v-if="memoryPanelOpen.conflicts" class="memory-scroll-frame memory-scroll-frame-conflicts">
+            <div v-if="!memoryDashboard.conflicts.length" class="memory-empty">
+              当前没有待处理的冲突记忆。
+            </div>
+
+            <div v-else class="memory-conflicts">
+              <article
+                v-for="group in memoryDashboard.conflicts"
+                :key="group.id"
+                class="memory-conflict-group"
+              >
+                <div class="memory-entry-top">
+                  <div>
+                    <strong>{{ group.title }}</strong>
+                    <p>{{ memoryKindLabel(group.memoryType) }} · 冲突组 {{ group.id }}</p>
+                  </div>
+                  <span class="constraint-status">待裁决</span>
+                </div>
+
+                <div class="memory-list">
+                  <article
+                    v-for="record in group.entries"
+                    :key="record.id"
+                    class="memory-entry conflicted"
+                  >
+                    <div class="memory-entry-top">
+                      <div>
+                        <strong>{{ record.title }}</strong>
+                        <p>{{ record.summary }}</p>
+                      </div>
+                      <span class="constraint-status">{{ memoryStatusLabel(record.status) }}</span>
                     </div>
-                    <span class="constraint-status">{{ memoryStatusLabel(record.status) }}</span>
-                  </div>
-                  <p class="memory-detail">{{ record.detail }}</p>
-                  <div class="memory-meta-row">
-                    <span>来源：{{ record.source }}</span>
-                    <span>更新：{{ formatMemoryTime(record.updatedAt) }}</span>
-                  </div>
-                  <div class="compact-actions">
-                    <button
-                      type="button"
-                      class="ghost-button"
-                      :disabled="memoryBusy"
-                      @click="emit('memoryResolve', group.memoryType, group.id, record.id)"
-                    >
-                      {{ conflictActionLabel(group) }}
-                    </button>
-                    <button
-                      type="button"
-                      class="ghost-button"
-                      :disabled="memoryBusy"
-                      @click="emit('memoryDelete', record.memoryType, record.id)"
-                    >
-                      删除这条
-                    </button>
-                  </div>
-                </article>
-              </div>
-            </article>
+                    <p class="memory-detail">{{ record.detail }}</p>
+                    <div class="memory-meta-row">
+                      <span>来源：{{ record.source }}</span>
+                      <span>更新：{{ formatMemoryTime(record.updatedAt) }}</span>
+                    </div>
+                    <div class="compact-actions">
+                      <button
+                        type="button"
+                        class="ghost-button"
+                        :disabled="memoryBusy"
+                        @click="emit('memoryResolve', group.memoryType, group.id, record.id)"
+                      >
+                        {{ conflictActionLabel(group) }}
+                      </button>
+                      <button
+                        type="button"
+                        class="ghost-button"
+                        :disabled="memoryBusy"
+                        @click="emit('memoryDelete', record.memoryType, record.id)"
+                      >
+                        删除这条
+                      </button>
+                    </div>
+                  </article>
+                </div>
+              </article>
+            </div>
           </div>
         </div>
       </section>
@@ -1753,12 +1796,48 @@ textarea {
   font-size: 15px;
 }
 
+.memory-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(23, 56, 75, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #17384b;
+  min-height: 34px;
+  padding: 0 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.memory-toggle-count {
+  display: inline-flex;
+  min-width: 22px;
+  min-height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(11, 106, 138, 0.1);
+  color: #0b6988;
+  font-size: 12px;
+}
+
 .memory-empty {
   padding: 16px;
   border-radius: 16px;
   background: rgba(17, 68, 92, 0.06);
   color: #476775;
   font-size: 13px;
+}
+
+.memory-scroll-frame {
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.memory-scroll-frame-conflicts {
+  max-height: 420px;
 }
 
 .memory-list,

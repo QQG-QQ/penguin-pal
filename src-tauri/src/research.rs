@@ -4,8 +4,11 @@ use serde_json::json;
 use tauri::{AppHandle, Manager};
 
 use crate::{
-    app_state::{now_millis, save, ResearchConfig, RuntimeState},
+    ai::{guardrails, provider},
+    app_state::{now_millis, save, ChatMessage, ProviderKind, ResearchConfig, RuntimeState},
+    codex_runtime::resolve_for_app,
     memory::{generate_id, MemoryService, MemoryStatus, MemoryStore, MetaPreference, SemanticEntry},
+    security::policy,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,7 +41,20 @@ pub struct ResearchBriefSnapshot {
     pub memory_hints: Vec<String>,
     pub alert_fingerprint: String,
     pub has_updates: bool,
+    pub startup_popup_due: bool,
     pub update_summary: Option<String>,
+    pub analysis_status: String,
+    pub analysis_provider_label: Option<String>,
+    pub analysis_result: Option<String>,
+    pub analysis_notice: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResearchAiAnalysis {
+    status: String,
+    provider_label: Option<String>,
+    result: Option<String>,
+    notice: Option<String>,
 }
 
 pub fn normalize_config(config: &ResearchConfig) -> ResearchConfig {
@@ -67,7 +83,10 @@ pub fn normalize_config(config: &ResearchConfig) -> ResearchConfig {
     next
 }
 
-pub fn build_brief(app: &AppHandle, runtime: &RuntimeState) -> Result<ResearchBriefSnapshot, String> {
+pub async fn build_brief(
+    app: &AppHandle,
+    runtime: &RuntimeState,
+) -> Result<ResearchBriefSnapshot, String> {
     let config = normalize_config(&runtime.research);
     let generated_at = now_millis();
     let day_key = local_day_key(generated_at);
@@ -89,7 +108,14 @@ pub fn build_brief(app: &AppHandle, runtime: &RuntimeState) -> Result<ResearchBr
             memory_hints: Vec::new(),
             alert_fingerprint: String::new(),
             has_updates: false,
+            startup_popup_due: false,
             update_summary: None,
+            analysis_status: "disabled".to_string(),
+            analysis_provider_label: None,
+            analysis_result: None,
+            analysis_notice: Some(
+                "投研模式未启用，因此不会生成 AI 分析结果。".to_string(),
+            ),
         });
     }
 
@@ -209,6 +235,11 @@ pub fn build_brief(app: &AppHandle, runtime: &RuntimeState) -> Result<ResearchBr
         .last_daily_brief_day
         .as_deref()
         != Some(day_key.as_str());
+    let startup_popup_due = runtime
+        .research_status
+        .last_startup_popup_day
+        .as_deref()
+        != Some(day_key.as_str());
     let has_new_alerts = !alert_fingerprint.is_empty()
         && runtime
             .research_status
@@ -217,6 +248,16 @@ pub fn build_brief(app: &AppHandle, runtime: &RuntimeState) -> Result<ResearchBr
             != Some(alert_fingerprint.as_str());
     let has_updates = has_new_day || has_new_alerts;
     let update_summary = build_update_summary(has_new_day, has_new_alerts, alerts.len());
+    let ai_analysis = build_ai_analysis(
+        app,
+        runtime,
+        &config,
+        &memory_hints,
+        &sections,
+        &alerts,
+        &day_key,
+    )
+    .await;
 
     Ok(ResearchBriefSnapshot {
         generated_at,
@@ -231,7 +272,12 @@ pub fn build_brief(app: &AppHandle, runtime: &RuntimeState) -> Result<ResearchBr
         memory_hints,
         alert_fingerprint,
         has_updates,
+        startup_popup_due,
         update_summary,
+        analysis_status: ai_analysis.status,
+        analysis_provider_label: ai_analysis.provider_label,
+        analysis_result: ai_analysis.result,
+        analysis_notice: ai_analysis.notice,
     })
 }
 
@@ -240,6 +286,7 @@ pub fn acknowledge_brief(
     runtime: &mut RuntimeState,
     day_key: &str,
     alert_fingerprint: &str,
+    mark_startup_popup: bool,
 ) -> Result<(), String> {
     runtime.research_status.last_daily_brief_day = Some(day_key.trim().to_string());
     runtime.research_status.last_alert_fingerprint = if alert_fingerprint.trim().is_empty() {
@@ -248,6 +295,9 @@ pub fn acknowledge_brief(
         Some(alert_fingerprint.trim().to_string())
     };
     runtime.research_status.last_brief_generated_at = Some(now_millis());
+    if mark_startup_popup {
+        runtime.research_status.last_startup_popup_day = Some(day_key.trim().to_string());
+    }
     save(app, runtime)
 }
 
@@ -522,4 +572,165 @@ fn build_update_summary(has_new_day: bool, has_new_alerts: bool, alert_count: us
         (false, true) => Some(format!("研究提醒有更新，当前共 {alert_count} 条。")),
         (false, false) => None,
     }
+}
+
+async fn build_ai_analysis(
+    app: &AppHandle,
+    runtime: &RuntimeState,
+    config: &ResearchConfig,
+    memory_hints: &[String],
+    sections: &[ResearchBriefSection],
+    alerts: &[ResearchBriefAlert],
+    day_key: &str,
+) -> ResearchAiAnalysis {
+    if matches!(runtime.provider.kind, ProviderKind::Mock) {
+        return ResearchAiAnalysis {
+            status: "unavailable".to_string(),
+            provider_label: None,
+            result: None,
+            notice: Some("当前使用的是 Mock provider，无法生成 AI 投研分析。".to_string()),
+        };
+    }
+
+    if !runtime.provider.allow_network {
+        return ResearchAiAnalysis {
+            status: "unavailable".to_string(),
+            provider_label: None,
+            result: None,
+            notice: Some("当前处于离线安全模式，AI 投研分析已跳过。".to_string()),
+        };
+    }
+
+    let codex_runtime = resolve_for_app(app).ok();
+    let codex_command = codex_runtime
+        .as_ref()
+        .and_then(|item| item.command.as_ref())
+        .map(|path| path.to_string_lossy().to_string());
+    let codex_home = codex_runtime
+        .as_ref()
+        .map(|item| item.home_root.to_string_lossy().to_string());
+    let allowed_actions = policy::actions_for_level(runtime.permission_level);
+    let prompt = build_research_analysis_prompt(config, memory_hints, sections, alerts, day_key);
+    let history = vec![
+        ChatMessage::new(
+            "system",
+            guardrails::compose_system_prompt(
+                &runtime.provider,
+                runtime.permission_level,
+                &allowed_actions,
+            ),
+        ),
+        ChatMessage::user(prompt),
+    ];
+    let mut research_thread_id = None;
+
+    match provider::respond(
+        &runtime.provider,
+        runtime.api_key.clone(),
+        runtime.oauth_access_token.clone(),
+        codex_command,
+        codex_home,
+        &mut research_thread_id,
+        runtime.permission_level,
+        &allowed_actions,
+        &history,
+    )
+    .await
+    {
+        Ok((reply, label)) => ResearchAiAnalysis {
+            status: "ready".to_string(),
+            provider_label: Some(label),
+            result: Some(reply.trim().to_string()),
+            notice: None,
+        },
+        Err(error) => ResearchAiAnalysis {
+            status: "error".to_string(),
+            provider_label: Some(runtime.provider.kind.label().to_string()),
+            result: None,
+            notice: Some(format!("AI 投研分析生成失败：{error}")),
+        },
+    }
+}
+
+fn build_research_analysis_prompt(
+    config: &ResearchConfig,
+    memory_hints: &[String],
+    sections: &[ResearchBriefSection],
+    alerts: &[ResearchBriefAlert],
+    day_key: &str,
+) -> String {
+    let watchlist = if config.watchlist.is_empty() {
+        "无".to_string()
+    } else {
+        config.watchlist.join("、")
+    };
+    let funds = if config.funds.is_empty() {
+        "无".to_string()
+    } else {
+        config.funds.join("、")
+    };
+    let themes = if config.themes.is_empty() {
+        "无".to_string()
+    } else {
+        config.themes.join("、")
+    };
+    let memory_text = if memory_hints.is_empty() {
+        "无".to_string()
+    } else {
+        memory_hints.join("\n- ")
+    };
+    let section_text = sections
+        .iter()
+        .map(|section| {
+            format!(
+                "### {}\n{}\n- {}",
+                section.title,
+                section.summary,
+                section.bullets.join("\n- ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let alerts_text = if alerts.is_empty() {
+        "无".to_string()
+    } else {
+        alerts
+            .iter()
+            .map(|alert| format!("[{}] {}：{}", alert.severity, alert.title, alert.summary))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        "你现在是桌宠内置的本地投研助手。请基于下面这些本地配置、长期记忆和简报骨架，直接给出一份中文研究分析。\n\
+        重要约束：\n\
+        1. 不要假装你看到了实时行情、实时新闻、最新财报或外部数据库；如果缺少实时数据，要明确写出“当前仅基于本地配置和长期记忆”。\n\
+        2. 不要给出确定性的买卖指令、仓位建议或收益承诺。\n\
+        3. 输出要面向个人研究使用，重点讲逻辑、比较、风险、失效条件和今天该先看什么。\n\
+        4. 请严格使用下面格式输出，并保持简洁有信息量：\n\
+        【总判断】\n\
+        【财报拆解重点】\n\
+        【基金风格比较】\n\
+        【主题/地缘影响链】\n\
+        【决策框架】\n\
+        【今日优先动作】\n\n\
+        今日日期：{day_key}\n\
+        股票/ETF：{watchlist}\n\
+        基金：{funds}\n\
+        主题：{themes}\n\
+        投资习惯备注：{}\n\
+        决策框架：{}\n\n\
+        已加载长期记忆：\n\
+        - {memory_text}\n\n\
+        当前静态简报骨架：\n\
+        {section_text}\n\n\
+        当前研究提醒：\n\
+        {alerts_text}",
+        if config.habit_notes.trim().is_empty() {
+            "无"
+        } else {
+            config.habit_notes.trim()
+        },
+        config.decision_framework.trim(),
+    )
 }
