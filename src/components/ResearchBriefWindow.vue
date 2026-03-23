@@ -35,18 +35,6 @@ const emit = defineEmits<{
       </div>
     </header>
 
-    <section v-if="brief.alerts.length" class="research-alerts">
-      <article
-        v-for="alert in brief.alerts"
-        :key="alert.id"
-        class="research-alert"
-        :data-severity="alert.severity"
-      >
-        <strong>{{ alert.title }}</strong>
-        <p>{{ alert.summary }}</p>
-      </article>
-    </section>
-
     <section class="research-grid">
       <article
         class="research-card research-analysis"
@@ -76,21 +64,6 @@ const emit = defineEmits<{
         </p>
         <pre v-if="brief.analysisResult" class="research-analysis-text">{{ brief.analysisResult }}</pre>
       </article>
-
-      <article v-for="section in brief.sections" :key="section.title" class="research-card">
-        <h2>{{ section.title }}</h2>
-        <p>{{ section.summary }}</p>
-        <ul>
-          <li v-for="bullet in section.bullets" :key="bullet">{{ bullet }}</li>
-        </ul>
-      </article>
-    </section>
-
-    <section v-if="brief.memoryHints.length" class="research-memory">
-      <h2>长期记忆已加载</h2>
-      <ul>
-        <li v-for="item in brief.memoryHints" :key="item">{{ item }}</li>
-      </ul>
     </section>
   </section>
 </template>
@@ -173,37 +146,11 @@ const emit = defineEmits<{
   cursor: pointer;
 }
 
-.research-alerts {
-  display: grid;
-  gap: 10px;
-  margin-bottom: 18px;
-}
-
-.research-alert {
-  padding: 14px 16px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.88);
-  border: 1px solid rgba(20, 34, 54, 0.08);
-}
-
-.research-alert[data-severity='watch'] {
-  border-color: rgba(233, 151, 43, 0.28);
-  background: rgba(255, 245, 223, 0.88);
-}
-
-.research-alert[data-severity='urgent'] {
-  border-color: rgba(205, 79, 79, 0.28);
-  background: rgba(255, 235, 235, 0.88);
-}
-
-.research-alert strong,
-.research-card h2,
-.research-memory h2 {
+.research-card h2 {
   display: block;
   margin-bottom: 8px;
 }
 
-.research-alert p,
 .research-card p {
   margin: 0 0 10px;
   line-height: 1.6;
@@ -264,17 +211,6 @@ const emit = defineEmits<{
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid rgba(20, 34, 54, 0.08);
   box-shadow: 0 18px 38px rgba(42, 76, 128, 0.08);
-}
-
-.research-card ul,
-.research-memory ul {
-  margin: 0;
-  padding-left: 18px;
-  line-height: 1.7;
-}
-
-.research-memory {
-  margin-top: 16px;
 }
 
 @media (max-width: 720px) {

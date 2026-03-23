@@ -574,6 +574,47 @@ fn build_update_summary(has_new_day: bool, has_new_alerts: bool, alert_count: us
     }
 }
 
+fn normalize_research_analysis_error(provider_kind: ProviderKind, raw: &str) -> String {
+    let trimmed = raw.trim();
+    let lowered = trimmed.to_lowercase();
+
+    if lowered.contains("deactivated_workspace")
+        || (lowered.contains("402 payment required") && lowered.contains("codex"))
+    {
+        return "Codex CLI 当前登录的 workspace 已失效，或当前账号没有可用的 Codex 调用权限，所以 AI 投研分析没有生成出来。请重新登录可用的 Codex 账号/工作区，或切换到其他可用 provider。".to_string();
+    }
+
+    if lowered.contains("payment required") {
+        return format!(
+            "{} 当前返回了付费/额度限制，AI 投研分析暂时不可用。请检查订阅、额度或工作区权限。",
+            provider_kind.label()
+        );
+    }
+
+    if lowered.contains("401") || lowered.contains("unauthorized") || lowered.contains("auth error")
+    {
+        return format!(
+            "{} 当前认证失败，AI 投研分析暂时不可用。请检查登录状态、API Key 或 OAuth 凭据。",
+            provider_kind.label()
+        );
+    }
+
+    if lowered.contains("timeout") || lowered.contains("timed out") {
+        return format!(
+            "{} 响应超时，AI 投研分析这次没有生成完成。可以稍后手动刷新再试。",
+            provider_kind.label()
+        );
+    }
+
+    let first_line = trimmed
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(trimmed);
+
+    format!("AI 投研分析生成失败：{first_line}")
+}
+
 async fn build_ai_analysis(
     app: &AppHandle,
     runtime: &RuntimeState,
@@ -647,7 +688,7 @@ async fn build_ai_analysis(
             status: "error".to_string(),
             provider_label: Some(runtime.provider.kind.label().to_string()),
             result: None,
-            notice: Some(format!("AI 投研分析生成失败：{error}")),
+            notice: Some(normalize_research_analysis_error(runtime.provider.kind, &error)),
         },
     }
 }
