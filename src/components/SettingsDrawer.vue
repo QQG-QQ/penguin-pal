@@ -50,6 +50,7 @@ const emit = defineEmits<{
   save: [input: ProviderConfigInput]
   sectionChange: [section: 'settings' | 'actions']
   oauthStart: [input: ProviderConfigInput]
+  codexRelogin: []
   codexRefresh: []
   appUpdateCheck: []
   appUpdateOpen: []
@@ -565,7 +566,7 @@ onBeforeUnmount(() => {
               <strong>Codex CLI 登录</strong>
               <p>会在系统终端执行 <code>codex login</code>，完成后即可直接对话。</p>
             </div>
-            <span class="oauth-status">{{ codexStatus.loggedIn ? '已登录' : '未登录' }}</span>
+            <span class="oauth-status">{{ codexStatus.statusLabel }}</span>
           </div>
 
           <div class="oauth-actions">
@@ -580,6 +581,14 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="ghost-button"
+              :disabled="oauthBusy || !codexStatus.installed || !codexStatus.credentialPresent"
+              @click="emit('codexRelogin')"
+            >
+              {{ oauthBusy ? '处理中...' : '重新登录' }}
+            </button>
+            <button
+              type="button"
+              class="ghost-button"
               :disabled="oauthBusy"
               @click="emit('codexRefresh')"
             >
@@ -589,12 +598,15 @@ onBeforeUnmount(() => {
 
           <div class="oauth-meta full-row">
             <p>Codex CLI：{{ codexStatus.installed ? '已安装' : '未安装' }}</p>
+            <p>认证状态：{{ codexStatus.credentialPresent ? '检测到凭据' : '未检测到凭据' }}</p>
+            <p>实际可用性：{{ codexStatus.statusLabel }}</p>
             <p>运行时来源：{{ codexStatus.source }}</p>
             <p v-if="codexStatus.version">版本：{{ codexStatus.version }}</p>
             <p v-if="codexStatus.runtimePath">运行时路径：{{ codexStatus.runtimePath }}</p>
             <p v-if="codexStatus.authPath">凭据路径：{{ codexStatus.authPath }}</p>
             <p>当前聊天引擎：{{ currentProviderLabel }}</p>
             <p>{{ codexStatus.message }}</p>
+            <p v-if="codexStatus.reloginRecommended">建议：点击“重新登录”，清理旧私有凭据后重新选择可用的账号 / workspace。</p>
             <p>Codex CLI Provider 会优先使用桌宠自己的私有运行时和私有登录目录，不依赖系统全局安装。</p>
             <p>设置页里的 Model 现在只用于显示当前运行时视图，不会再直接改写 Codex CLI 私有配置。</p>
             <p v-if="oauthNotice">{{ oauthNotice }}</p>

@@ -330,9 +330,13 @@ const fallbackCodexStatus = (): CodexCliStatus => ({
   installed: false,
   version: null,
   loggedIn: false,
+  credentialPresent: false,
   authPath: null,
   runtimePath: null,
   source: '未找到',
+  statusKind: 'unavailable',
+  statusLabel: '未检测',
+  reloginRecommended: false,
   message: '浏览器调试模式下无法检测本机 Codex CLI。'
 })
 
@@ -1627,6 +1631,18 @@ export const startCodexCliLogin = async (): Promise<CodexCliStatus> => {
     return {
       ...fallbackCodexStatus(),
       message: '浏览器调试模式无法启动 codex login。'
+    }
+  }
+}
+
+export const restartCodexCliLogin = async (): Promise<CodexCliStatus> => {
+  try {
+    return await safeInvoke<CodexCliStatus>('restart_codex_cli_login')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return {
+      ...fallbackCodexStatus(),
+      message: '浏览器调试模式无法执行 Codex CLI 重新登录。'
     }
   }
 }

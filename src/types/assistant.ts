@@ -269,9 +269,13 @@ export interface CodexCliStatus {
   installed: boolean
   version: string | null
   loggedIn: boolean
+  credentialPresent: boolean
   authPath: string | null
   runtimePath: string | null
   source: string
+  statusKind: string
+  statusLabel: string
+  reloginRecommended: boolean
   message: string
 }
 

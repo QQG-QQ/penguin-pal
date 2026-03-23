@@ -270,6 +270,20 @@ struct CodexCliStatus {
     installed: bool,
     version: Option<String>,
     logged_in: bool,
+    credential_present: bool,
+    auth_path: Option<String>,
+    runtime_path: Option<String>,
+    source: String,
+    status_kind: String,
+    status_label: String,
+    relogin_recommended: bool,
+    message: String,
+}
+
+struct BasicCodexCliStatus {
+    installed: bool,
+    version: Option<String>,
+    credential_present: bool,
     auth_path: Option<String>,
     runtime_path: Option<String>,
     source: String,
@@ -314,14 +328,14 @@ fn read_codex_version(command: &str, app: &AppHandle) -> Option<String> {
     first_non_empty_output(&output)
 }
 
-fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
+fn inspect_codex_cli_status_basic(app: &AppHandle) -> BasicCodexCliStatus {
     let runtime = match resolve_for_app(app) {
         Ok(runtime) => runtime,
         Err(error) => {
-            return CodexCliStatus {
+            return BasicCodexCliStatus {
                 installed: false,
                 version: None,
-                logged_in: false,
+                credential_present: false,
                 auth_path: None,
                 runtime_path: None,
                 source: "未找到".to_string(),
@@ -347,7 +361,7 @@ fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
     let auth_file_exists = auth_path.as_ref().is_some_and(|path| {
         path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
     });
-    let logged_in = installed && auth_file_exists;
+    let credential_present = installed && auth_file_exists;
     let auth_path_label = auth_path
         .as_ref()
         .map(|path| path.to_string_lossy().to_string());
@@ -358,16 +372,16 @@ fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
         } else {
             format!("已发现 {}，但当前无法执行 Codex CLI。", runtime.source)
         }
-    } else if logged_in {
-        format!("Codex CLI 已登录，当前来源：{}。", runtime.source)
+    } else if credential_present {
+        format!("已检测到 Codex CLI 私有凭据，当前来源：{}。", runtime.source)
     } else {
         format!("Codex CLI 未登录，请点击按钮启动登录。当前来源：{}。", runtime.source)
     };
 
-    CodexCliStatus {
+    BasicCodexCliStatus {
         installed,
         version,
-        logged_in,
+        credential_present,
         auth_path: auth_path_label,
         runtime_path: command_label,
         source: runtime.source.to_string(),
@@ -375,14 +389,179 @@ fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
     }
 }
 
+fn inspect_codex_cli_status_unverified(app: &AppHandle) -> CodexCliStatus {
+    let basic = inspect_codex_cli_status_basic(app);
+
+    if !basic.installed {
+        return CodexCliStatus {
+            installed: false,
+            version: basic.version,
+            logged_in: false,
+            credential_present: false,
+            auth_path: basic.auth_path,
+            runtime_path: basic.runtime_path,
+            source: basic.source,
+            status_kind: "notInstalled".to_string(),
+            status_label: "未安装".to_string(),
+            relogin_recommended: false,
+            message: basic.message,
+        };
+    }
+
+    if !basic.credential_present {
+        return CodexCliStatus {
+            installed: true,
+            version: basic.version,
+            logged_in: false,
+            credential_present: false,
+            auth_path: basic.auth_path,
+            runtime_path: basic.runtime_path,
+            source: basic.source,
+            status_kind: "notLoggedIn".to_string(),
+            status_label: "未登录".to_string(),
+            relogin_recommended: false,
+            message: basic.message,
+        };
+    }
+
+    CodexCliStatus {
+        installed: true,
+        version: basic.version,
+        logged_in: false,
+        credential_present: true,
+        auth_path: basic.auth_path,
+        runtime_path: basic.runtime_path,
+        source: basic.source,
+        status_kind: "credentialOnly".to_string(),
+        status_label: "凭据已检测".to_string(),
+        relogin_recommended: false,
+        message: "已检测到 Codex CLI 私有凭据，但还没有验证当前 workspace 是否可用。点击“刷新状态”可做一次真实可用性检查。".to_string(),
+    }
+}
+
+fn normalize_codex_status_probe_error(error: &str) -> (&'static str, &'static str, bool, String) {
+    let lowered = error.to_lowercase();
+
+    if lowered.contains("deactivated_workspace") {
+        return (
+            "workspaceDeactivated",
+            "需重新登录",
+            true,
+            "检测到 Codex 登录凭据，但当前 workspace 已失效或已停用。请点击“重新登录”，并确认选择一个可用的账号/工作区。".to_string(),
+        );
+    }
+
+    if lowered.contains("payment required") {
+        return (
+            "paymentRequired",
+            "权限受限",
+            true,
+            "Codex 后端返回了付费/权限限制，当前 workspace 不能正常调用模型。建议重新登录到可用 workspace，或切换其他 provider。".to_string(),
+        );
+    }
+
+    if lowered.contains("401")
+        || lowered.contains("unauthorized")
+        || lowered.contains("auth error")
+    {
+        return (
+            "authError",
+            "需重新登录",
+            true,
+            "Codex 凭据校验失败，当前登录状态已失效。请点击“重新登录”后再刷新状态。".to_string(),
+        );
+    }
+
+    if lowered.contains("timeout") || lowered.contains("timed out") {
+        return (
+            "timeout",
+            "连接超时",
+            false,
+            "Codex 状态检查超时，当前无法确认 workspace 是否可用。你可以稍后再刷新一次。".to_string(),
+        );
+    }
+
+    (
+        "error",
+        "状态异常",
+        false,
+        format!("Codex CLI 可用性检查失败：{error}"),
+    )
+}
+
+async fn inspect_codex_cli_status(app: &AppHandle) -> CodexCliStatus {
+    let basic = inspect_codex_cli_status_basic(app);
+
+    if !basic.installed || !basic.credential_present {
+        return inspect_codex_cli_status_unverified(app);
+    }
+
+    let runtime = match resolve_for_app(app) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let mut status = inspect_codex_cli_status_unverified(app);
+            status.status_kind = "error".to_string();
+            status.status_label = "状态异常".to_string();
+            status.message = error;
+            return status;
+        }
+    };
+
+    let Some(command) = runtime.command.as_ref() else {
+        let mut status = inspect_codex_cli_status_unverified(app);
+        status.status_kind = "error".to_string();
+        status.status_label = "状态异常".to_string();
+        status.message = "未找到可执行的 Codex 命令。".to_string();
+        return status;
+    };
+
+    match provider::probe_codex_cli_runtime(
+        command.to_string_lossy().to_string(),
+        runtime.home_root.to_string_lossy().to_string(),
+    )
+    .await
+    {
+        Ok(()) => CodexCliStatus {
+            installed: true,
+            version: basic.version,
+            logged_in: true,
+            credential_present: true,
+            auth_path: basic.auth_path,
+            runtime_path: basic.runtime_path,
+            source: basic.source,
+            status_kind: "ready".to_string(),
+            status_label: "已可用".to_string(),
+            relogin_recommended: false,
+            message: format!("Codex CLI 当前可用，当前来源：{}。", basic.source),
+        },
+        Err(error) => {
+            let (kind, label, relogin_recommended, message) =
+                normalize_codex_status_probe_error(&error);
+            CodexCliStatus {
+                installed: true,
+                version: basic.version,
+                logged_in: false,
+                credential_present: true,
+                auth_path: basic.auth_path,
+                runtime_path: basic.runtime_path,
+                source: basic.source,
+                status_kind: kind.to_string(),
+                status_label: label.to_string(),
+                relogin_recommended,
+                message,
+            }
+        }
+    }
+}
+
 #[tauri::command]
-fn get_codex_cli_status(app: AppHandle) -> CodexCliStatus {
-    inspect_codex_cli_status(&app)
+async fn get_codex_cli_status(app: AppHandle) -> CodexCliStatus {
+    inspect_codex_cli_status(&app).await
 }
 
 #[tauri::command]
 async fn check_codex_update(app: AppHandle) -> Result<codex_update::CodexUpdateStatus, String> {
-    let status = inspect_codex_cli_status(&app);
+    let status = inspect_codex_cli_status_basic(&app);
     Ok(codex_update::check_update_status(&app, status.version).await)
 }
 
@@ -426,14 +605,14 @@ async fn update_codex(app: AppHandle) -> Result<codex_update::CodexUpdateStatus,
     )?;
 
     // 返回更新后的状态
-    let status = inspect_codex_cli_status(&app);
+    let status = inspect_codex_cli_status_basic(&app);
     Ok(codex_update::check_update_status(&app, status.version).await)
 }
 
 /// 自动检查并更新 Codex（启动时调用）
 async fn auto_update_codex(app: &AppHandle) -> Result<(), String> {
     // 获取当前版本
-    let current_status = inspect_codex_cli_status(app);
+    let current_status = inspect_codex_cli_status_basic(app);
 
     // 检查是否有更新
     let update_status = codex_update::check_update_status(app, current_status.version.clone()).await;
@@ -506,7 +685,7 @@ async fn cancel_control_pending(app: AppHandle, pending_id: String) -> Result<co
 
 #[tauri::command]
 fn start_codex_cli_login(app: AppHandle) -> Result<CodexCliStatus, String> {
-    let status = inspect_codex_cli_status(&app);
+    let status = inspect_codex_cli_status_unverified(&app);
     if !status.installed {
         return Err(status.message);
     }
@@ -540,9 +719,31 @@ fn start_codex_cli_login(app: AppHandle) -> Result<CodexCliStatus, String> {
             .map_err(|error| format!("启动 codex login 失败：{error}"))?;
     }
 
-    let mut next = inspect_codex_cli_status(&app);
+    let mut next = inspect_codex_cli_status_unverified(&app);
     next.message = "已启动 codex login，请在新终端完成登录后点击“刷新状态”。".to_string();
+    next.status_kind = "pendingLogin".to_string();
+    next.status_label = "登录中".to_string();
     Ok(next)
+}
+
+#[tauri::command]
+fn restart_codex_cli_login(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+) -> Result<CodexCliStatus, String> {
+    if let Ok(mut runtime) = state.lock() {
+        runtime.codex_thread_id = None;
+    }
+
+    if let Ok(path) = private_auth_path(&app) {
+        match std::fs::remove_file(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("清理旧 Codex 凭据失败：{error}")),
+        }
+    }
+
+    start_codex_cli_login(app)
 }
 
 #[tauri::command]
@@ -2466,6 +2667,7 @@ pub fn run() {
             confirm_control_pending,
             cancel_control_pending,
             start_codex_cli_login,
+            restart_codex_cli_login,
             send_chat_message,
             request_desktop_action,
             confirm_desktop_action,

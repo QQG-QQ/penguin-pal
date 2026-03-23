@@ -73,6 +73,7 @@ import {
   requestDesktopAction,
   saveProviderConfig,
   sendChatMessage,
+  restartCodexCliLogin,
   startCodexCliLogin,
   startWhisperRecording,
   listControlPending,
@@ -263,9 +264,13 @@ const emptyCodexStatus = (): CodexCliStatus => ({
   installed: false,
   version: null,
   loggedIn: false,
+  credentialPresent: false,
   authPath: null,
   runtimePath: null,
   source: '未找到',
+  statusKind: 'unavailable',
+  statusLabel: '未检测',
+  reloginRecommended: false,
   message: '尚未检测 Codex CLI 登录状态。'
 })
 
@@ -3119,6 +3124,24 @@ const refreshCodexLoginStatus = async (silent = false) => {
   }
 }
 
+const restartCodexLogin = async () => {
+  authBusy.value = true
+  oauthNotice.value = '正在清理旧凭据并启动 codex login...'
+
+  try {
+    const status = await restartCodexCliLogin()
+    codexStatus.value = status
+    oauthNotice.value = status.message
+    announce(status.message, 'idle')
+  } catch (error) {
+    const message = resolveErrorMessage(error, '重新启动 codex login 失败')
+    oauthNotice.value = message
+    announce(message, 'guarded')
+  } finally {
+    authBusy.value = false
+  }
+}
+
 const refreshAppUpdateStatus = async (silent = false) => {
   appUpdateBusy.value = true
   try {
@@ -3606,6 +3629,7 @@ onBeforeUnmount(() => {
       @save="saveSettings"
       @section-change="drawerSection = $event"
       @oauth-start="beginOAuthLogin"
+      @codex-relogin="restartCodexLogin"
       @codex-refresh="refreshCodexLoginStatus()"
       @app-update-check="refreshAppUpdateStatus()"
       @app-update-open="openSoftwareUpdateDownload"

@@ -17,7 +17,7 @@ use std::{
     env,
     fs,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -644,6 +644,24 @@ async fn call_codex_cli(
     }
 
     Ok((result.text, "Codex CLI".to_string()))
+}
+
+pub async fn probe_codex_cli_runtime(
+    codex_command: String,
+    codex_home: String,
+) -> Result<(), String> {
+    let home_root = PathBuf::from(codex_home);
+    async_runtime::spawn_blocking(move || {
+        run_codex_exec_once(
+            &codex_command,
+            &home_root,
+            "只回复 OK，不要附加解释。",
+            None,
+        )
+        .map(|_| ())
+    })
+    .await
+    .map_err(|error| format!("等待 Codex CLI 状态探测失败：{error}"))?
 }
 
 /// 构建 Codex CLI 的对话历史文本
