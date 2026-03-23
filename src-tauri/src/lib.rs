@@ -11,6 +11,7 @@ mod desktop;
 mod history;
 mod memory;
 mod permission;
+mod research;
 mod rule_engine;
 mod security;
 mod session_thread;
@@ -567,6 +568,28 @@ fn hide_settings_window(app: AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn show_research_window(app: AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("research")
+        .ok_or_else(|| "未找到研究窗口".to_string())?;
+
+    let _ = window.unminimize();
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn hide_research_window(app: AppHandle) -> Result<bool, String> {
+    let Some(window) = app.get_webview_window("research") else {
+        return Ok(false);
+    };
+
+    window.hide().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
 fn hide_main_window(app: AppHandle) -> Result<bool, String> {
     let window = app
         .get_webview_window("main")
@@ -697,6 +720,7 @@ fn save_provider_config(
     runtime.launch_at_startup = input.launch_at_startup;
     runtime.auto_update_codex = input.auto_update_codex;
     runtime.auto_check_app_update = input.auto_check_app_update;
+    runtime.research = research::normalize_config(&input.research);
     runtime.provider.voice_reply = input.voice_reply;
     runtime.provider.retain_history = input.retain_history;
     runtime.provider.voice_input_mode = input.voice_input_mode;
@@ -797,6 +821,14 @@ fn save_provider_config(
         return Err(error);
     }
     if let Err(error) = sync_shell_permissions_to_checker(&app, &input.shell_permissions) {
+        let _ = sync_shell_permissions_to_checker(&app, &previous_runtime.shell_permissions);
+        let _ = sync_launch_at_startup(&app, previous_runtime.launch_at_startup);
+        let _ = sync_whisper_input_shortcut(&app, Some(&runtime), &previous_runtime);
+        *runtime = previous_runtime;
+        return Err(error);
+    }
+
+    if let Err(error) = research::sync_research_memory(&app, &runtime.research) {
         let _ = sync_shell_permissions_to_checker(&app, &previous_runtime.shell_permissions);
         let _ = sync_launch_at_startup(&app, previous_runtime.launch_at_startup);
         let _ = sync_whisper_input_shortcut(&app, Some(&runtime), &previous_runtime);
@@ -2203,6 +2235,32 @@ fn clear_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, S
     history::clear_today_reply_history(&app)
 }
 
+#[tauri::command]
+fn get_research_brief_snapshot(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+) -> Result<research::ResearchBriefSnapshot, String> {
+    let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+    research::build_brief(&app, &runtime)
+}
+
+#[tauri::command]
+fn acknowledge_research_brief(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+    day_key: String,
+    alert_fingerprint: Option<String>,
+) -> Result<bool, String> {
+    let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+    research::acknowledge_brief(
+        &app,
+        &mut runtime,
+        &day_key,
+        alert_fingerprint.as_deref().unwrap_or(""),
+    )?;
+    Ok(true)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -2383,6 +2441,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             show_settings_window,
             hide_settings_window,
+            show_research_window,
+            hide_research_window,
             hide_main_window,
             start_main_window_drag,
             remember_main_window_position,
@@ -2413,6 +2473,8 @@ pub fn run() {
             promote_memory_candidate,
             resolve_memory_conflict,
             clear_today_reply_history,
+            get_research_brief_snapshot,
+            acknowledge_research_brief,
             // Shell Agent 权限管理
             get_shell_permissions,
             grant_shell_permission,

@@ -4,6 +4,7 @@ import { cursorPosition, currentMonitor, getCurrentWindow, LogicalSize, Physical
 import FloatingBubble from './components/FloatingBubble.vue'
 import InputBox from './components/InputBox.vue'
 import Penguin from './components/Penguin.vue'
+import ResearchBriefWindow from './components/ResearchBriefWindow.vue'
 import SettingsDrawer from './components/SettingsDrawer.vue'
 import {
   COMMAND_CONFIRMATION_TIMEOUT_MS,
@@ -40,12 +41,14 @@ import {
   getControlServiceStatus,
   getInputHistory,
   getMemoryManagementSnapshot,
+  getResearchBriefSnapshot,
   getTodayReplyHistory,
   getCodexCliStatus,
   getWhisperStatus,
   hideAssistantWindow,
   invokeControlTool,
   isBubbleWindowView,
+  isResearchWindowView,
   listenForAssistantSnapshot,
   listenForBubbleInteractionState,
   listenForBubbleDismissRequest,
@@ -57,6 +60,7 @@ import {
   listenForTodayReplyHistory,
   loadWhisperModel,
   openSettingsWindow,
+  openResearchWindow,
   openAppUpdateDownload,
   publishWhisperStatus,
   publishTodayReplyHistory,
@@ -74,6 +78,8 @@ import {
   listControlPending,
   stopWhisperRecording,
   unloadWhisperModel,
+  acknowledgeResearchBrief,
+  closeResearchWindow,
   promoteMemoryCandidate,
   type SettingsSection
 } from './lib/assistant'
@@ -99,6 +105,7 @@ import type {
   PetMode,
   ProviderConfigInput,
   ProviderKind,
+  ResearchBriefSnapshot,
   ReplyHistoryEntry,
   WhisperModel,
   WhisperPushToTalkEvent,
@@ -125,6 +132,18 @@ const providerLabels: Record<ProviderKind, string> = {
 const DEFAULT_OAUTH_REDIRECT_URL = 'http://127.0.0.1:8976/oauth/callback'
 const DEFAULT_PUSH_TO_TALK_SHORTCUT = 'CommandOrControl+Alt+Space'
 const WHISPER_CAPTURE_WINDOW_MS = 3600
+
+const defaultResearchConfig = () => ({
+  enabled: false,
+  startupPopup: true,
+  bubbleAlerts: true,
+  watchlist: [] as string[],
+  funds: [] as string[],
+  themes: ['地缘政治', '财报', '基金风格'],
+  habitNotes: '',
+  decisionFramework:
+    '先看结论和证据，再看反证、风险、失效条件、跟踪指标，最后才决定是否继续研究。'
+})
 
 const actionCommandMap: Record<string, string[]> = {
   focus_window: ['唤起桌宠', '聚焦桌宠', '显示桌宠'],
@@ -201,6 +220,7 @@ const emptySnapshot = (): AssistantSnapshot => ({
   launchAtStartup: false,
   autoUpdateCodex: true,
   autoCheckAppUpdate: true,
+  research: defaultResearchConfig(),
   workspaceRoot: null,
   visionChannel: {
     enabled: false,
@@ -259,6 +279,20 @@ const emptyAppUpdateStatus = (): AppUpdateStatus => ({
   message: '尚未检查软件更新。'
 })
 
+const emptyResearchBrief = (): ResearchBriefSnapshot => ({
+  generatedAt: Date.now(),
+  dayKey: new Date().toISOString().slice(0, 10),
+  enabled: false,
+  title: '本地投研模式未启用',
+  summary: '开启本地投研模式后，这里会展示每日研究简报、基金风格比较和长期记忆提示。',
+  sections: [],
+  alerts: [],
+  memoryHints: [],
+  alertFingerprint: '',
+  hasUpdates: false,
+  updateSummary: null
+})
+
 const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
   stats: {
     profileCount: 0,
@@ -285,6 +319,10 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   launchAtStartup: state.launchAtStartup,
   autoUpdateCodex: state.autoUpdateCodex,
   autoCheckAppUpdate: state.autoCheckAppUpdate,
+  research: {
+    ...defaultResearchConfig(),
+    ...(state.research ?? {})
+  },
   voiceReply: state.provider.voiceReply,
   retainHistory: state.provider.retainHistory,
   voiceInputMode: state.provider.voiceInputMode,
@@ -343,6 +381,8 @@ const oauthNotice = ref('')
 const codexStatus = ref<CodexCliStatus>(emptyCodexStatus())
 const appUpdateStatus = ref<AppUpdateStatus>(emptyAppUpdateStatus())
 const appUpdateBusy = ref(false)
+const researchBrief = ref<ResearchBriefSnapshot>(emptyResearchBrief())
+const researchBriefBusy = ref(false)
 const memoryDashboard = ref<MemoryManagementSnapshot>(emptyMemoryManagementSnapshot())
 const memoryBusy = ref(false)
 const whisperStatus = ref<WhisperStatus>({
@@ -414,9 +454,15 @@ const dockState = ref<PetDockState>('normal')
 let restorePetFrame: PetWindowFrame | null = null
 let cursorPassthroughEnabled = false
 let cursorPassthroughSuspendUntil = 0
+let researchStartupHandled = false
+let lastResearchAlertSignature = ''
 
 const isSettingsView = computed(() => windowView.value === 'settings')
 const isBubbleView = computed(() => windowView.value === 'bubble' || isBubbleWindowView())
+const isResearchView = computed(() => windowView.value === 'research' || isResearchWindowView())
+const isNonPetWindowView = computed(
+  () => isSettingsView.value || isBubbleView.value || isResearchView.value
+)
 const activeMode = computed<PetMode>(() => visualMode.value ?? snapshot.value.mode)
 const isPetDocked = computed(() => dockState.value !== 'normal')
 const activeProviderLabel = computed(() => providerLabels[snapshot.value.provider.kind])
@@ -492,8 +538,7 @@ const showComposer = computed(
 const canEnterDockedIdle = computed(
   () =>
     isTauriDesktop() &&
-    !isSettingsView.value &&
-    !isBubbleView.value &&
+    !isNonPetWindowView.value &&
     activeMode.value === 'idle' &&
     !busy.value &&
     !listening.value &&
@@ -543,7 +588,7 @@ const shouldAutoListen = computed(
   () =>
     voiceInputAvailable.value &&
     whisperVoiceInputMode.value === 'continuous' &&
-    !isSettingsView.value &&
+    !isNonPetWindowView.value &&
     !busy.value &&
     !textInputFocused.value &&
     !pendingApproval.value &&
@@ -648,6 +693,94 @@ const refreshTodayReplyHistory = async (publish = true) => {
 
 const refreshMemoryDashboard = async () => {
   memoryDashboard.value = await getMemoryManagementSnapshot()
+}
+
+const buildResearchAlertSignature = (brief: ResearchBriefSnapshot) =>
+  brief.alerts.map((alert) => `${alert.severity}:${alert.title}:${alert.summary}`).join('|')
+
+const acknowledgeResearchBriefState = async (brief: ResearchBriefSnapshot) => {
+  if (!brief.enabled) {
+    return false
+  }
+
+  try {
+    return await acknowledgeResearchBrief(brief.dayKey, brief.alertFingerprint)
+  } catch {
+    return false
+  }
+}
+
+const maybeAnnounceResearchAlerts = (brief: ResearchBriefSnapshot) => {
+  if (
+    !snapshot.value.research.enabled ||
+    !snapshot.value.research.bubbleAlerts ||
+    isNonPetWindowView.value ||
+    !brief.alerts.length ||
+    !brief.hasUpdates
+  ) {
+    return
+  }
+
+  if (snapshot.value.research.startupPopup && !researchStartupHandled) {
+    return
+  }
+
+  const signature = brief.alertFingerprint || buildResearchAlertSignature(brief)
+  if (!signature || signature === lastResearchAlertSignature) {
+    return
+  }
+
+  lastResearchAlertSignature = signature
+  const primaryAlert =
+    brief.alerts.find((item) => item.severity === 'urgent') ??
+    brief.alerts.find((item) => item.severity === 'watch') ??
+    brief.alerts[0]
+
+  announce(`投研提醒：${primaryAlert.title}。${primaryAlert.summary}`, 'guarded')
+  void acknowledgeResearchBriefState(brief)
+}
+
+const refreshResearchBrief = async (options: { silent?: boolean } = {}) => {
+  const { silent = false } = options
+  researchBriefBusy.value = true
+
+  try {
+    const brief = await getResearchBriefSnapshot()
+    researchBrief.value = brief
+    maybeAnnounceResearchAlerts(brief)
+    if (!silent && isResearchView.value) {
+      announce(brief.updateSummary || '今日投研简报已刷新。', 'idle')
+    }
+  } catch (error) {
+    if (!silent) {
+      announce(resolveErrorMessage(error, '刷新投研简报失败'), 'guarded')
+    }
+  } finally {
+    researchBriefBusy.value = false
+  }
+}
+
+const maybeOpenResearchWindowOnStartup = async (loaded: AssistantSnapshot) => {
+  if (researchStartupHandled || isNonPetWindowView.value) {
+    return
+  }
+
+  researchStartupHandled = true
+  if (!loaded.research.enabled || !loaded.research.startupPopup || !researchBrief.value.enabled) {
+    return
+  }
+
+  try {
+    if (!researchBrief.value.hasUpdates) {
+      return
+    }
+
+    await openResearchWindow()
+    await acknowledgeResearchBriefState(researchBrief.value)
+    lastResearchAlertSignature = researchBrief.value.alertFingerprint || lastResearchAlertSignature
+  } catch (error) {
+    announce(resolveErrorMessage(error, '打开投研简报窗口失败'), 'guarded')
+  }
 }
 
 const clampDuration = (value: number, min: number, max: number) =>
@@ -2234,9 +2367,16 @@ const loadSnapshot = async () => {
     const loaded = await getAssistantSnapshot()
     applySnapshot(loaded)
     await refreshMemoryDashboard()
-    if (loaded.autoCheckAppUpdate) {
+    if (loaded.research.enabled || isResearchView.value) {
+      await refreshResearchBrief({ silent: true })
+    } else {
+      researchBrief.value = emptyResearchBrief()
+      lastResearchAlertSignature = ''
+    }
+    if (loaded.autoCheckAppUpdate && !isNonPetWindowView.value) {
       void refreshAppUpdateStatus(true)
     }
+    await maybeOpenResearchWindowOnStartup(loaded)
   } catch (error) {
     announce(
       error instanceof Error ? error.message : '加载助手状态失败，已保留本地默认配置。',
@@ -2269,6 +2409,34 @@ const openDrawer = async (section: SettingsSection) => {
 }
 
 const closeDrawer = async () => closeSettingsWindow()
+
+const openResearchBriefWindow = async () => {
+  try {
+    if (snapshot.value.research.enabled || isResearchView.value) {
+      await refreshResearchBrief({ silent: true })
+    }
+    const opened = await openResearchWindow()
+    if (opened && researchBrief.value.enabled) {
+      await acknowledgeResearchBriefState(researchBrief.value)
+      lastResearchAlertSignature = researchBrief.value.alertFingerprint || lastResearchAlertSignature
+    }
+    return opened
+  } catch (error) {
+    announce(resolveErrorMessage(error, '打开投研简报窗口失败'), 'guarded')
+    return false
+  }
+}
+
+const closeResearchBriefWindow = async () => {
+  try {
+    return await closeResearchWindow()
+  } catch (error) {
+    if (!isResearchView.value) {
+      announce(resolveErrorMessage(error, '关闭投研简报窗口失败'), 'guarded')
+    }
+    return false
+  }
+}
 
 const hidePet = async () => {
   try {
@@ -2379,10 +2547,29 @@ const maybeHandleLocalCommand = async (content: string) => {
   }
 
   if (
+    ['打开投研简报', '显示投研简报', '打开研究模式', '显示研究模式', '打开投研窗口'].some((token) =>
+      normalized.includes(normalizeCommand(token))
+    )
+  ) {
+    const opened = await openResearchBriefWindow()
+    announce(
+      opened ? '投研简报窗口已经打开。' : '投研简报窗口打开失败，请检查当前运行环境。',
+      opened ? 'speaking' : 'guarded'
+    )
+    return true
+  }
+
+  if (
     ['关闭动作面板', '收起动作面板'].some((token) => normalized.includes(normalizeCommand(token)))
   ) {
     const closed = await closeDrawer()
     announce(closed ? '动作窗口已经关闭。' : '当前没有打开的动作窗口。', closed ? 'speaking' : 'guarded')
+    return true
+  }
+
+  if (['关闭投研简报', '收起投研简报', '关闭研究窗口'].some((token) => normalized.includes(normalizeCommand(token)))) {
+    const closed = await closeResearchBriefWindow()
+    announce(closed ? '投研简报窗口已经关闭。' : '当前没有打开的投研简报窗口。', closed ? 'speaking' : 'guarded')
     return true
   }
 
@@ -2881,6 +3068,12 @@ const saveSettings = async (draft: ProviderConfigInput) => {
   try {
     const nextSnapshot = await persistSettings(draft)
     await syncSnapshot(nextSnapshot)
+    if (nextSnapshot.research.enabled || isResearchView.value) {
+      await refreshResearchBrief({ silent: true })
+    } else {
+      researchBrief.value = emptyResearchBrief()
+      lastResearchAlertSignature = ''
+    }
     if (nextSnapshot.autoCheckAppUpdate) {
       void refreshAppUpdateStatus(true)
     } else if (!appUpdateBusy.value) {
@@ -3040,7 +3233,7 @@ const handleMemoryResolve = async (
 }
 
 const handleWhisperPushToTalkEvent = async (event: WhisperPushToTalkEvent) => {
-  if (isSettingsView.value || isBubbleView.value) {
+  if (isNonPetWindowView.value) {
     return
   }
 
@@ -3150,7 +3343,7 @@ const handleInputBlur = () => {
 }
 
 const setupPetWindowListeners = async () => {
-  if (!isTauriDesktop() || isSettingsView.value || isBubbleView.value) {
+  if (!isTauriDesktop() || isNonPetWindowView.value) {
     return
   }
 
@@ -3183,6 +3376,9 @@ const setupCrossWindowListeners = async () => {
 
   snapshotListenerCleanup = await listenForAssistantSnapshot((nextSnapshot) => {
     applySnapshot(nextSnapshot)
+    if (nextSnapshot.research.enabled || researchBrief.value.enabled || isResearchView.value) {
+      void refreshResearchBrief({ silent: true })
+    }
   })
 
   bubbleInteractionListenerCleanup = await listenForBubbleInteractionState((active) => {
@@ -3217,7 +3413,7 @@ const setupCrossWindowListeners = async () => {
 }
 
 watch(showComposer, (visible, previousVisible) => {
-  if (isSettingsView.value || isBubbleView.value) {
+  if (isNonPetWindowView.value) {
     return
   }
 
@@ -3236,7 +3432,7 @@ watch(
     hasPendingCommand.value
   ],
   () => {
-    if (isSettingsView.value || isBubbleView.value) {
+    if (isNonPetWindowView.value) {
       return
     }
 
@@ -3289,13 +3485,13 @@ watch(
 )
 
 watch(
-  () => [whisperVoiceInputMode.value, voiceInputAvailable.value, isSettingsView.value],
-  ([mode, available, settingsView]) => {
+  () => [whisperVoiceInputMode.value, voiceInputAvailable.value, isNonPetWindowView.value],
+  ([mode, available, nonPetView]) => {
     if (!useLocalWhisperInput.value) {
       return
     }
 
-    if (settingsView || mode !== 'continuous' || !available) {
+    if (nonPetView || mode !== 'continuous' || !available) {
       clearAutoListenTimer()
       if (mode !== 'continuous' && listening.value) {
         void stopLocalWhisperListening({ shouldSend: false, silent: true, reschedule: false })
@@ -3319,12 +3515,14 @@ onMounted(() => {
   void refreshMemoryDashboard()
   void refreshCodexLoginStatus(true)
   void refreshWhisperStatus()
-  void refreshMicrophoneAvailability(!isSettingsView.value).then(() => {
+  void refreshMicrophoneAvailability(!isNonPetWindowView.value).then(() => {
     scheduleAutoListening(420)
   })
-  setupMediaDeviceWatcher()
+  if (!isNonPetWindowView.value) {
+    setupMediaDeviceWatcher()
+  }
   void setupCrossWindowListeners()
-  if (!isSettingsView.value) {
+  if (!isNonPetWindowView.value) {
     void syncPetWindowFrame().then(() => syncBubbleWindow())
     void setupPetWindowListeners()
     setupPetHitTestLoop()
@@ -3399,6 +3597,7 @@ onBeforeUnmount(() => {
       @codex-refresh="refreshCodexLoginStatus()"
       @app-update-check="refreshAppUpdateStatus()"
       @app-update-open="openSoftwareUpdateDownload"
+      @open-research="openResearchBriefWindow"
       @memory-refresh="handleMemoryRefresh"
       @memory-delete="handleMemoryDelete"
       @memory-promote="handleMemoryPromote"
@@ -3462,6 +3661,15 @@ onBeforeUnmount(() => {
         </section>
       </div>
     </transition>
+  </div>
+
+  <div v-else-if="isResearchView" class="research-window-shell">
+    <ResearchBriefWindow
+      :brief="researchBrief"
+      :loading="researchBriefBusy"
+      @close="closeResearchBriefWindow"
+      @refresh="refreshResearchBrief()"
+    />
   </div>
 
   <div v-else-if="isBubbleView" class="bubble-shell">
@@ -3696,6 +3904,14 @@ body {
   overflow-x: hidden;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+}
+
+.research-window-shell {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(180deg, #f5fbfc, #e7f1f5);
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .bubble-shell {

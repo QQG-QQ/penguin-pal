@@ -25,6 +25,7 @@ import type {
   ProviderConfigInput,
   ProviderKind,
   RecordingState,
+  ResearchBriefSnapshot,
   ReplyHistoryEntry,
   TranscriptionResult,
   VisionChannelConfig,
@@ -44,6 +45,17 @@ const providerModels: Record<ProviderKind, string> = {
 }
 
 const DEFAULT_PUSH_TO_TALK_SHORTCUT = 'CommandOrControl+Alt+Space'
+const defaultResearchConfig = () => ({
+  enabled: false,
+  startupPopup: true,
+  bubbleAlerts: true,
+  watchlist: [] as string[],
+  funds: [] as string[],
+  themes: ['地缘政治', '财报', '基金风格'],
+  habitNotes: '',
+  decisionFramework:
+    '先看结论和证据，再看反证、风险、失效条件、跟踪指标，最后才决定是否继续研究。'
+})
 
 const defaultOAuthState = (): OAuthState => ({
   status: 'signedOut',
@@ -228,6 +240,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
   launchAtStartup: false,
   autoUpdateCodex: true,
   autoCheckAppUpdate: true,
+  research: defaultResearchConfig(),
   workspaceRoot: null,
   visionChannel: defaultVisionChannel(),
   visionChannelStatus: fallbackVisionStatus(defaultVisionChannel()),
@@ -450,13 +463,14 @@ const WHISPER_STATUS_EVENT = 'penguinpal://whisper-status'
 const WHISPER_PUSH_TO_TALK_EVENT = 'penguinpal://whisper-push-to-talk'
 
 let browserSettingsWindow: Window | null = null
+let browserResearchWindow: Window | null = null
 let cachedControlBaseUrl: string | null = null
 
 const normalizeSettingsSection = (value: string | null | undefined): SettingsSection =>
   value === 'actions' ? 'actions' : 'settings'
 
 const normalizeWindowView = (value: string | null | undefined): AssistantWindowView => {
-  if (value === 'settings' || value === 'bubble') {
+  if (value === 'settings' || value === 'bubble' || value === 'research') {
     return value
   }
 
@@ -465,6 +479,8 @@ const normalizeWindowView = (value: string | null | undefined): AssistantWindowV
 
 const settingsWindowUrl = (section: SettingsSection) =>
   `/?view=settings&section=${section}`
+
+const researchWindowUrl = () => '/?view=research'
 
 export const readWindowView = (): AssistantWindowView => {
   if (typeof window === 'undefined') {
@@ -480,6 +496,10 @@ export const isSettingsWindowView = (): boolean => {
 
 export const isBubbleWindowView = (): boolean => {
   return readWindowView() === 'bubble'
+}
+
+export const isResearchWindowView = (): boolean => {
+  return readWindowView() === 'research'
 }
 
 export const readRequestedSettingsSection = (): SettingsSection => {
@@ -690,6 +710,36 @@ export const closeSettingsWindow = async (): Promise<boolean> => {
   return safeInvoke<boolean>('hide_settings_window')
 }
 
+export const openResearchWindow = async (): Promise<boolean> => {
+  const url = researchWindowUrl()
+
+  if (!isTauriRuntime()) {
+    if (typeof window === 'undefined') {
+      return false
+    }
+
+    browserResearchWindow = window.open(url, 'PenguinPalResearch', 'width=760,height=820')
+    browserResearchWindow?.focus()
+    return browserResearchWindow !== null
+  }
+
+  return safeInvoke<boolean>('show_research_window')
+}
+
+export const closeResearchWindow = async (): Promise<boolean> => {
+  if (!isTauriRuntime()) {
+    if (browserResearchWindow && !browserResearchWindow.closed) {
+      browserResearchWindow.close()
+      browserResearchWindow = null
+      return true
+    }
+
+    return false
+  }
+
+  return safeInvoke<boolean>('hide_research_window')
+}
+
 const safeInvoke = async <T>(
   command: string,
   args?: Record<string, unknown>
@@ -820,6 +870,10 @@ const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapsho
     launchAtStartup: Boolean(snapshot.launchAtStartup),
     autoUpdateCodex: snapshot.autoUpdateCodex !== false,
     autoCheckAppUpdate: snapshot.autoCheckAppUpdate !== false,
+    research: {
+      ...defaultResearchConfig(),
+      ...(snapshot.research ?? {})
+    },
     workspaceRoot: snapshot.workspaceRoot?.trim() || null,
     provider: {
       ...provider,
@@ -929,6 +983,10 @@ export const saveProviderConfig = async (
       launchAtStartup: input.launchAtStartup,
       autoUpdateCodex: input.autoUpdateCodex,
       autoCheckAppUpdate: input.autoCheckAppUpdate,
+      research: {
+        ...defaultResearchConfig(),
+        ...(input.research ?? {})
+      },
       provider: {
         ...fallbackSnapshot.provider,
         kind: input.kind,
@@ -1773,5 +1831,45 @@ export const openAppUpdateDownload = async (): Promise<AppUpdateStatus> => {
   } catch (error) {
     rethrowIfDesktopRuntime(error)
     throw new Error('打开软件更新下载页需要桌宠运行时')
+  }
+}
+
+// ============================================================================
+// 投研模式 API
+// ============================================================================
+
+export const getResearchBriefSnapshot = async (): Promise<ResearchBriefSnapshot> => {
+  try {
+    return await safeInvoke<ResearchBriefSnapshot>('get_research_brief_snapshot')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return {
+      generatedAt: Date.now(),
+      dayKey: new Date().toISOString().slice(0, 10),
+      enabled: false,
+      title: '本地投研模式未启用',
+      summary: '当前是浏览器调试模式，投研简报需要桌宠运行时。',
+      sections: [],
+      alerts: [],
+      memoryHints: [],
+      alertFingerprint: '',
+      hasUpdates: false,
+      updateSummary: null
+    }
+  }
+}
+
+export const acknowledgeResearchBrief = async (
+  dayKey: string,
+  alertFingerprint?: string | null
+): Promise<boolean> => {
+  try {
+    return await safeInvoke<boolean>('acknowledge_research_brief', {
+      dayKey,
+      alertFingerprint: alertFingerprint ?? null
+    })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return false
   }
 }

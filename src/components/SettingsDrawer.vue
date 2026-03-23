@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import ControlPanel from './ControlPanel.vue'
 import { presetModelCatalog } from '../lib/modelCatalog'
 import type {
@@ -53,6 +53,7 @@ const emit = defineEmits<{
   codexRefresh: []
   appUpdateCheck: []
   appUpdateOpen: []
+  openResearch: []
   memoryRefresh: []
   memoryDelete: [kind: ManagedMemoryKind, id: string]
   memoryPromote: [id: string]
@@ -99,6 +100,33 @@ const shortcutRecording = ref(false)
 const shortcutPreview = ref('')
 
 const modifierOrder = ['CommandOrControl', 'Alt', 'Shift']
+
+const normalizeResearchList = (value: string) =>
+  value
+    .split(/\r?\n|,|，/)
+    .map((item) => item.trim())
+    .filter((item, index, items) => item.length > 0 && items.indexOf(item) === index)
+
+const researchWatchlistText = computed({
+  get: () => localDraft.value.research.watchlist.join('\n'),
+  set: (value: string) => {
+    localDraft.value.research.watchlist = normalizeResearchList(value)
+  }
+})
+
+const researchFundsText = computed({
+  get: () => localDraft.value.research.funds.join('\n'),
+  set: (value: string) => {
+    localDraft.value.research.funds = normalizeResearchList(value)
+  }
+})
+
+const researchThemesText = computed({
+  get: () => localDraft.value.research.themes.join('\n'),
+  set: (value: string) => {
+    localDraft.value.research.themes = normalizeResearchList(value)
+  }
+})
 
 const modifierTokens = (event: KeyboardEvent) => {
   const tokens: string[] = []
@@ -776,6 +804,98 @@ onBeforeUnmount(() => {
           </p>
           <p v-else>
             留空时会使用当前进程目录，并向上寻找 .git、Cargo.toml、package.json 等标记作为工作区根。
+          </p>
+        </div>
+      </section>
+
+      <section class="oauth-shell full-row">
+        <div class="oauth-header">
+          <div>
+            <strong>本地投研模式</strong>
+            <p>在桌宠里启用本地研究模式、每日简报和研究提醒，并把你的投资习惯写入长期记忆。</p>
+          </div>
+          <span class="oauth-status">{{ localDraft.research.enabled ? '已启用' : '未启用' }}</span>
+        </div>
+
+        <div class="toggle-grid full-row" style="margin-top: 14px;">
+          <label class="toggle">
+            <input v-model="localDraft.research.enabled" type="checkbox" />
+            启用本地投研模式
+          </label>
+
+          <label class="toggle">
+            <input v-model="localDraft.research.startupPopup" type="checkbox" />
+            启动时弹出每日简报
+          </label>
+
+          <label class="toggle">
+            <input v-model="localDraft.research.bubbleAlerts" type="checkbox" />
+            用气泡提醒研究新情况
+          </label>
+        </div>
+
+        <div class="field inline-actions full-row compact-actions">
+          <button type="button" class="ghost-button" @click="emit('openResearch')">
+            立即打开投研简报
+          </button>
+        </div>
+
+        <div v-if="localDraft.research.enabled" class="oauth-grid">
+          <label class="field">
+            <span>股票 / ETF 自选池</span>
+            <textarea
+              v-model="researchWatchlistText"
+              rows="5"
+              placeholder="每行一个代码或名称，例如\nSPY\nQQQ\nNVDA"
+            />
+          </label>
+
+          <label class="field">
+            <span>基金观察池</span>
+            <textarea
+              v-model="researchFundsText"
+              rows="5"
+              placeholder="每行一个基金代码或名称，例如\n易方达蓝筹精选\n广发纳指100ETF"
+            />
+          </label>
+
+          <label class="field">
+            <span>增强分析主题</span>
+            <textarea
+              v-model="researchThemesText"
+              rows="5"
+              placeholder="每行一个主题，例如\n地缘政治\n半导体\n利率"
+            />
+          </label>
+
+          <label class="field full-row">
+            <span>投资习惯备注</span>
+            <textarea
+              v-model="localDraft.research.habitNotes"
+              rows="4"
+              placeholder="例如：偏好低回撤基金；单次研究先看财报和现金流；不追高；更关注政策和汇率。"
+            />
+          </label>
+
+          <label class="field full-row">
+            <span>决策框架</span>
+            <textarea
+              v-model="localDraft.research.decisionFramework"
+              rows="5"
+              placeholder="把你希望桌宠长期遵循的投研/决策框架写在这里。"
+            />
+          </label>
+        </div>
+
+        <div class="oauth-meta full-row">
+          <p v-if="localDraft.research.enabled">
+            启用后，桌宠会生成本地投研简报、在启动时可弹出独立研究窗口，并把你的研究习惯同步到长期记忆。
+          </p>
+          <p v-else>
+            当前未启用本地投研模式。保存后，桌宠不会生成每日研究简报，也不会主动弹出投研窗口。
+          </p>
+          <p>
+            这一版先做本地研究模式、每日简报和长期记忆联动；实时行情和新闻抓取后续再接。
           </p>
         </div>
       </section>

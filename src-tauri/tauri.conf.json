@@ -55,6 +55,24 @@
         "visible": false,
         "alwaysOnTop": false,
         "skipTaskbar": false
+      },
+      {
+        "label": "research",
+        "title": "PenguinPal 投研简报",
+        "url": "/?view=research",
+        "width": 860,
+        "height": 820,
+        "minWidth": 700,
+        "minHeight": 620,
+        "resizable": true,
+        "decorations": true,
+        "closable": false,
+        "transparent": false,
+        "center": true,
+        "focus": false,
+        "visible": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false
       }
     ],
     "trayIcon": {

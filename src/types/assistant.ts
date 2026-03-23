@@ -1,6 +1,6 @@
 export type PetMode = 'idle' | 'listening' | 'thinking' | 'speaking' | 'guarded'
 export type PetDockState = 'normal' | 'dockedLeft' | 'dockedRight' | 'dockedTop'
-export type AssistantWindowView = 'pet' | 'settings' | 'bubble'
+export type AssistantWindowView = 'pet' | 'settings' | 'bubble' | 'research'
 
 export type ProviderKind = 'mock' | 'codexCli' | 'openAi' | 'anthropic' | 'openAiCompatible'
 export type ProviderAuthMode = 'apiKey' | 'oauth'
@@ -129,6 +129,17 @@ export interface ShellPermissionSettings {
   durationHours: number
 }
 
+export interface ResearchConfig {
+  enabled: boolean
+  startupPopup: boolean
+  bubbleAlerts: boolean
+  watchlist: string[]
+  funds: string[]
+  themes: string[]
+  habitNotes: string
+  decisionFramework: string
+}
+
 export interface AssistantSnapshot {
   mode: PetMode
   messages: ChatMessage[]
@@ -136,6 +147,7 @@ export interface AssistantSnapshot {
   launchAtStartup: boolean
   autoUpdateCodex: boolean
   autoCheckAppUpdate: boolean
+  research: ResearchConfig
   workspaceRoot: string | null
   visionChannel: VisionChannelConfig
   visionChannelStatus: VisionProviderStatus
@@ -156,6 +168,7 @@ export interface ProviderConfigInput {
   launchAtStartup: boolean
   autoUpdateCodex: boolean
   autoCheckAppUpdate: boolean
+  research: ResearchConfig
   voiceReply: boolean
   retainHistory: boolean
   voiceInputMode: VoiceInputMode
@@ -453,4 +466,31 @@ export interface AppUpdateStatus {
   downloadUrl: string | null
   assetName: string | null
   message: string
+}
+
+export interface ResearchBriefSection {
+  title: string
+  summary: string
+  bullets: string[]
+}
+
+export interface ResearchBriefAlert {
+  id: string
+  severity: 'info' | 'watch' | 'urgent'
+  title: string
+  summary: string
+}
+
+export interface ResearchBriefSnapshot {
+  generatedAt: number
+  dayKey: string
+  enabled: boolean
+  title: string
+  summary: string
+  sections: ResearchBriefSection[]
+  alerts: ResearchBriefAlert[]
+  memoryHints: string[]
+  alertFingerprint: string
+  hasUpdates: boolean
+  updateSummary?: string | null
 }

@@ -409,6 +409,7 @@ pub struct AssistantSnapshot {
     pub launch_at_startup: bool,
     pub auto_update_codex: bool,
     pub auto_check_app_update: bool,
+    pub research: ResearchConfig,
     pub workspace_root: Option<String>,
     pub vision_channel: VisionChannelConfig,
     pub vision_channel_status: VisionProviderStatus,
@@ -435,6 +436,8 @@ pub struct ProviderConfigInput {
     pub auto_update_codex: bool,
     #[serde(default = "default_auto_check_app_update")]
     pub auto_check_app_update: bool,
+    #[serde(default)]
+    pub research: ResearchConfig,
     pub voice_reply: bool,
     pub retain_history: bool,
     #[serde(default)]
@@ -509,6 +512,53 @@ impl Default for VisionChannelConfigInput {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub startup_popup: bool,
+    #[serde(default = "default_true")]
+    pub bubble_alerts: bool,
+    #[serde(default)]
+    pub watchlist: Vec<String>,
+    #[serde(default)]
+    pub funds: Vec<String>,
+    #[serde(default = "default_research_themes")]
+    pub themes: Vec<String>,
+    #[serde(default)]
+    pub habit_notes: String,
+    #[serde(default = "default_research_decision_framework")]
+    pub decision_framework: String,
+}
+
+impl Default for ResearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            startup_popup: true,
+            bubble_alerts: true,
+            watchlist: Vec::new(),
+            funds: Vec::new(),
+            themes: default_research_themes(),
+            habit_notes: String::new(),
+            decision_framework: default_research_decision_framework(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchRuntimeStatus {
+    #[serde(default)]
+    pub last_daily_brief_day: Option<String>,
+    #[serde(default)]
+    pub last_alert_fingerprint: Option<String>,
+    #[serde(default)]
+    pub last_brief_generated_at: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatResponse {
@@ -568,6 +618,8 @@ pub struct RuntimeState {
     pub launch_at_startup: bool,
     pub auto_update_codex: bool,
     pub auto_check_app_update: bool,
+    pub research: ResearchConfig,
+    pub research_status: ResearchRuntimeStatus,
     pub main_window_position: Option<SavedWindowPosition>,
     pub workspace_root: Option<String>,
     pub vision_channel: VisionChannelConfig,
@@ -652,6 +704,8 @@ impl Default for RuntimeState {
             launch_at_startup: false,
             auto_update_codex: true,
             auto_check_app_update: true,
+            research: ResearchConfig::default(),
+            research_status: ResearchRuntimeStatus::default(),
             main_window_position: None,
             workspace_root: None,
             vision_channel: VisionChannelConfig::default(),
@@ -730,6 +784,7 @@ impl RuntimeState {
             launch_at_startup: self.launch_at_startup,
             auto_update_codex: self.auto_update_codex,
             auto_check_app_update: self.auto_check_app_update,
+            research: self.research.clone(),
             workspace_root: self.workspace_root.clone(),
             vision_channel,
             vision_channel_status: self.vision_channel_status.clone(),
@@ -760,6 +815,10 @@ struct PersistedState {
     #[serde(default = "default_auto_check_app_update")]
     auto_check_app_update: bool,
     #[serde(default)]
+    research: ResearchConfig,
+    #[serde(default)]
+    research_status: ResearchRuntimeStatus,
+    #[serde(default)]
     main_window_position: Option<SavedWindowPosition>,
     #[serde(default)]
     workspace_root: Option<String>,
@@ -778,6 +837,19 @@ fn default_vision_timeout_ms() -> u64 {
 
 fn default_push_to_talk_shortcut() -> String {
     "CommandOrControl+Alt+Space".to_string()
+}
+
+fn default_research_themes() -> Vec<String> {
+    vec![
+        "地缘政治".to_string(),
+        "财报".to_string(),
+        "基金风格".to_string(),
+    ]
+}
+
+fn default_research_decision_framework() -> String {
+    "先看结论和证据，再看反证、风险、失效条件、跟踪指标，最后才决定是否继续研究。"
+        .to_string()
 }
 
 fn default_vision_max_image_bytes() -> u64 {
@@ -872,6 +944,8 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         launch_at_startup: persisted.launch_at_startup,
         auto_update_codex: persisted.auto_update_codex,
         auto_check_app_update: persisted.auto_check_app_update,
+        research: persisted.research,
+        research_status: persisted.research_status,
         main_window_position: persisted.main_window_position,
         workspace_root: persisted.workspace_root,
         vision_channel,
@@ -962,6 +1036,8 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
         launch_at_startup: runtime.launch_at_startup,
         auto_update_codex: runtime.auto_update_codex,
         auto_check_app_update: runtime.auto_check_app_update,
+        research: runtime.research.clone(),
+        research_status: runtime.research_status.clone(),
         main_window_position: runtime.main_window_position.clone(),
         workspace_root: runtime.workspace_root.clone(),
         vision_channel,
