@@ -1,7 +1,7 @@
 use chrono::{Local, TimeZone};
 use serde::Serialize;
 use serde_json::json;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::{
     app_state::{now_millis, save, ResearchConfig, RuntimeState},
