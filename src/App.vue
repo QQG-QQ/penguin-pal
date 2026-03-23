@@ -29,6 +29,7 @@ import {
   cancelControlPending,
   clearConversation,
   clearTodayReplyHistory,
+  checkAppUpdate,
   closeSettingsWindow,
   confirmControlPending,
   confirmDesktopAction,
@@ -56,6 +57,7 @@ import {
   listenForTodayReplyHistory,
   loadWhisperModel,
   openSettingsWindow,
+  openAppUpdateDownload,
   publishWhisperStatus,
   publishTodayReplyHistory,
   publishBubbleWindowState,
@@ -78,6 +80,7 @@ import {
 import type {
   ActionApprovalRequest,
   AgentTaskProgress,
+  AppUpdateStatus,
   AssistantWindowView,
   AiConstraintProfile,
   AssistantSnapshot,
@@ -196,6 +199,8 @@ const emptySnapshot = (): AssistantSnapshot => ({
     }
   },
   launchAtStartup: false,
+  autoUpdateCodex: true,
+  autoCheckAppUpdate: true,
   workspaceRoot: null,
   visionChannel: {
     enabled: false,
@@ -244,6 +249,16 @@ const emptyCodexStatus = (): CodexCliStatus => ({
   message: '尚未检测 Codex CLI 登录状态。'
 })
 
+const emptyAppUpdateStatus = (): AppUpdateStatus => ({
+  currentVersion: null,
+  latestVersion: null,
+  updateAvailable: false,
+  releaseUrl: null,
+  downloadUrl: null,
+  assetName: null,
+  message: '尚未检查软件更新。'
+})
+
 const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
   stats: {
     profileCount: 0,
@@ -268,6 +283,8 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   systemPrompt: state.provider.systemPrompt,
   allowNetwork: state.provider.allowNetwork,
   launchAtStartup: state.launchAtStartup,
+  autoUpdateCodex: state.autoUpdateCodex,
+  autoCheckAppUpdate: state.autoCheckAppUpdate,
   voiceReply: state.provider.voiceReply,
   retainHistory: state.provider.retainHistory,
   voiceInputMode: state.provider.voiceInputMode,
@@ -324,6 +341,8 @@ const savingSettings = ref(false)
 const authBusy = ref(false)
 const oauthNotice = ref('')
 const codexStatus = ref<CodexCliStatus>(emptyCodexStatus())
+const appUpdateStatus = ref<AppUpdateStatus>(emptyAppUpdateStatus())
+const appUpdateBusy = ref(false)
 const memoryDashboard = ref<MemoryManagementSnapshot>(emptyMemoryManagementSnapshot())
 const memoryBusy = ref(false)
 const whisperStatus = ref<WhisperStatus>({
@@ -2215,6 +2234,9 @@ const loadSnapshot = async () => {
     const loaded = await getAssistantSnapshot()
     applySnapshot(loaded)
     await refreshMemoryDashboard()
+    if (loaded.autoCheckAppUpdate) {
+      void refreshAppUpdateStatus(true)
+    }
   } catch (error) {
     announce(
       error instanceof Error ? error.message : '加载助手状态失败，已保留本地默认配置。',
@@ -2859,6 +2881,14 @@ const saveSettings = async (draft: ProviderConfigInput) => {
   try {
     const nextSnapshot = await persistSettings(draft)
     await syncSnapshot(nextSnapshot)
+    if (nextSnapshot.autoCheckAppUpdate) {
+      void refreshAppUpdateStatus(true)
+    } else if (!appUpdateBusy.value) {
+      appUpdateStatus.value = {
+        ...appUpdateStatus.value,
+        message: '已关闭启动时自动检查软件更新。'
+      }
+    }
     announce(`设置已经保存，当前对话引擎：${providerLabels[nextSnapshot.provider.kind]}。`)
   } catch (error) {
     announce(error instanceof Error ? error.message : '保存配置失败', 'guarded')
@@ -2881,6 +2911,46 @@ const refreshCodexLoginStatus = async (silent = false) => {
     if (!silent) {
       announce(message, 'guarded')
     }
+  }
+}
+
+const refreshAppUpdateStatus = async (silent = false) => {
+  appUpdateBusy.value = true
+  try {
+    const status = await checkAppUpdate()
+    appUpdateStatus.value = status
+    if (!silent) {
+      announce(status.message, status.updateAvailable ? 'speaking' : 'idle')
+    }
+  } catch (error) {
+    const message = resolveErrorMessage(error, '检查软件更新失败')
+    appUpdateStatus.value = {
+      ...appUpdateStatus.value,
+      message
+    }
+    if (!silent) {
+      announce(message, 'guarded')
+    }
+  } finally {
+    appUpdateBusy.value = false
+  }
+}
+
+const openSoftwareUpdateDownload = async () => {
+  appUpdateBusy.value = true
+  try {
+    const status = await openAppUpdateDownload()
+    appUpdateStatus.value = status
+    announce(
+      status.updateAvailable
+        ? '已为你打开软件更新下载页。'
+        : status.message,
+      status.updateAvailable ? 'speaking' : 'idle'
+    )
+  } catch (error) {
+    announce(resolveErrorMessage(error, '打开软件更新下载页失败'), 'guarded')
+  } finally {
+    appUpdateBusy.value = false
   }
 }
 
@@ -3309,6 +3379,8 @@ onBeforeUnmount(() => {
       :oauth-busy="authBusy"
       :oauth-notice="oauthNotice"
       :codex-status="codexStatus"
+      :app-update-status="appUpdateStatus"
+      :app-update-busy="appUpdateBusy"
       :current-provider-label="activeProviderLabel"
       :vision-channel-status="snapshot.visionChannelStatus"
       :actions="snapshot.allowedActions"
@@ -3325,6 +3397,8 @@ onBeforeUnmount(() => {
       @section-change="drawerSection = $event"
       @oauth-start="beginOAuthLogin"
       @codex-refresh="refreshCodexLoginStatus()"
+      @app-update-check="refreshAppUpdateStatus()"
+      @app-update-open="openSoftwareUpdateDownload"
       @memory-refresh="handleMemoryRefresh"
       @memory-delete="handleMemoryDelete"
       @memory-promote="handleMemoryPromote"

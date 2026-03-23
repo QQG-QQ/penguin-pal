@@ -144,6 +144,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_auto_update_codex() -> bool {
+    true
+}
+
+fn default_auto_check_app_update() -> bool {
+    true
+}
+
 fn migrate_system_prompt(prompt: &str) -> String {
     let trimmed = prompt.trim();
     let legacy_defaults = [
@@ -399,6 +407,8 @@ pub struct AssistantSnapshot {
     pub messages: Vec<ChatMessage>,
     pub provider: ProviderConfig,
     pub launch_at_startup: bool,
+    pub auto_update_codex: bool,
+    pub auto_check_app_update: bool,
     pub workspace_root: Option<String>,
     pub vision_channel: VisionChannelConfig,
     pub vision_channel_status: VisionProviderStatus,
@@ -421,6 +431,10 @@ pub struct ProviderConfigInput {
     pub allow_network: bool,
     #[serde(default)]
     pub launch_at_startup: bool,
+    #[serde(default = "default_auto_update_codex")]
+    pub auto_update_codex: bool,
+    #[serde(default = "default_auto_check_app_update")]
+    pub auto_check_app_update: bool,
     pub voice_reply: bool,
     pub retain_history: bool,
     #[serde(default)]
@@ -552,6 +566,8 @@ pub struct RuntimeState {
     pub codex_thread_id: Option<String>,
     pub provider: ProviderConfig,
     pub launch_at_startup: bool,
+    pub auto_update_codex: bool,
+    pub auto_check_app_update: bool,
     pub main_window_position: Option<SavedWindowPosition>,
     pub workspace_root: Option<String>,
     pub vision_channel: VisionChannelConfig,
@@ -634,6 +650,8 @@ impl Default for RuntimeState {
             codex_thread_id: None,
             provider: ProviderConfig::default(),
             launch_at_startup: false,
+            auto_update_codex: true,
+            auto_check_app_update: true,
             main_window_position: None,
             workspace_root: None,
             vision_channel: VisionChannelConfig::default(),
@@ -710,6 +728,8 @@ impl RuntimeState {
             messages: self.messages.clone(),
             provider,
             launch_at_startup: self.launch_at_startup,
+            auto_update_codex: self.auto_update_codex,
+            auto_check_app_update: self.auto_check_app_update,
             workspace_root: self.workspace_root.clone(),
             vision_channel,
             vision_channel_status: self.vision_channel_status.clone(),
@@ -735,6 +755,10 @@ struct PersistedState {
     provider: ProviderConfig,
     #[serde(default)]
     launch_at_startup: bool,
+    #[serde(default = "default_auto_update_codex")]
+    auto_update_codex: bool,
+    #[serde(default = "default_auto_check_app_update")]
+    auto_check_app_update: bool,
     #[serde(default)]
     main_window_position: Option<SavedWindowPosition>,
     #[serde(default)]
@@ -846,6 +870,8 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         codex_thread_id: persisted.codex_thread_id,
         provider: persisted.provider,
         launch_at_startup: persisted.launch_at_startup,
+        auto_update_codex: persisted.auto_update_codex,
+        auto_check_app_update: persisted.auto_check_app_update,
         main_window_position: persisted.main_window_position,
         workspace_root: persisted.workspace_root,
         vision_channel,
@@ -934,6 +960,8 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
         },
         provider,
         launch_at_startup: runtime.launch_at_startup,
+        auto_update_codex: runtime.auto_update_codex,
+        auto_check_app_update: runtime.auto_check_app_update,
         main_window_position: runtime.main_window_position.clone(),
         workspace_root: runtime.workspace_root.clone(),
         vision_channel,

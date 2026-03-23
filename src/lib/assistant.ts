@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { emit, emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   ActionApprovalRequest,
+  AppUpdateStatus,
   AssistantWindowView,
   AiConstraintProfile,
   ActionExecutionResult,
@@ -225,6 +226,8 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     oauth: defaultOAuthState()
   },
   launchAtStartup: false,
+  autoUpdateCodex: true,
+  autoCheckAppUpdate: true,
   workspaceRoot: null,
   visionChannel: defaultVisionChannel(),
   visionChannelStatus: fallbackVisionStatus(defaultVisionChannel()),
@@ -815,6 +818,8 @@ const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapsho
   return {
     ...snapshot,
     launchAtStartup: Boolean(snapshot.launchAtStartup),
+    autoUpdateCodex: snapshot.autoUpdateCodex !== false,
+    autoCheckAppUpdate: snapshot.autoCheckAppUpdate !== false,
     workspaceRoot: snapshot.workspaceRoot?.trim() || null,
     provider: {
       ...provider,
@@ -922,6 +927,8 @@ export const saveProviderConfig = async (
     fallbackSnapshot = {
       ...fallbackSnapshot,
       launchAtStartup: input.launchAtStartup,
+      autoUpdateCodex: input.autoUpdateCodex,
+      autoCheckAppUpdate: input.autoCheckAppUpdate,
       provider: {
         ...fallbackSnapshot.provider,
         kind: input.kind,
@@ -1736,5 +1743,35 @@ export const updateCodex = async (): Promise<CodexUpdateStatus> => {
   } catch (error) {
     rethrowIfDesktopRuntime(error)
     throw new Error('Codex 更新需要桌宠运行时')
+  }
+}
+
+// ============================================================================
+// 软件更新 API
+// ============================================================================
+
+export const checkAppUpdate = async (): Promise<AppUpdateStatus> => {
+  try {
+    return await safeInvoke<AppUpdateStatus>('check_app_update')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return {
+      currentVersion: null,
+      latestVersion: null,
+      updateAvailable: false,
+      releaseUrl: null,
+      downloadUrl: null,
+      assetName: null,
+      message: '浏览器调试模式无法检查软件更新'
+    }
+  }
+}
+
+export const openAppUpdateDownload = async (): Promise<AppUpdateStatus> => {
+  try {
+    return await safeInvoke<AppUpdateStatus>('open_app_update_download')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('打开软件更新下载页需要桌宠运行时')
   }
 }

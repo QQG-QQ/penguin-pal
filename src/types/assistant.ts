@@ -134,6 +134,8 @@ export interface AssistantSnapshot {
   messages: ChatMessage[]
   provider: ProviderConfig
   launchAtStartup: boolean
+  autoUpdateCodex: boolean
+  autoCheckAppUpdate: boolean
   workspaceRoot: string | null
   visionChannel: VisionChannelConfig
   visionChannelStatus: VisionProviderStatus
@@ -152,6 +154,8 @@ export interface ProviderConfigInput {
   systemPrompt: string
   allowNetwork: boolean
   launchAtStartup: boolean
+  autoUpdateCodex: boolean
+  autoCheckAppUpdate: boolean
   voiceReply: boolean
   retainHistory: boolean
   voiceInputMode: VoiceInputMode
@@ -438,5 +442,15 @@ export interface CodexUpdateStatus {
   latestVersion: string | null
   updateAvailable: boolean
   installPath: string | null
+  message: string
+}
+
+export interface AppUpdateStatus {
+  currentVersion: string | null
+  latestVersion: string | null
+  updateAvailable: boolean
+  releaseUrl: string | null
+  downloadUrl: string | null
+  assetName: string | null
   message: string
 }

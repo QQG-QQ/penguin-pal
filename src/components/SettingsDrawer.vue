@@ -3,6 +3,7 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import ControlPanel from './ControlPanel.vue'
 import { presetModelCatalog } from '../lib/modelCatalog'
 import type {
+  AppUpdateStatus,
   AiConstraintProfile,
   CodexCliStatus,
   DesktopAction,
@@ -29,6 +30,8 @@ const props = defineProps<{
   oauthBusy: boolean
   oauthNotice: string
   codexStatus: CodexCliStatus
+  appUpdateStatus: AppUpdateStatus
+  appUpdateBusy: boolean
   currentProviderLabel: string
   visionChannelStatus: VisionProviderStatus
   actions: DesktopAction[]
@@ -48,6 +51,8 @@ const emit = defineEmits<{
   sectionChange: [section: 'settings' | 'actions']
   oauthStart: [input: ProviderConfigInput]
   codexRefresh: []
+  appUpdateCheck: []
+  appUpdateOpen: []
   memoryRefresh: []
   memoryDelete: [kind: ManagedMemoryKind, id: string]
   memoryPromote: [id: string]
@@ -999,6 +1004,16 @@ onBeforeUnmount(() => {
         </label>
 
         <label class="toggle">
+          <input v-model="localDraft.autoUpdateCodex" type="checkbox" />
+          启动时自动更新 Codex
+        </label>
+
+        <label class="toggle">
+          <input v-model="localDraft.autoCheckAppUpdate" type="checkbox" />
+          启动时自动检查软件更新
+        </label>
+
+        <label class="toggle">
           <input v-model="localDraft.voiceReply" type="checkbox" />
           启用语音回复
         </label>
@@ -1020,9 +1035,47 @@ onBeforeUnmount(() => {
         </p>
         <p>按键说话使用 Tauri 全局快捷键格式，例如：{{ DEFAULT_PUSH_TO_TALK_SHORTCUT }}。</p>
         <p>桌宠会自动记住你上次拖动后的主窗口位置，下次启动时优先在该位置打开。</p>
+        <p>关闭“启动时自动更新 Codex”后，桌宠启动时不会自动拉取新版本，但手动更新按钮仍然可用。</p>
+        <p>软件更新会检查 GitHub Releases。关闭“启动时自动检查软件更新”后，只会在你手动点按钮时检查。</p>
         <p>隐藏到托盘只能通过主桌宠窗口中的输入或语音命令触发。</p>
         <p>高风险桌面动作仍然必须经过一次性人工确认，不会开放自由命令执行。</p>
       </div>
+
+      <section class="oauth-shell full-row">
+        <div class="oauth-header">
+          <div>
+            <strong>软件更新</strong>
+            <p>检查 PenguinPal Assistant 本体是否有新版本，并打开推荐安装包下载页。</p>
+          </div>
+          <span class="oauth-status">{{ props.appUpdateStatus.updateAvailable ? '有新版本' : '已检查' }}</span>
+        </div>
+
+        <div class="oauth-actions">
+          <button
+            type="button"
+            class="ghost-button"
+            :disabled="props.appUpdateBusy"
+            @click="emit('appUpdateCheck')"
+          >
+            {{ props.appUpdateBusy ? '检查中...' : '检查软件更新' }}
+          </button>
+          <button
+            type="button"
+            class="ghost-button"
+            :disabled="props.appUpdateBusy || (!props.appUpdateStatus.downloadUrl && !props.appUpdateStatus.releaseUrl)"
+            @click="emit('appUpdateOpen')"
+          >
+            打开下载页
+          </button>
+        </div>
+
+        <div class="oauth-meta full-row">
+          <p>当前版本：{{ props.appUpdateStatus.currentVersion || '未知' }}</p>
+          <p v-if="props.appUpdateStatus.latestVersion">最新版本：{{ props.appUpdateStatus.latestVersion }}</p>
+          <p v-if="props.appUpdateStatus.assetName">推荐安装包：{{ props.appUpdateStatus.assetName }}</p>
+          <p>{{ props.appUpdateStatus.message }}</p>
+        </div>
+      </section>
 
       <section class="constraint-shell full-row">
         <div class="constraint-header">
