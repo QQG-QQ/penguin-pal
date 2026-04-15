@@ -39,12 +39,14 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
 {{\n\
   \"intent\":\"desktop_action\",\n\
   \"goal\":\"...\",\n\
-  \"next\":{{\n\
+    \"next\":{{\n\
     \"action\":\"respond|confirm|tool|observe|retry|finish|fail\",\n\
     \"kind\":\"(兼容旧协议，可省略)\",\n\
     \"message\":\"...\",\n\
     \"tool\":\"...\",\n\
     \"stepSummary\":\"...\",\n\
+    \"evidenceLevel\":\"high|medium|low\",\n\
+    \"evidenceNote\":\"...\",\n\
     \"args\":{{...}},\n\
     \"target\":\"observe_context|last_tool\",\n\
     \"finalSummary\":{{\n\
@@ -52,7 +54,7 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
       \"stepsTaken\":0,\n\
       \"finalStatus\":\"completed|failed|cancelled\",\n\
       \"failureStage\":\"planning|observation|execute_tool|assertion|confirmation|retry|finish\",\n\
-      \"failureReasonCode\":\"none|planner_failed|context_unavailable|tool_failed|assertion_failed|confirmation_required|confirmation_rejected|retry_exhausted|step_budget_exceeded|policy_blocked|invalid_action|file_missing\",\n\
+      \"failureReasonCode\":\"none|planner_failed|context_unavailable|insufficient_evidence|tool_failed|assertion_failed|confirmation_required|confirmation_rejected|retry_exhausted|step_budget_exceeded|policy_blocked|invalid_action|file_missing\",\n\
       \"usedProbe\":false,\n\
       \"usedRetry\":false\n\
     }}\n\
@@ -94,7 +96,9 @@ pub fn build_next_action_prompt(tools: &[ControlToolDefinition]) -> String {
 15. 不确定时宁可 fail_task，也不要瞎猜；不要尝试隐私外发。\n\
 16. 优先输出通用动作协议：action=respond|confirm|tool|observe|retry|finish|fail；kind 只是兼容字段，不必再主动使用。\n\
 17. observe_context 用于主动刷新上下文：action=\"observe\", stepSummary=\"检查当前窗口状态\"。\n\
-18. retry_step 用于重试：action=\"retry\", target=\"observe_context\"|\"last_tool\", stepSummary=\"重试上一步操作\"。",
+18. retry_step 用于重试：action=\"retry\", target=\"observe_context\"|\"last_tool\", stepSummary=\"重试上一步操作\"。\n\
+19. 先判断证据等级：high/medium/low。低证据（如 hard_conflict、没有活动窗口、没有可用实体）时，不得直接执行高影响工具。\n\
+20. 当 evidenceLevel=low 时，优先 observe_context；若 stepBudget 已不足或连续观察后仍无证据，再 fail_task 且 failureReasonCode=insufficient_evidence。",
         cap = 50,
         schema = VISION_SCHEMA_VERSION,
         tool_lines = tool_lines,

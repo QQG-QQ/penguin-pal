@@ -75,6 +75,7 @@ pub enum FailureReasonCode {
     None,
     PlannerFailed,
     ContextUnavailable,
+    InsufficientEvidence,
     ToolFailed,
     AssertionFailed,
     ConfirmationRequired,

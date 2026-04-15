@@ -43,7 +43,7 @@ pub fn build_workspace_next_action_prompt(
       \"stepsTaken\":0,\n\
       \"finalStatus\":\"completed|failed|cancelled\",\n\
       \"failureStage\":\"planning|execute_tool|retry|finish\",\n\
-      \"failureReasonCode\":\"none|planner_failed|tool_failed|confirmation_required|confirmation_rejected|retry_exhausted|step_budget_exceeded|policy_blocked|invalid_action|file_missing\",\n\
+      \"failureReasonCode\":\"none|planner_failed|insufficient_evidence|tool_failed|confirmation_required|confirmation_rejected|retry_exhausted|step_budget_exceeded|policy_blocked|invalid_action|file_missing\",\n\
       \"usedProbe\":false,\n\
       \"usedRetry\":false\n\
     }}\n\
@@ -67,6 +67,8 @@ pub fn build_workspace_next_action_prompt(
 14. 如果请求是“审查代码 / 分析项目 / 看架构 / 说明风险”，第一轮不要随机抽样文件。应优先读取：用户明确点名的文件；否则读取主入口、顶层路由、核心执行器或主构建配置。\n\
 15. 在没有证据前，不要把 legacy / deprecated / fallback 文件当成当前主链。只有当主入口、路由或实际调用链引用到它们时，才把它们作为当前实现的一部分讨论。\n\
 16. 做代码审查时，优先按“入口 -> 路由 -> 执行器 -> 辅助模块”的顺序展开；先确认哪条链在当前主路径生效，再讨论边缘文件。\n\
-17. 如果你只读取了少量文件，结论必须显式标注为“局部初判”；只有在主入口和相关调用链都看过后，才能给出整体架构判断。"
+17. 如果你只读取了少量文件，结论必须显式标注为“局部初判”；只有在主入口和相关调用链都看过后，才能给出整体架构判断。\n\
+18. 在没有最小证据前，不要直接执行写入/移动/删除文件。最小证据至少包含一次成功的 list/read/shell 探查；否则先补证据。\n\
+19. 若多次补证据后仍不足，再 fail_task 并使用 failureReasonCode=insufficient_evidence。"
     )
 }
