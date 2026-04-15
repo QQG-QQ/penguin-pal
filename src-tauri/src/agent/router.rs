@@ -310,6 +310,20 @@ fn load_recent_conversation_context(app: &AppHandle) -> Option<String> {
     render_recent_conversation_context(&runtime.messages[start..])
 }
 
+fn join_prompt_sections(sections: &[Option<&str>]) -> Option<String> {
+    let parts = sections
+        .iter()
+        .filter_map(|section| section.map(str::trim))
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
 /// 构建任务的 memory context (用于 prompt 注入)
 fn build_memory_context_for_task(
     app: &AppHandle,
@@ -339,7 +353,15 @@ fn build_memory_context_for_task(
         None,
     );
 
-    memory_service.render_for_prompt(&query).ok()
+    let structured_memory = memory_service.render_for_prompt(&query).ok();
+    let archive_recall = crate::history::render_archive_recall_for_prompt(app, user_input, 3)
+        .ok()
+        .flatten();
+
+    join_prompt_sections(&[
+        structured_memory.as_deref(),
+        archive_recall.as_deref(),
+    ])
 }
 
 /// 任务完成/失败后写回记忆
@@ -1852,6 +1874,28 @@ fn handle_domain_tool_step(
     message: Option<String>,
 ) -> Result<DomainLoopControl, String> {
     let action_args = apply_domain_tool_defaults(spec, &tool, args, static_context);
+    if let Some(reason) = preflight_insufficient_evidence_reason(spec, task, &tool) {
+        if matches!(spec.observation_policy, DomainObservationPolicy::RuntimeContextSnapshot)
+            && task.step_budget > 0
+            && !task.used_probe
+        {
+            let summary = format!("执行 {tool} 前证据不足，先刷新上下文。");
+            task.completed_notes.push(format!("{reason} 已自动补一次 observe_context。"));
+            return execute_domain_observation(spec, task, summary);
+        }
+
+        task.task_status = AgentLoopTaskStatus::Failed;
+        task.failure_reason = Some(reason.clone());
+        task.failure_reason_code = FailureReasonCode::InsufficientEvidence;
+        task.failure_stage = Some(FailureStage::Planning);
+        return Ok(DomainLoopControl::Return(fail_result(
+            spec.route,
+            spec.provider_label,
+            task,
+            reason,
+        )));
+    }
+
     match execute_tool_step(app, task, &tool, action_args.clone(), summary)? {
         LoopToolExecution::Success => {
             task.step_budget = task.step_budget.saturating_sub(1);
@@ -1891,6 +1935,105 @@ fn handle_domain_tool_step(
                 Ok(DomainLoopControl::Continue)
             }
         }
+    }
+}
+
+fn preflight_insufficient_evidence_reason(
+    spec: DomainLoopSpec,
+    task: &AgentTaskRun,
+    tool: &str,
+) -> Option<String> {
+    match spec.domain {
+        AgentExecutionDomain::Desktop | AgentExecutionDomain::Test => {
+            desktop_insufficient_evidence_reason(task, tool)
+        }
+        AgentExecutionDomain::Workspace => workspace_insufficient_evidence_reason(task, tool),
+        AgentExecutionDomain::Memory => None,
+    }
+}
+
+fn desktop_insufficient_evidence_reason(task: &AgentTaskRun, tool: &str) -> Option<String> {
+    const ELEMENT_SENSITIVE_TOOLS: &[&str] = &[
+        "click_element",
+        "get_element_text",
+        "set_element_value",
+        "wait_for_element",
+    ];
+    const WINDOW_SENSITIVE_TOOLS: &[&str] = &["focus_window"];
+    const CONTEXT_SENSITIVE_TOOLS: &[&str] =
+        &["type_text", "send_hotkey", "click_at", "scroll_at"];
+
+    let context = task.runtime_context.as_ref()?;
+    let active_window_known = context
+        .active_window
+        .as_ref()
+        .and_then(|value| value.get("title"))
+        .and_then(Value::as_str)
+        .map(|title| !title.trim().is_empty() && title != "unknown")
+        .unwrap_or(false);
+    let consistency = context.consistency.as_deref().unwrap_or("unknown");
+    let entity_count = context.discovered_entities.len();
+    let strong_entity_count = context
+        .discovered_entities
+        .iter()
+        .filter(|entity| entity.confidence >= 0.7)
+        .count();
+    let has_window_inventory = !context.window_inventory.is_empty();
+
+    if ELEMENT_SENSITIVE_TOOLS.contains(&tool) && strong_entity_count == 0 {
+        return Some(format!(
+            "工具 {tool} 需要可用 UI 实体，但当前没有高置信度实体。"
+        ));
+    }
+
+    if WINDOW_SENSITIVE_TOOLS.contains(&tool) && !has_window_inventory {
+        return Some(format!(
+            "工具 {tool} 需要窗口清单证据，但当前窗口库存为空。"
+        ));
+    }
+
+    if CONTEXT_SENSITIVE_TOOLS.contains(&tool) && consistency == "hard_conflict" {
+        return Some(format!(
+            "工具 {tool} 需要稳定上下文，但当前 screen consistency=hard_conflict。"
+        ));
+    }
+
+    if CONTEXT_SENSITIVE_TOOLS.contains(&tool)
+        && !active_window_known
+        && entity_count == 0
+        && consistency != "consistent"
+    {
+        return Some(format!(
+            "工具 {tool} 缺少活动窗口与实体证据，当前不宜直接执行。"
+        ));
+    }
+
+    None
+}
+
+fn workspace_insufficient_evidence_reason(task: &AgentTaskRun, tool: &str) -> Option<String> {
+    const MUTATING_TOOLS: &[&str] = &["write_file_text", "move_path", "delete_path"];
+    const EVIDENCE_TOOLS: &[&str] = &["list_directory", "read_file_text", "run_shell_command"];
+
+    if !MUTATING_TOOLS.contains(&tool) {
+        return None;
+    }
+
+    let has_workspace_evidence = task.recent_steps.iter().rev().any(|step| {
+        step.outcome == "success"
+            && step
+                .tool
+                .as_deref()
+                .map(|name| EVIDENCE_TOOLS.contains(&name))
+                .unwrap_or(false)
+    });
+
+    if has_workspace_evidence {
+        None
+    } else {
+        Some(format!(
+            "工具 {tool} 在没有最小仓库证据（list/read/shell 探查）前被阻止执行。"
+        ))
     }
 }
 
@@ -2186,6 +2329,7 @@ fn can_auto_complete_loop_task(task: &AgentTaskRun) -> bool {
         task.failure_reason_code,
         FailureReasonCode::PlannerFailed
             | FailureReasonCode::ContextUnavailable
+            | FailureReasonCode::InsufficientEvidence
             | FailureReasonCode::ToolFailed
             | FailureReasonCode::AssertionFailed
             | FailureReasonCode::ConfirmationRejected

@@ -13,10 +13,6 @@ use std::thread;
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const MAX_CAPTURE_SECONDS: usize = 30;
 
-pub fn input_mode() -> &'static str {
-    "whisper-local"
-}
-
 pub fn stage() -> AudioStage {
     AudioStage {
         id: "recorder".to_string(),
@@ -41,7 +37,6 @@ struct SelectedInputConfig {
 
 pub struct AudioRecorder {
     command_tx: mpsc::Sender<AudioCommand>,
-    samples: Arc<Mutex<Vec<f32>>>,
     #[allow(dead_code)]
     is_recording: Arc<Mutex<bool>>,
     input_ready: Arc<Mutex<bool>>,
@@ -74,7 +69,6 @@ impl AudioRecorder {
 
         Ok(Self {
             command_tx: cmd_tx,
-            samples,
             is_recording,
             input_ready,
             last_error,
@@ -345,7 +339,6 @@ impl AudioRecorder {
                     while let Some(sample) = consumer.try_pop() {
                         collected.push(sample);
                     }
-                    *samples.lock() = collected.clone();
                     Self::set_input_status(&input_ready, &last_error, true, None);
                     let _ = reply_tx.send(Ok(collected));
                 }

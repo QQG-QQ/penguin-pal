@@ -175,6 +175,20 @@ impl ShellAgentExecutor {
         self.rule_engine.apply_rules(&context)
     }
 
+    fn join_prompt_sections(sections: &[Option<&str>]) -> Option<String> {
+        let parts = sections
+            .iter()
+            .filter_map(|section| section.map(str::trim))
+            .filter(|section| !section.is_empty())
+            .collect::<Vec<_>>();
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+
     /// 检索相关记忆上下文
     fn retrieve_memory_context(&self, app: &AppHandle, user_task: &str) -> Option<String> {
         let app_data_dir = match app.path().app_data_dir() {
@@ -190,10 +204,18 @@ impl ShellAgentExecutor {
             ..Default::default()
         };
 
-        match memory_service.render_for_prompt(&query) {
+        let structured_memory = match memory_service.render_for_prompt(&query) {
             Ok(context) if !context.is_empty() => Some(context),
             _ => None,
-        }
+        };
+        let archive_recall = crate::history::render_archive_recall_for_prompt(app, user_task, 2)
+            .ok()
+            .flatten();
+
+        Self::join_prompt_sections(&[
+            structured_memory.as_deref(),
+            archive_recall.as_deref(),
+        ])
     }
 
     /// 写回任务结果到记忆系统

@@ -489,8 +489,12 @@ mod tests {
         let meta = store.load_meta().unwrap();
         assert_eq!(semantic.entries.len(), 1);
         assert!(semantic.entries[0].knowledge.contains("喜欢简洁一点的回复"));
-        assert_eq!(meta.preferences.len(), 1);
-        assert_eq!(meta.preferences[0].category, "retention");
+        assert_eq!(meta.preferences.len(), 2);
+        assert!(meta.preferences.iter().any(|item| item.category == "retention"));
+        assert!(meta
+            .preferences
+            .iter()
+            .any(|item| item.category == "reply" && item.preference == "reply_style"));
     }
 
     #[test]

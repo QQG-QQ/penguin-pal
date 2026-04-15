@@ -57,6 +57,8 @@ pub async fn plan_next_action(
 - retryBudget: {}\n\
 - recentSteps: {}\n\
 - lastToolResult: {}\n\n\
+证据快照（用于判断是否先 observe_context）：\n\
+{}\n\n\
 当前 runtime context：\n{}{}\n",
         user_input.trim(),
         conversation_section,
@@ -70,6 +72,7 @@ pub async fn plan_next_action(
             .as_ref()
             .map(|value| value.to_string())
             .unwrap_or_else(|| "null".to_string()),
+        render_evidence_snapshot(context),
         render_runtime_context_for_prompt(context),
         memory_section,
     );
@@ -528,6 +531,7 @@ fn normalize_failure_reason_code_value(value: Option<&Value>, message: &str, kin
                 "none"
                     | "planner_failed"
                     | "context_unavailable"
+                    | "insufficient_evidence"
                     | "tool_failed"
                     | "assertion_failed"
                     | "confirmation_required"
@@ -550,7 +554,14 @@ fn normalize_bool_value(value: Option<&Value>) -> Value {
 
 fn map_failure_reason_code(message: &str) -> &'static str {
     let lowered = message.to_lowercase();
-    if lowered.contains("context") || lowered.contains("上下文") {
+    if lowered.contains("insufficient")
+        || lowered.contains("evidence")
+        || lowered.contains("confidence")
+        || lowered.contains("证据")
+        || lowered.contains("不确定")
+    {
+        "insufficient_evidence"
+    } else if lowered.contains("context") || lowered.contains("上下文") {
         "context_unavailable"
     } else if lowered.contains("policy") || lowered.contains("权限") || lowered.contains("blocked")
     {
@@ -560,6 +571,37 @@ fn map_failure_reason_code(message: &str) -> &'static str {
     } else {
         "invalid_action"
     }
+}
+
+fn render_evidence_snapshot(context: &RuntimeContext) -> String {
+    let active_window_known = context
+        .active_window
+        .as_ref()
+        .and_then(|value| value.get("title"))
+        .and_then(Value::as_str)
+        .map(|title| !title.trim().is_empty() && title != "unknown")
+        .unwrap_or(false);
+    let discovered_entity_count = context.discovered_entities.len();
+    let strong_entity_count = context
+        .discovered_entities
+        .iter()
+        .filter(|entity| entity.confidence >= 0.7)
+        .count();
+    let has_recent_observation = context
+        .recent_observations
+        .iter()
+        .rev()
+        .take(3)
+        .any(|item| matches!(item.source.as_str(), "screen_context" | "observe_context" | "retry_step"));
+    let consistency = context.consistency.as_deref().unwrap_or("unknown");
+
+    format!(
+        "- activeWindowKnown: {active_window_known}\n\
+- consistency: {consistency}\n\
+- discoveredEntityCount: {discovered_entity_count}\n\
+- strongEntityCount(>=0.70): {strong_entity_count}\n\
+- hasRecentObservation(last3): {has_recent_observation}"
+    )
 }
 
 #[cfg(test)]
@@ -574,21 +616,21 @@ mod tests {
           "goal":"打开记事本",
           "next":{
             "action":"tool",
-            "tool":"launch_program",
+            "tool":"open_app",
             "stepSummary":"启动记事本",
-            "toolArgs":{"program":"notepad"}
+            "toolArgs":{"name":"notepad"}
           }
         }"#;
 
         let decision = parse_next_action(raw).expect("generic action protocol should parse");
         assert_eq!(decision.next.action, AgentAction::Tool);
-        assert_eq!(decision.next.tool.as_deref(), Some("launch_program"));
+        assert_eq!(decision.next.tool.as_deref(), Some("open_app"));
         assert_eq!(
             decision.next.summary.as_ref().and_then(|v| v.as_str()),
             Some("启动记事本")
         );
         assert_eq!(
-            decision.next.args.get("program").and_then(|v| v.as_str()),
+            decision.next.args.get("name").and_then(|v| v.as_str()),
             Some("notepad")
         );
     }

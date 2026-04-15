@@ -8,6 +8,7 @@ use super::types::{
     PolicySummary, ProceduralEntry, ProceduralMemory, ProcedureSummary, ProfileHints,
     ProfileMemory, SemanticEntry, SemanticMemory, SemanticSummary,
 };
+use std::collections::HashSet;
 
 /// 检索相关的 Episodic Memory
 pub fn retrieve_episodes(
@@ -457,6 +458,11 @@ fn compute_semantic_relevance(entry: &SemanticEntry, query: &MemoryQuery) -> f64
     if let Some(ref goal) = query.goal {
         score += text_similarity(&entry.topic, goal) * 0.4;
         score += text_similarity(&entry.knowledge, goal) * 0.25;
+        let focused_goal = focus_query_text(goal);
+        if focused_goal != goal.trim() {
+            score += text_similarity(&entry.topic, &focused_goal) * 0.2;
+            score += text_similarity(&entry.knowledge, &focused_goal) * 0.2;
+        }
     }
 
     if let Some(ref intent) = query.intent {
@@ -487,6 +493,10 @@ fn compute_semantic_relevance(entry: &SemanticEntry, query: &MemoryQuery) -> f64
         }
     }
 
+    if entry.mention_count > 1 {
+        score += entry.mention_count.saturating_sub(1).min(2) as f64 * 0.05;
+    }
+
     let age_hours = (now_millis().saturating_sub(entry.updated_at)) as f64 / 3_600_000.0;
     let recency_factor = 1.0 / (1.0 + age_hours / 168.0);
     score *= 0.6 + 0.25 * entry.confidence + 0.15 * recency_factor;
@@ -501,7 +511,106 @@ fn meta_value_to_string(value: &serde_json::Value) -> String {
 }
 
 /// 简单文本相似度 (基于词重叠 Jaccard 系数)
+fn tokenize_words(input: &str) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    let mut current = String::new();
+
+    for ch in input.chars().flat_map(|value| value.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current.push(ch);
+            continue;
+        }
+
+        if !current.is_empty() {
+            tokens.insert(std::mem::take(&mut current));
+        }
+
+        if ch.is_alphanumeric() && !ch.is_ascii() {
+            tokens.insert(ch.to_string());
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.insert(current);
+    }
+
+    tokens
+}
+
+fn tokenize_bigrams(input: &str) -> HashSet<String> {
+    let compact = input
+        .chars()
+        .flat_map(|value| value.to_lowercase())
+        .filter(|ch| ch.is_alphanumeric())
+        .collect::<String>();
+    let chars = compact.chars().collect::<Vec<_>>();
+
+    if chars.is_empty() {
+        return HashSet::new();
+    }
+
+    if chars.len() == 1 {
+        return std::iter::once(chars[0].to_string()).collect();
+    }
+
+    chars
+        .windows(2)
+        .map(|window| window.iter().collect::<String>())
+        .collect()
+}
+
+fn jaccard_similarity(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+
+    let intersection = left.intersection(right).count();
+    let union = left.union(right).count();
+
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
 fn text_similarity(a: &str, b: &str) -> f64 {
+    let word_score = jaccard_similarity(&tokenize_words(a), &tokenize_words(b));
+    let bigram_score = jaccard_similarity(&tokenize_bigrams(a), &tokenize_bigrams(b));
+    word_score * 0.4 + bigram_score * 0.6
+}
+
+fn focus_query_text(input: &str) -> String {
+    let mut focused = input.trim().to_lowercase();
+    for pattern in [
+        "你记得",
+        "还记得",
+        "记得",
+        "请问",
+        "帮我",
+        "告诉我",
+        "一下",
+        "什么",
+        "吗",
+        "么",
+        "呢",
+        "呀",
+        "啊",
+        "do you remember",
+        "remember",
+        "can you",
+        "please",
+        "tell me",
+        "what",
+    ] {
+        focused = focused.replace(pattern, " ");
+    }
+
+    focused.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[allow(dead_code)]
+fn text_similarity_legacy(a: &str, b: &str) -> f64 {
     // 先绑定到变量，避免临时值生命周期问题
     let a_lower = a.to_lowercase();
     let b_lower = b.to_lowercase();

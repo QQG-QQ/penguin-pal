@@ -80,6 +80,20 @@ fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
     )
 }
 
+fn join_prompt_sections(sections: &[Option<&str>]) -> Option<String> {
+    let parts = sections
+        .iter()
+        .filter_map(|section| section.map(str::trim))
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
 fn current_codex_cli_model(app: &AppHandle) -> String {
     load_codex_config(app)
         .ok()
@@ -126,6 +140,27 @@ fn sync_launch_at_startup(app: &AppHandle, enabled: bool) -> Result<bool, String
         .is_enabled()
         .map_err(|error| format!("读取开机自启状态失败: {error}"))?;
 
+    if cfg!(debug_assertions)
+        && std::env::current_exe()
+            .ok()
+            .map(|path| {
+                let normalized = path.to_string_lossy().replace('\\', "/").to_lowercase();
+                normalized.contains("/target/debug/")
+            })
+            .unwrap_or(false)
+    {
+        #[cfg(windows)]
+        if let Ok(current_exe) = std::env::current_exe() {
+            cleanup_dev_autostart_run_entries(&current_exe);
+        }
+        if current {
+            autostart_manager
+                .disable()
+                .map_err(|error| format!("关闭开发版开机自启失败: {error}"))?;
+        }
+        return Ok(false);
+    }
+
     if current != enabled {
         if enabled {
             autostart_manager
@@ -146,6 +181,47 @@ fn sync_launch_at_startup(app: &AppHandle, enabled: bool) -> Result<bool, String
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 fn sync_launch_at_startup(_app: &AppHandle, enabled: bool) -> Result<bool, String> {
     Ok(enabled)
+}
+
+#[cfg(windows)]
+fn cleanup_dev_autostart_run_entries(current_exe: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    let current_path = current_exe
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim()
+        .to_lowercase();
+
+    for name in ["PenguinPal", "PenguinPal Assistant"] {
+        let output = Command::new("reg")
+            .args(["query", run_key, "/v", name])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
+        let Ok(output) = output else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        let matches_current = stdout
+            .lines()
+            .any(|line| line.contains(&current_path));
+        if !matches_current {
+            continue;
+        }
+
+        let _ = Command::new("reg")
+            .args(["delete", run_key, "/v", name, "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
 }
 
 #[cfg(desktop)]
@@ -1738,11 +1814,21 @@ fn build_chat_history_for_provider(
     permission_level: u8,
     allowed_actions: &[app_state::DesktopAction],
     messages: &[ChatMessage],
+    extra_context: Option<&str>,
 ) -> Vec<ChatMessage> {
     let mut history = Vec::with_capacity(messages.len() + 1);
+    let mut system_prompt =
+        guardrails::compose_system_prompt(provider_config, permission_level, allowed_actions);
+    if let Some(extra_context) = extra_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(extra_context);
+    }
     history.push(ChatMessage::new(
         "system",
-        guardrails::compose_system_prompt(provider_config, permission_level, allowed_actions),
+        system_prompt,
     ));
     history.extend(
         messages
@@ -1949,6 +2035,13 @@ async fn send_chat_message(
     let current_task = agent::task_store::current_task(&app).ok().flatten();
     let current_task_context = render_active_task_context(current_task.as_ref());
     let workspace_context = render_workspace_context(workspace_root.as_deref());
+    let archive_recall_context = history::render_archive_recall_for_prompt(&app, trimmed, 3)
+        .ok()
+        .flatten();
+    let agent_turn_conversation_context = join_prompt_sections(&[
+        recent_conversation_context.as_deref(),
+        archive_recall_context.as_deref(),
+    ]);
     let (
         reply_text,
         provider_label,
@@ -1968,6 +2061,7 @@ async fn send_chat_message(
             permission_level,
             &allowed_actions,
             &provider_history,
+            archive_recall_context.as_deref(),
         );
         let (reply, label) = provider::respond(
             &provider_config,
@@ -2012,7 +2106,7 @@ async fn send_chat_message(
             permission_level,
             &allowed_actions,
             trimmed,
-            recent_conversation_context.as_deref(),
+            agent_turn_conversation_context.as_deref(),
             current_task_context.as_deref(),
             workspace_context.as_deref(),
             pending_control_count,
@@ -2054,7 +2148,7 @@ async fn send_chat_message(
                         permission_level,
                         &allowed_actions,
                         trimmed,
-                        recent_conversation_context.as_deref(),
+                        agent_turn_conversation_context.as_deref(),
                         domain,
                         decision.assistant_message.as_deref(),
                     )
@@ -2084,6 +2178,7 @@ async fn send_chat_message(
                     permission_level,
                     &allowed_actions,
                     &provider_history,
+                    archive_recall_context.as_deref(),
                 );
                 let (reply, label) = provider::respond(
                     &provider_config,

@@ -25,7 +25,7 @@ cpal = "0.15"
 ringbuf = "0.4"
 parking_lot = "0.12"
 futures-util = "0.3"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
 rand = "0.8"
 sha2 = "0.10"
 chrono = { version = "0.4", features = ["clock", "serde"] }

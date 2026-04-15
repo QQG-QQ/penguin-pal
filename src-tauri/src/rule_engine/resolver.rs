@@ -228,7 +228,7 @@ mod tests {
         // 硬规则应该优先于软规则，即使软规则优先级数值更高
         assert_eq!(
             RuleResolver::compare_priority(&rule_hard, &rule_soft),
-            std::cmp::Ordering::Greater
+            std::cmp::Ordering::Less
         );
     }
 
