@@ -54,6 +54,26 @@ struct ReplyHistoryMatch {
     score: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveRecallPreviewItem {
+    pub id: String,
+    pub day_key: String,
+    pub timestamp: u64,
+    pub score: f64,
+    pub user_input: String,
+    pub assistant_reply: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveRecallPreview {
+    pub query: String,
+    pub limit: usize,
+    pub total_matches: usize,
+    pub items: Vec<ArchiveRecallPreviewItem>,
+}
+
 fn history_root(app: &AppHandle) -> Result<PathBuf, String> {
     let root = app
         .path()
@@ -230,7 +250,7 @@ fn load_reply_history_search_items(app: &AppHandle) -> Result<Vec<ReplyHistorySe
     Ok(items)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn contains_recall_signal_legacy(query: &str) -> bool {
     let lowered = query.trim().to_lowercase();
     [
@@ -439,23 +459,74 @@ fn ellipsize(input: &str, max_chars: usize) -> String {
     }
 }
 
+fn normalize_archive_recall_limit(limit: usize) -> usize {
+    if limit == 0 {
+        ARCHIVE_RECALL_DEFAULT_LIMIT
+    } else {
+        limit
+    }
+}
+
+fn load_archive_recall_matches(
+    app: &AppHandle,
+    query: &str,
+) -> Result<Vec<ReplyHistoryMatch>, String> {
+    let items = load_reply_history_search_items(app)?;
+    let rank_limit = items.len().max(ARCHIVE_RECALL_DEFAULT_LIMIT);
+    Ok(rank_reply_history_matches(
+        &items,
+        query,
+        rank_limit,
+        now_millis(),
+    ))
+}
+
+pub fn preview_archive_recall(
+    app: &AppHandle,
+    query: &str,
+    limit: usize,
+) -> Result<ArchiveRecallPreview, String> {
+    let recall_limit = normalize_archive_recall_limit(limit);
+    let trimmed_query = query.trim();
+    if trimmed_query.is_empty() {
+        return Ok(ArchiveRecallPreview {
+            query: String::new(),
+            limit: recall_limit,
+            total_matches: 0,
+            items: Vec::new(),
+        });
+    }
+
+    let ranked = load_archive_recall_matches(app, trimmed_query)?;
+    let total_matches = ranked.len();
+    let items = ranked
+        .into_iter()
+        .take(recall_limit)
+        .map(|hit| ArchiveRecallPreviewItem {
+            id: hit.entry.id,
+            day_key: hit.day_key,
+            timestamp: hit.entry.timestamp,
+            score: hit.score,
+            user_input: hit.entry.user_input,
+            assistant_reply: hit.entry.assistant_reply,
+        })
+        .collect();
+
+    Ok(ArchiveRecallPreview {
+        query: trimmed_query.to_string(),
+        limit: recall_limit,
+        total_matches,
+        items,
+    })
+}
+
 pub fn render_archive_recall_for_prompt(
     app: &AppHandle,
     query: &str,
     limit: usize,
 ) -> Result<Option<String>, String> {
-    let items = load_reply_history_search_items(app)?;
-    let recall_limit = if limit == 0 {
-        ARCHIVE_RECALL_DEFAULT_LIMIT
-    } else {
-        limit
-    };
-    let ranked = rank_reply_history_matches(
-        &items,
-        query,
-        recall_limit,
-        now_millis(),
-    );
+    let recall_limit = normalize_archive_recall_limit(limit);
+    let ranked = load_archive_recall_matches(app, query)?;
 
     if ranked.is_empty() {
         return Ok(None);
@@ -466,7 +537,7 @@ pub fn render_archive_recall_for_prompt(
         "Use these older verbatim snippets only when they are directly relevant.".to_string(),
     ];
 
-    for hit in ranked {
+    for hit in ranked.into_iter().take(recall_limit) {
         lines.push(format!(
             "- [{} | score {:.2}] User: {}",
             hit.day_key,
@@ -573,8 +644,8 @@ pub fn clear_today_reply_history(app: &AppHandle) -> Result<Vec<ReplyHistoryEntr
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_signal_len, compute_reply_history_match_score, rank_reply_history_matches,
-        ReplyHistoryEntry, ReplyHistorySearchItem,
+        compact_signal_len, compute_reply_history_match_score, contains_recall_signal_legacy,
+        rank_reply_history_matches, ReplyHistoryEntry, ReplyHistorySearchItem,
     };
 
     fn item(day_key: &str, user_input: &str, assistant_reply: &str, timestamp: u64) -> ReplyHistorySearchItem {
@@ -594,6 +665,11 @@ mod tests {
         assert_eq!(compact_signal_len("  "), 0);
         assert_eq!(compact_signal_len("之前"), 2);
         assert_eq!(compact_signal_len("研究习惯"), 4);
+    }
+
+    #[test]
+    fn legacy_recall_signal_still_matches_ascii_hint() {
+        assert!(contains_recall_signal_legacy("before we discussed this"));
     }
 
     #[test]

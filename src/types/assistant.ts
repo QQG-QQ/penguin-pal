@@ -286,6 +286,22 @@ export interface ReplyHistoryEntry {
   assistantReply: string
 }
 
+export interface ArchiveRecallPreviewItem {
+  id: string
+  dayKey: string
+  timestamp: number
+  score: number
+  userInput: string
+  assistantReply: string
+}
+
+export interface ArchiveRecallPreview {
+  query: string
+  limit: number
+  totalMatches: number
+  items: ArchiveRecallPreviewItem[]
+}
+
 export type ManagedMemoryKind = 'semantic' | 'meta'
 export type MemoryStatus = 'active' | 'archived' | 'deprecated' | 'conflicted'
 

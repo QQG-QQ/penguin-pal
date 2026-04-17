@@ -38,6 +38,7 @@ import {
   deleteWhisperModel,
   downloadWhisperModel,
   getAssistantSnapshot,
+  getArchiveRecallPreview,
   getControlServiceStatus,
   getInputHistory,
   getMemoryManagementSnapshot,
@@ -87,6 +88,7 @@ import {
 import type {
   ActionApprovalRequest,
   AgentTaskProgress,
+  ArchiveRecallPreview,
   AppUpdateStatus,
   AssistantWindowView,
   AiConstraintProfile,
@@ -321,6 +323,13 @@ const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
   conflicts: []
 })
 
+const emptyArchiveRecallPreview = (query = '', limit = 5): ArchiveRecallPreview => ({
+  query,
+  limit,
+  totalMatches: 0,
+  items: []
+})
+
 const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   kind: state.provider.kind,
   model: state.provider.model || providerDefaults[state.provider.kind],
@@ -396,6 +405,8 @@ const researchBrief = ref<ResearchBriefSnapshot>(emptyResearchBrief())
 const researchBriefBusy = ref(false)
 const memoryDashboard = ref<MemoryManagementSnapshot>(emptyMemoryManagementSnapshot())
 const memoryBusy = ref(false)
+const archiveRecallPreview = ref<ArchiveRecallPreview>(emptyArchiveRecallPreview())
+const archiveRecallBusy = ref(false)
 const whisperStatus = ref<WhisperStatus>({
   modelLoaded: false,
   currentModel: null,
@@ -3261,6 +3272,28 @@ const handleMemoryRefresh = async () => {
   }
 }
 
+const handleArchiveRecallSearch = async (query: string) => {
+  const trimmed = query.trim()
+  if (!trimmed) {
+    archiveRecallPreview.value = emptyArchiveRecallPreview()
+    return
+  }
+
+  archiveRecallBusy.value = true
+  try {
+    archiveRecallPreview.value = await getArchiveRecallPreview(trimmed, 5)
+    if (archiveRecallPreview.value.items.length > 0) {
+      announce('已更新 Archive Recall 预览。', 'idle')
+    } else {
+      announce('没有找到匹配的归档片段。', 'idle')
+    }
+  } catch (error) {
+    announce(resolveErrorMessage(error, '搜索 Archive Recall 失败'), 'guarded')
+  } finally {
+    archiveRecallBusy.value = false
+  }
+}
+
 const handleMemoryDelete = async (kind: ManagedMemoryKind, id: string) => {
   memoryBusy.value = true
   try {
@@ -3657,6 +3690,8 @@ onBeforeUnmount(() => {
       :today-reply-history="todayReplyHistory"
       :memory-dashboard="memoryDashboard"
       :memory-busy="memoryBusy"
+      :archive-recall-preview="archiveRecallPreview"
+      :archive-recall-busy="archiveRecallBusy"
       :whisper-status="whisperStatus"
       :whisper-downloading="whisperDownloading"
       :whisper-download-progress="whisperDownloadProgress"
@@ -3670,6 +3705,7 @@ onBeforeUnmount(() => {
       @app-update-open="openSoftwareUpdateDownload"
       @open-research="openResearchBriefWindow"
       @memory-refresh="handleMemoryRefresh"
+      @archive-recall-search="handleArchiveRecallSearch"
       @memory-delete="handleMemoryDelete"
       @memory-promote="handleMemoryPromote"
       @memory-resolve="handleMemoryResolve"

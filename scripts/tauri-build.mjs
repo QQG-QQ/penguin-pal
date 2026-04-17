@@ -6,10 +6,21 @@
 // 5. 执行 tauri dev/build
 import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
+import { existsSync, readdirSync } from 'fs'
 import { dirname, join } from 'path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
+const whisperBuildPrefix = 'whisper-rs-sys-'
+
+function hasWhisperBuildOutput(profile) {
+  const buildRoot = join(projectRoot, 'src-tauri', 'target', profile, 'build')
+  if (!existsSync(buildRoot)) {
+    return false
+  }
+
+  return readdirSync(buildRoot).some((entry) => entry.startsWith(whisperBuildPrefix))
+}
 
 function run(cmd, args, cwd = projectRoot, extraEnv = {}) {
   return new Promise((resolve) => {
@@ -31,9 +42,11 @@ function run(cmd, args, cwd = projectRoot, extraEnv = {}) {
 async function main() {
   const args = process.argv.slice(2)
   const tauriArgs = args.length > 0 ? args : ['build']
+  const isReleaseBuild = tauriArgs[0] === 'build'
+  const forceWhisperRebuild = process.env.PENGUIN_FORCE_WHISPER_REBUILD === '1'
 
   if (process.platform === 'win32') {
-    const cargoEnv = tauriArgs[0] === 'build'
+    const cargoEnv = isReleaseBuild
       ? {
           CARGO_BUILD_JOBS: '1',
           CARGO_INCREMENTAL: '0'
@@ -46,24 +59,36 @@ async function main() {
       process.exit(1)
     }
 
-    if (tauriArgs[0] === 'build') {
+    if (isReleaseBuild) {
       console.log('[build] Step 2: Cleaning stale release artifacts...')
       await run('cargo', ['clean', '--release'], join(projectRoot, 'src-tauri'), cargoEnv)
     }
 
-    console.log('[build] Step 3: Cleaning stale whisper-rs-sys artifacts...')
-    await run('cargo', ['clean', '-p', 'whisper-rs-sys'], join(projectRoot, 'src-tauri'), cargoEnv)
+    const profile = isReleaseBuild ? 'release' : 'debug'
+    const hasCachedWhisperBuild = hasWhisperBuildOutput(profile)
+    const shouldRebuildWhisper = isReleaseBuild || forceWhisperRebuild || !hasCachedWhisperBuild
 
-    const prebuildArgs = tauriArgs[0] === 'build'
+    if (shouldRebuildWhisper) {
+      console.log('[build] Step 3: Cleaning stale whisper-rs-sys artifacts...')
+      await run('cargo', ['clean', '-p', 'whisper-rs-sys'], join(projectRoot, 'src-tauri'), cargoEnv)
+    } else {
+      console.log('[build] Step 3: Reusing cached whisper-rs-sys dev artifacts')
+    }
+
+    const prebuildArgs = isReleaseBuild
       ? ['build', '--release']
       : ['build']
 
-    if (tauriArgs[0] === 'build') {
+    if (isReleaseBuild) {
       console.log('[build] Windows release packaging uses single-job Cargo to reduce rmeta/pagefile failures.')
     }
 
-    console.log('[build] Step 4: Pre-compiling whisper-rs-sys artifacts...')
-    await run('cargo', prebuildArgs, join(projectRoot, 'src-tauri'), cargoEnv)
+    if (shouldRebuildWhisper) {
+      console.log('[build] Step 4: Pre-compiling whisper-rs-sys artifacts...')
+      await run('cargo', prebuildArgs, join(projectRoot, 'src-tauri'), cargoEnv)
+    } else {
+      console.log('[build] Step 4: Skipping whisper-rs-sys prebuild for dev reuse')
+    }
 
     console.log('[build] Step 5: Fixing whisper-rs-sys output paths...')
     const fixCode = await run('node', ['./scripts/fix-whisper-path.mjs'])
@@ -72,7 +97,7 @@ async function main() {
     }
   }
 
-  const tauriEnv = process.platform === 'win32' && tauriArgs[0] === 'build'
+  const tauriEnv = process.platform === 'win32' && isReleaseBuild
     ? {
         CARGO_BUILD_JOBS: '1',
         CARGO_INCREMENTAL: '0'

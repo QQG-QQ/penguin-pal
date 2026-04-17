@@ -642,9 +642,7 @@ async fn get_codex_cli_status(app: AppHandle) -> CodexCliStatus {
 async fn check_codex_update(app: AppHandle) -> Result<codex_update::CodexUpdateStatus, String> {
     let status = inspect_codex_cli_status_basic(&app);
     Ok(codex_update::check_update_status(&app, status.version).await)
-}
-
-#[tauri::command]
+}#[tauri::command]
 async fn check_app_update() -> Result<app_update::AppUpdateStatus, String> {
     Ok(app_update::check_update_status().await)
 }
@@ -656,79 +654,99 @@ async fn open_app_update_download() -> Result<app_update::AppUpdateStatus, Strin
 
 #[tauri::command]
 async fn update_codex(app: AppHandle) -> Result<codex_update::CodexUpdateStatus, String> {
-    let install_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| format!("获取本地数据目录失败: {}", e))?;
+    let mut notes = Vec::new();
+    let mut codex_update_error = None;
+
+    match codex_update::ensure_bootstrap_runtime(&app, true, |msg| {
+        eprintln!("[Codex Bootstrap] {}", msg);
+    })
+    .await
+    {
+        Ok(Some(message)) => notes.push(message),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("[Codex Bootstrap] manual update failed: {}", error);
+            notes.push(format!("Bootstrap 更新失败: {}", error));
+        }
+    }
+
     let target_version = codex_update::fetch_latest_version().await.ok();
+    let codex_install_dir = codex_update::managed_install_dir(&app)?;
 
-    #[cfg(target_os = "windows")]
-    let platform_dir = if cfg!(target_arch = "aarch64") {
-        "windows-arm64"
+    if codex_update::npm_available() {
+        match codex_update::install_or_update_codex(
+            &codex_install_dir,
+            target_version.as_deref(),
+            |msg| {
+                eprintln!("[Codex Update] {}", msg);
+            },
+        ) {
+            Ok(message) => notes.push(message),
+            Err(error) => {
+                eprintln!("[Codex Update] manual npm update failed: {}", error);
+                codex_update_error = Some(error);
+            }
+        }
     } else {
-        "windows-x64"
-    };
+        notes.push("系统 npm 不可用，已跳过 npm 精细更新。".to_string());
+    }
 
-    #[cfg(not(target_os = "windows"))]
-    let platform_dir = "unix";
-
-    let codex_install_dir = install_dir.join("codex").join(platform_dir);
-
-    // 执行更新
-    codex_update::install_or_update_codex(
-        &codex_install_dir,
-        target_version.as_deref(),
-        |msg| {
-            eprintln!("[Codex Update] {}", msg);
-        },
-    )?;
-
-    // 返回更新后的状态
     let status = inspect_codex_cli_status_basic(&app);
-    Ok(codex_update::check_update_status(&app, status.version).await)
+    if !status.installed {
+        if let Some(error) = codex_update_error {
+            return Err(error);
+        }
+        return Err("当前没有可用的 Codex 运行时，bootstrap 更新也未成功。".to_string());
+    }
+
+    let mut update_status = codex_update::check_update_status(&app, status.version).await;
+    if !notes.is_empty() {
+        update_status.message = format!("{}；{}", notes.join("；"), update_status.message);
+    }
+    Ok(update_status)
 }
 
-/// 自动检查并更新 Codex（启动时调用）
+/// 启动时自动检查并更新 Codex
 async fn auto_update_codex(app: &AppHandle) -> Result<(), String> {
-    // 获取当前版本
     let current_status = inspect_codex_cli_status_basic(app);
-
-    // 检查是否有更新
     let update_status = codex_update::check_update_status(app, current_status.version.clone()).await;
 
     if !update_status.update_available {
         eprintln!(
-            "[Codex] 桌宠私有运行时已是最新版本: {:?}",
+            "[Codex] private runtime is already up to date: {:?}",
             update_status.current_version
         );
         return Ok(());
     }
 
     eprintln!(
-        "[Codex] 发现新版本: {:?} -> {:?}，开始自动更新...",
+        "[Codex] found update {:?} -> {:?}, starting auto update...",
         current_status.version,
         update_status.latest_version
     );
 
-    // 获取安装目录
-    let install_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| format!("获取本地数据目录失败: {}", e))?;
+    match codex_update::ensure_bootstrap_runtime(app, false, |msg| {
+        eprintln!("[Codex Bootstrap] {}", msg);
+    })
+    .await
+    {
+        Ok(Some(message)) => eprintln!("[Codex] {}", message),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("[Codex Bootstrap] auto update failed: {}", error);
+        }
+    }
 
-    #[cfg(target_os = "windows")]
-    let platform_dir = if cfg!(target_arch = "aarch64") {
-        "windows-arm64"
-    } else {
-        "windows-x64"
-    };
+    let status_after_bootstrap = inspect_codex_cli_status_basic(app);
+    if !codex_update::npm_available() {
+        if status_after_bootstrap.installed {
+            eprintln!("[Codex] npm unavailable, keeping bootstrap runtime.");
+            return Ok(());
+        }
+        return Err("系统 npm 不可用，且当前没有可用的 Codex 运行时。".to_string());
+    }
 
-    #[cfg(not(target_os = "windows"))]
-    let platform_dir = "unix";
-
-    let codex_install_dir = install_dir.join("codex").join(platform_dir);
-
-    // 执行更新
+    let codex_install_dir = codex_update::managed_install_dir(app)?;
     match codex_update::install_or_update_codex(
         &codex_install_dir,
         update_status.latest_version.as_deref(),
@@ -740,14 +758,18 @@ async fn auto_update_codex(app: &AppHandle) -> Result<(), String> {
             eprintln!("[Codex] 自动更新完成: {}", result);
             Ok(())
         }
-        Err(e) => {
-            eprintln!("[Codex] 自动更新失败: {}", e);
-            Err(e)
+        Err(error) => {
+            eprintln!("[Codex] 自动更新失败: {}", error);
+            let fallback_status = inspect_codex_cli_status_basic(app);
+            if fallback_status.installed {
+                eprintln!("[Codex] npm update failed, but an existing runtime is still usable.");
+                Ok(())
+            } else {
+                Err(error)
+            }
         }
     }
-}
-
-#[tauri::command]
+}#[tauri::command]
 fn get_control_service_status(app: AppHandle) -> Result<ControlServiceStatus, String> {
     control_router::service_status(&app).map_err(|error| error.to_string())
 }
@@ -2476,6 +2498,15 @@ fn get_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, Str
 }
 
 #[tauri::command]
+fn get_archive_recall_preview(
+    app: AppHandle,
+    query: String,
+    limit: Option<usize>,
+) -> Result<history::ArchiveRecallPreview, String> {
+    history::preview_archive_recall(&app, &query, limit.unwrap_or(0))
+}
+
+#[tauri::command]
 fn get_memory_management_snapshot(
     app: AppHandle,
 ) -> Result<memory::MemoryManagementSnapshot, String> {
@@ -2773,6 +2804,7 @@ pub fn run() {
             clear_conversation,
             get_input_history,
             get_today_reply_history,
+            get_archive_recall_preview,
             get_memory_management_snapshot,
             delete_managed_memory,
             promote_memory_candidate,

@@ -68,7 +68,9 @@ impl TranscriberService {
         model: WhisperModel,
         progress_channel: Channel<DownloadProgress>,
     ) -> Result<PathBuf, String> {
-        self.model_manager.download_model(model, progress_channel).await
+        self.model_manager
+            .download_model(model, progress_channel)
+            .await
     }
 
     pub fn delete_model(&self, model: WhisperModel) -> Result<(), String> {
@@ -120,12 +122,4 @@ impl TranscriberService {
         *self.state.lock() = RecordingState::Idle;
         result
     }
-
-    #[allow(dead_code)]
-    pub fn is_model_downloaded(&self, model: WhisperModel) -> bool {
-        self.model_manager.is_downloaded(model)
-    }
 }
-
-unsafe impl Send for TranscriberService {}
-unsafe impl Sync for TranscriberService {}

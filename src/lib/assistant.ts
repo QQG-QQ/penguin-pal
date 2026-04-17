@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { emit, emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   ActionApprovalRequest,
+  ArchiveRecallPreview,
   AppUpdateStatus,
   AssistantWindowView,
   AiConstraintProfile,
@@ -401,6 +402,13 @@ const writeFallbackTodayReplyHistory = (entries: ReplyHistoryEntry[]) => {
     entries
   })
 }
+
+const emptyArchiveRecallPreview = (query = '', limit = 3): ArchiveRecallPreview => ({
+  query,
+  limit,
+  totalMatches: 0,
+  items: []
+})
 
 const isTauriRuntime = () =>
   typeof window !== 'undefined' && typeof window.__TAURI_INTERNALS__ !== 'undefined'
@@ -1498,6 +1506,26 @@ export const getTodayReplyHistory = async (): Promise<ReplyHistoryEntry[]> => {
   } catch (error) {
     rethrowIfDesktopRuntime(error)
     return readFallbackTodayReplyHistoryFile().entries
+  }
+}
+
+export const getArchiveRecallPreview = async (
+  query: string,
+  limit = 5
+): Promise<ArchiveRecallPreview> => {
+  const trimmed = query.trim()
+  if (!trimmed) {
+    return emptyArchiveRecallPreview('', limit)
+  }
+
+  try {
+    return await safeInvoke<ArchiveRecallPreview>('get_archive_recall_preview', {
+      query: trimmed,
+      limit
+    })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return emptyArchiveRecallPreview(trimmed, limit)
   }
 }
 

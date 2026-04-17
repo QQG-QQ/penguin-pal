@@ -25,11 +25,6 @@ impl ModelManager {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn models_dir(&self) -> &PathBuf {
-        &self.models_dir
-    }
-
     pub fn model_path(&self, model: WhisperModel) -> PathBuf {
         self.models_dir.join(model.file_name())
     }
@@ -48,16 +43,6 @@ impl ModelManager {
                 downloaded: self.is_downloaded(model),
             })
             .collect()
-    }
-
-    #[allow(dead_code)]
-    pub fn is_downloading(&self) -> bool {
-        self.downloading.lock().is_some()
-    }
-
-    #[allow(dead_code)]
-    pub fn current_download(&self) -> Option<WhisperModel> {
-        *self.downloading.lock()
     }
 
     pub async fn download_model(
@@ -130,7 +115,8 @@ impl ModelManager {
             }
 
             use std::io::Write;
-            file.flush().map_err(|e| format!("刷新模型文件失败: {}", e))?;
+            file.flush()
+                .map_err(|e| format!("刷新模型文件失败: {}", e))?;
 
             if downloaded == 0 {
                 return Err("下载完成但模型文件为空".to_string());
@@ -165,6 +151,3 @@ impl ModelManager {
         Ok(())
     }
 }
-
-unsafe impl Send for ModelManager {}
-unsafe impl Sync for ModelManager {}

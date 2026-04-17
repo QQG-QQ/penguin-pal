@@ -20,6 +20,9 @@ src-tauri/.ninja/
 artifacts/
 *.tmp
 *.temp
+.codex-test-logs/
+src-tauri/.codex-runtime/
+tmp-cargo-target/
 
 # OS / editor
 .DS_Store

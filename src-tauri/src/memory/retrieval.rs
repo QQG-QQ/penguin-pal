@@ -609,7 +609,7 @@ fn focus_query_text(input: &str) -> String {
     focused.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn text_similarity_legacy(a: &str, b: &str) -> f64 {
     // 先绑定到变量，避免临时值生命周期问题
     let a_lower = a.to_lowercase();
@@ -635,5 +635,16 @@ fn text_similarity_legacy(a: &str, b: &str) -> f64 {
         0.0
     } else {
         intersection as f64 / union as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{text_similarity, text_similarity_legacy};
+
+    #[test]
+    fn legacy_similarity_helper_remains_available_for_overlap_regression_checks() {
+        assert!(text_similarity_legacy("research habit", "my research habit") > 0.0);
+        assert!(text_similarity("research habit", "my research habit") > 0.0);
     }
 }

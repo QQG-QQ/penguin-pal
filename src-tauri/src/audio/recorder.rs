@@ -37,22 +37,19 @@ struct SelectedInputConfig {
 
 pub struct AudioRecorder {
     command_tx: mpsc::Sender<AudioCommand>,
-    #[allow(dead_code)]
     is_recording: Arc<Mutex<bool>>,
     input_ready: Arc<Mutex<bool>>,
     last_error: Arc<Mutex<Option<String>>>,
-    worker_handle: Option<thread::JoinHandle<()>>,
+    worker_handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl AudioRecorder {
     pub fn new() -> Result<Self, String> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AudioCommand>();
-        let samples = Arc::new(Mutex::new(Vec::new()));
         let is_recording = Arc::new(Mutex::new(false));
         let input_ready = Arc::new(Mutex::new(false));
         let last_error = Arc::new(Mutex::new(None));
 
-        let samples_clone = samples.clone();
         let is_recording_clone = is_recording.clone();
         let input_ready_clone = input_ready.clone();
         let last_error_clone = last_error.clone();
@@ -60,7 +57,6 @@ impl AudioRecorder {
         let handle = thread::spawn(move || {
             Self::worker_loop(
                 cmd_rx,
-                samples_clone,
                 is_recording_clone,
                 input_ready_clone,
                 last_error_clone,
@@ -72,7 +68,7 @@ impl AudioRecorder {
             is_recording,
             input_ready,
             last_error,
-            worker_handle: Some(handle),
+            worker_handle: Mutex::new(Some(handle)),
         })
     }
 
@@ -176,9 +172,15 @@ impl AudioRecorder {
         selected: SelectedInputConfig,
     ) -> Result<Stream, String> {
         match selected.sample_format {
-            SampleFormat::F32 => Self::build_probe_stream_for_format::<f32>(device, &selected.config),
-            SampleFormat::I16 => Self::build_probe_stream_for_format::<i16>(device, &selected.config),
-            SampleFormat::U16 => Self::build_probe_stream_for_format::<u16>(device, &selected.config),
+            SampleFormat::F32 => {
+                Self::build_probe_stream_for_format::<f32>(device, &selected.config)
+            }
+            SampleFormat::I16 => {
+                Self::build_probe_stream_for_format::<i16>(device, &selected.config)
+            }
+            SampleFormat::U16 => {
+                Self::build_probe_stream_for_format::<u16>(device, &selected.config)
+            }
             other => Err(format!("当前麦克风采样格式 {:?} 暂不支持。", other)),
         }
     }
@@ -216,21 +218,15 @@ impl AudioRecorder {
         P: Producer<Item = f32> + Send + 'static,
     {
         match selected.sample_format {
-            SampleFormat::F32 => Self::build_stream_for_format::<f32, P>(
-                device,
-                &selected.config,
-                producer,
-            ),
-            SampleFormat::I16 => Self::build_stream_for_format::<i16, P>(
-                device,
-                &selected.config,
-                producer,
-            ),
-            SampleFormat::U16 => Self::build_stream_for_format::<u16, P>(
-                device,
-                &selected.config,
-                producer,
-            ),
+            SampleFormat::F32 => {
+                Self::build_stream_for_format::<f32, P>(device, &selected.config, producer)
+            }
+            SampleFormat::I16 => {
+                Self::build_stream_for_format::<i16, P>(device, &selected.config, producer)
+            }
+            SampleFormat::U16 => {
+                Self::build_stream_for_format::<u16, P>(device, &selected.config, producer)
+            }
             other => Err(format!("当前麦克风采样格式 {:?} 暂不支持。", other)),
         }
     }
@@ -247,7 +243,6 @@ impl AudioRecorder {
 
     fn worker_loop(
         cmd_rx: mpsc::Receiver<AudioCommand>,
-        samples: Arc<Mutex<Vec<f32>>>,
         is_recording: Arc<Mutex<bool>>,
         input_ready: Arc<Mutex<bool>>,
         last_error: Arc<Mutex<Option<String>>>,
@@ -261,7 +256,6 @@ impl AudioRecorder {
         loop {
             match cmd_rx.recv() {
                 Ok(AudioCommand::Start(reply_tx)) => {
-                    samples.lock().clear();
                     *is_recording.lock() = false;
 
                     while consumer.try_pop().is_some() {}
@@ -370,7 +364,6 @@ impl AudioRecorder {
             .map_err(|error| self.disconnected_error(error.to_string()))?
     }
 
-    #[allow(dead_code)]
     pub fn is_recording(&self) -> bool {
         *self.is_recording.lock()
     }
@@ -411,11 +404,8 @@ impl AudioRecorder {
 impl Drop for AudioRecorder {
     fn drop(&mut self) {
         let _ = self.command_tx.send(AudioCommand::Shutdown);
-        if let Some(handle) = self.worker_handle.take() {
+        if let Some(handle) = self.worker_handle.lock().take() {
             let _ = handle.join();
         }
     }
 }
-
-unsafe impl Send for AudioRecorder {}
-unsafe impl Sync for AudioRecorder {}

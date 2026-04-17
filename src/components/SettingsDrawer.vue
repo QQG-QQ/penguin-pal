@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import ControlPanel from './ControlPanel.vue'
 import { presetModelCatalog } from '../lib/modelCatalog'
 import type {
+  ArchiveRecallPreview,
   AppUpdateStatus,
   AiConstraintProfile,
   CodexCliStatus,
@@ -40,6 +41,8 @@ const props = defineProps<{
   todayReplyHistory: ReplyHistoryEntry[]
   memoryDashboard: MemoryManagementSnapshot
   memoryBusy: boolean
+  archiveRecallPreview: ArchiveRecallPreview
+  archiveRecallBusy: boolean
   whisperStatus: WhisperStatus
   whisperDownloading: boolean
   whisperDownloadProgress: DownloadProgress | null
@@ -56,6 +59,7 @@ const emit = defineEmits<{
   appUpdateOpen: []
   openResearch: []
   memoryRefresh: []
+  archiveRecallSearch: [query: string]
   memoryDelete: [kind: ManagedMemoryKind, id: string]
   memoryPromote: [id: string]
   memoryResolve: [kind: ManagedMemoryKind, group: string, keepId: string]
@@ -105,6 +109,7 @@ const memoryPanelOpen = ref<Record<MemoryPanelKey, boolean>>({
   candidate: false,
   conflicts: false
 })
+const archiveRecallQuery = ref('')
 
 const modifierOrder = ['CommandOrControl', 'Alt', 'Shift']
 
@@ -212,6 +217,15 @@ const stopShortcutCapture = () => {
 
 const toggleMemoryPanel = (panel: MemoryPanelKey) => {
   memoryPanelOpen.value[panel] = !memoryPanelOpen.value[panel]
+}
+
+const submitArchiveRecallSearch = () => {
+  emit('archiveRecallSearch', archiveRecallQuery.value)
+}
+
+const clearArchiveRecallSearch = () => {
+  archiveRecallQuery.value = ''
+  emit('archiveRecallSearch', '')
 }
 
 const commitShortcutCapture = (value: string) => {
@@ -346,6 +360,16 @@ watch(
   { deep: true, immediate: true }
 )
 
+watch(
+  () => props.archiveRecallPreview.query,
+  (value) => {
+    if (!props.archiveRecallBusy) {
+      archiveRecallQuery.value = value
+    }
+  },
+  { immediate: true }
+)
+
 const applyPreset = (presetId: string) => {
   applyingPreset.value = true
   selectedPreset.value = presetId
@@ -423,6 +447,21 @@ const formatMemoryTime = (timestamp: number) =>
     hour: '2-digit',
     minute: '2-digit'
   })
+
+const formatArchiveRecallScore = (score: number) => `${Math.round(score * 100)}%`
+
+const archiveRecallResultSummary = computed(() => {
+  const { query, totalMatches, items, limit } = props.archiveRecallPreview
+  if (!query.trim()) {
+    return ''
+  }
+
+  if (!items.length) {
+    return `没有找到和“${query}”相关的本地归档片段。`
+  }
+
+  return `找到 ${totalMatches} 条匹配，当前展示前 ${Math.min(items.length, limit)} 条。`
+})
 
 const memoryStatusLabel = (status: ManagedMemoryRecord['status']) => {
   switch (status) {
@@ -1315,6 +1354,79 @@ onBeforeUnmount(() => {
           </article>
         </div>
 
+        <article class="memory-panel memory-panel-full">
+          <div class="memory-panel-header">
+            <div>
+              <h3>Archive Recall 预览</h3>
+              <p>先用一句线索搜索本地归档，看看旧对话片段会不会被召回，再决定要不要继续追问。</p>
+            </div>
+            <span class="constraint-status">仅本地</span>
+          </div>
+
+          <div class="memory-search-bar">
+            <input
+              v-model="archiveRecallQuery"
+              type="text"
+              placeholder="例如：之前说过的研究习惯 / before we discussed this"
+              @keydown.enter.prevent="submitArchiveRecallSearch"
+            />
+            <button
+              type="button"
+              class="ghost-button"
+              :disabled="archiveRecallBusy"
+              @click="submitArchiveRecallSearch"
+            >
+              {{ archiveRecallBusy ? '搜索中...' : '搜索归档' }}
+            </button>
+            <button
+              v-if="archiveRecallQuery || archiveRecallPreview.query"
+              type="button"
+              class="ghost-button"
+              :disabled="archiveRecallBusy"
+              @click="clearArchiveRecallSearch"
+            >
+              清空
+            </button>
+          </div>
+
+          <p v-if="archiveRecallResultSummary" class="memory-search-summary">
+            {{ archiveRecallResultSummary }}
+          </p>
+
+          <div v-if="archiveRecallBusy" class="memory-empty">
+            正在搜索本地归档片段...
+          </div>
+
+          <div
+            v-else-if="archiveRecallPreview.query && archiveRecallPreview.items.length"
+            class="memory-list"
+          >
+            <article
+              v-for="item in archiveRecallPreview.items"
+              :key="item.id"
+              class="memory-entry archive-recall-entry"
+            >
+              <div class="memory-entry-top">
+                <div>
+                  <strong>{{ item.dayKey }}</strong>
+                  <p>匹配度 {{ formatArchiveRecallScore(item.score) }} · {{ formatMemoryTime(item.timestamp) }}</p>
+                </div>
+                <span class="constraint-status">Archive Recall</span>
+              </div>
+              <p class="memory-detail memory-recall-copy">
+                <span class="memory-inline-label">你：</span>{{ item.userInput }}
+              </p>
+              <p class="memory-detail memory-recall-copy">
+                <span class="memory-inline-label">企鹅：</span>{{ item.assistantReply }}
+              </p>
+            </article>
+          </div>
+
+          <div v-else class="memory-empty">
+            输入一句线索后，这里会显示最可能被召回的旧对话片段。
+          </div>
+        </article>
+
         <div class="memory-grid">
           <article class="memory-panel">
             <div class="memory-panel-header">
@@ -1803,9 +1915,30 @@ textarea {
   gap: 14px;
 }
 
+.memory-panel-full {
+  grid-column: 1 / -1;
+}
+
 .memory-panel h3 {
   margin: 0;
   font-size: 15px;
+}
+
+.memory-search-bar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.memory-search-bar input {
+  flex: 1 1 320px;
+}
+
+.memory-search-summary {
+  margin: 0;
+  color: #476775;
+  font-size: 12px;
 }
 
 .memory-toggle {
@@ -1866,6 +1999,10 @@ textarea {
   gap: 8px;
 }
 
+.archive-recall-entry {
+  background: rgba(240, 249, 252, 0.94);
+}
+
 .memory-entry.conflicted {
   background: rgba(255, 244, 226, 0.94);
 }
@@ -1885,6 +2022,16 @@ textarea {
 
 .memory-detail {
   color: #476775;
+}
+
+.memory-recall-copy {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.memory-inline-label {
+  color: #17384b;
+  font-weight: 600;
 }
 
 .memory-meta-row {
