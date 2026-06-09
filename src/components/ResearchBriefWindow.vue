@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ResearchBriefSnapshot, ResearchFundQuote } from '../types/assistant'
+import type { ResearchBriefSnapshot, ResearchFundQuote, ResearchNewsItem } from '../types/assistant'
 
 const props = defineProps<{
   brief: ResearchBriefSnapshot
@@ -99,6 +99,7 @@ const parsedAnalysisSections = computed<ParsedAnalysisSection[]>(() => {
 const leadSection = computed(() => parsedAnalysisSections.value[0] ?? null)
 const detailSections = computed(() => parsedAnalysisSections.value.slice(1))
 const fundQuotes = computed(() => props.brief.fundQuotes ?? [])
+const newsItems = computed(() => props.brief.newsItems ?? [])
 const quotedFunds = computed(() =>
   fundQuotes.value.filter((item) => typeof item.changePercent === 'number')
 )
@@ -164,6 +165,9 @@ const assetTypeIcon = (quote: ResearchFundQuote) => {
       return '📊'
   }
 }
+
+const newsMeta = (item: ResearchNewsItem) =>
+  [item.source, item.relatedAsset, item.publishedAt].filter(Boolean).join(' · ')
 </script>
 
 <template>
@@ -290,6 +294,31 @@ const assetTypeIcon = (quote: ResearchFundQuote) => {
       </div>
     </section>
 
+    <section v-if="newsItems.length" class="research-news-card">
+      <div class="research-fund-header">
+        <div>
+          <p class="research-card-eyebrow">新闻 / 公告源</p>
+          <h3>可复查的信息入口</h3>
+          <p>这些链接来自自选池、基金池和主题关键词，用来快速回到公告、新闻或搜索页核对原始信息。</p>
+        </div>
+      </div>
+
+      <div class="research-news-list">
+        <a
+          v-for="item in newsItems"
+          :key="`${item.source}-${item.title}-${item.url}`"
+          class="research-news-row"
+          :href="item.url"
+          target="_blank"
+          rel="noreferrer"
+        >
+          <span>{{ newsMeta(item) }}</span>
+          <strong>{{ item.title }}</strong>
+          <p v-if="item.summary">{{ item.summary }}</p>
+        </a>
+      </div>
+    </section>
+
     <section v-if="detailSections.length" class="research-grid">
       <article
         v-for="section in detailSections"
@@ -408,7 +437,8 @@ const assetTypeIcon = (quote: ResearchFundQuote) => {
   margin-bottom: 16px;
 }
 
-.research-fund-card {
+.research-fund-card,
+.research-news-card {
   margin-bottom: 16px;
   padding: 20px;
   border-radius: 22px;
@@ -432,6 +462,47 @@ const assetTypeIcon = (quote: ResearchFundQuote) => {
   display: grid;
   gap: 14px;
   margin-top: 16px;
+}
+
+.research-news-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.research-news-row {
+  display: grid;
+  gap: 6px;
+  min-height: 118px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(20, 34, 54, 0.08);
+  background: rgba(246, 250, 255, 0.88);
+  color: inherit;
+  text-decoration: none;
+}
+
+.research-news-row:hover {
+  border-color: rgba(62, 122, 185, 0.26);
+  background: rgba(240, 247, 255, 0.98);
+}
+
+.research-news-row span {
+  color: #6783a3;
+  font-size: 12px;
+}
+
+.research-news-row strong {
+  color: #17304a;
+  line-height: 1.4;
+}
+
+.research-news-row p {
+  margin: 0;
+  color: #5f7996;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .research-fund-row {

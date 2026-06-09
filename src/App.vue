@@ -34,9 +34,12 @@ import {
   closeSettingsWindow,
   confirmControlPending,
   confirmDesktopAction,
+  createBrowserAutomationTask,
   deleteManagedMemory,
   deleteWhisperModel,
   downloadWhisperModel,
+  exportMemoryBackup,
+  getAgentRoadmapStatus,
   getAssistantSnapshot,
   getArchiveRecallPreview,
   getControlServiceStatus,
@@ -47,6 +50,10 @@ import {
   getCodexCliStatus,
   getWhisperStatus,
   hideAssistantWindow,
+  importMemoryBackup,
+  importDocumentMemory,
+  listBrowserAutomationTasks,
+  listDocumentMemory,
   invokeControlTool,
   isBubbleWindowView,
   isResearchWindowView,
@@ -75,6 +82,9 @@ import {
   saveProviderConfig,
   sendChatMessage,
   restartCodexCliLogin,
+  runHealthCheck,
+  runMemoryMaintenance,
+  scanPluginTools,
   startCodexCliLogin,
   startWhisperRecording,
   listControlPending,
@@ -87,6 +97,7 @@ import {
 } from './lib/assistant'
 import type {
   ActionApprovalRequest,
+  AgentRoadmapStatus,
   AgentTaskProgress,
   ArchiveRecallPreview,
   AppUpdateStatus,
@@ -100,7 +111,11 @@ import type {
   ControlPendingRequest,
   ControlToolInvokeResponse,
   DesktopAction,
+  DocumentImportResult,
+  DocumentMemoryRecord,
   DownloadProgress,
+  HealthCheckReport,
+  BrowserAutomationTask,
   ManagedMemoryKind,
   MemoryManagementSnapshot,
   PetLayoutMetrics,
@@ -108,6 +123,7 @@ import type {
   PetMode,
   ProviderConfigInput,
   ProviderKind,
+  PluginToolScanResult,
   ResearchBriefSnapshot,
   ReplyHistoryEntry,
   WhisperModel,
@@ -146,6 +162,33 @@ const defaultResearchConfig = () => ({
   habitNotes: '',
   decisionFramework:
     '先看结论和证据，再看反证、风险、失效条件、跟踪指标，最后才决定是否继续研究。'
+})
+
+const defaultAgentRoadmapConfig = () => ({
+  pluginTools: {
+    enabled: false,
+    mcpGatewayEnabled: false,
+    toolDirs: [] as string[],
+    requireConfirmation: true
+  },
+  documentMemory: {
+    enabled: false,
+    autoSummarize: true,
+    writeToLongTermMemory: true,
+    watchedDirs: [] as string[]
+  },
+  browserAutomation: {
+    enabled: false,
+    requireConfirmation: true,
+    allowResearchFetch: false,
+    allowedDomains: [] as string[]
+  },
+  localVoiceLoop: {
+    enabled: false,
+    localTtsEnabled: false,
+    offlineLlmFallback: false,
+    wakePhrase: '小企鹅'
+  }
 })
 
 const actionCommandMap: Record<string, string[]> = {
@@ -259,7 +302,8 @@ const emptySnapshot = (): AssistantSnapshot => ({
     allowNetwork: false,
     allowSystem: false,
     durationHours: 1
-  }
+  },
+  agentRoadmap: defaultAgentRoadmapConfig()
 })
 
 const emptyCodexStatus = (): CodexCliStatus => ({
@@ -295,6 +339,7 @@ const emptyResearchBrief = (): ResearchBriefSnapshot => ({
   sections: [],
   alerts: [],
   fundQuotes: [],
+  newsItems: [],
   memoryHints: [],
   alertFingerprint: '',
   hasUpdates: false,
@@ -304,6 +349,27 @@ const emptyResearchBrief = (): ResearchBriefSnapshot => ({
   analysisProviderLabel: null,
   analysisResult: null,
   analysisNotice: '开启本地投研模式后，这里会展示 AI 自动生成的研究分析。'
+})
+
+const emptyHealthCheckReport = (): HealthCheckReport => ({
+  generatedAt: 0,
+  overallStatus: 'warning',
+  items: []
+})
+
+const emptyAgentRoadmapStatus = (): AgentRoadmapStatus => ({
+  generatedAt: 0,
+  pluginTools: { enabled: false, status: 'disabled', summary: '插件/MCP 工具层未启用。', detail: [] },
+  documentMemory: { enabled: false, status: 'disabled', summary: '文档导入知识库未启用。', detail: [] },
+  browserAutomation: { enabled: false, status: 'disabled', summary: '浏览器自动化入口未启用。', detail: [] },
+  localVoiceLoop: { enabled: false, status: 'disabled', summary: '本地语音闭环未启用。', detail: [] }
+})
+
+const emptyPluginToolScanResult = (): PluginToolScanResult => ({
+  scannedAt: 0,
+  directories: [],
+  tools: [],
+  warnings: []
 })
 
 const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
@@ -379,6 +445,26 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
     allowNetwork: false,
     allowSystem: false,
     durationHours: 1
+  },
+  agentRoadmap: {
+    ...defaultAgentRoadmapConfig(),
+    ...(state.agentRoadmap ?? {}),
+    pluginTools: {
+      ...defaultAgentRoadmapConfig().pluginTools,
+      ...(state.agentRoadmap?.pluginTools ?? {})
+    },
+    documentMemory: {
+      ...defaultAgentRoadmapConfig().documentMemory,
+      ...(state.agentRoadmap?.documentMemory ?? {})
+    },
+    browserAutomation: {
+      ...defaultAgentRoadmapConfig().browserAutomation,
+      ...(state.agentRoadmap?.browserAutomation ?? {})
+    },
+    localVoiceLoop: {
+      ...defaultAgentRoadmapConfig().localVoiceLoop,
+      ...(state.agentRoadmap?.localVoiceLoop ?? {})
+    }
   }
 })
 
@@ -405,6 +491,14 @@ const researchBrief = ref<ResearchBriefSnapshot>(emptyResearchBrief())
 const researchBriefBusy = ref(false)
 const memoryDashboard = ref<MemoryManagementSnapshot>(emptyMemoryManagementSnapshot())
 const memoryBusy = ref(false)
+const memoryBackupText = ref('')
+const healthReport = ref<HealthCheckReport>(emptyHealthCheckReport())
+const healthBusy = ref(false)
+const agentRoadmapStatus = ref<AgentRoadmapStatus>(emptyAgentRoadmapStatus())
+const agentRoadmapBusy = ref(false)
+const pluginToolScan = ref<PluginToolScanResult>(emptyPluginToolScanResult())
+const documentMemoryRecords = ref<DocumentMemoryRecord[]>([])
+const browserAutomationTasks = ref<BrowserAutomationTask[]>([])
 const archiveRecallPreview = ref<ArchiveRecallPreview>(emptyArchiveRecallPreview())
 const archiveRecallBusy = ref(false)
 const whisperStatus = ref<WhisperStatus>({
@@ -1863,6 +1957,18 @@ const persistSettings = async (draft: ProviderConfigInput) => {
   nextDraft.pushToTalkShortcut =
     nextDraft.pushToTalkShortcut?.trim() || DEFAULT_PUSH_TO_TALK_SHORTCUT
   nextDraft.workspaceRoot = nextDraft.workspaceRoot?.trim() || null
+  nextDraft.agentRoadmap.pluginTools.toolDirs = nextDraft.agentRoadmap.pluginTools.toolDirs
+    .map((item) => item.trim())
+    .filter(Boolean)
+  nextDraft.agentRoadmap.documentMemory.watchedDirs = nextDraft.agentRoadmap.documentMemory.watchedDirs
+    .map((item) => item.trim())
+    .filter(Boolean)
+  nextDraft.agentRoadmap.browserAutomation.allowedDomains =
+    nextDraft.agentRoadmap.browserAutomation.allowedDomains
+      .map((item) => item.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '').toLowerCase())
+      .filter(Boolean)
+  nextDraft.agentRoadmap.localVoiceLoop.wakePhrase =
+    nextDraft.agentRoadmap.localVoiceLoop.wakePhrase?.trim() || '小企鹅'
 
   if (!nextDraft.visionChannel.model.trim()) {
     nextDraft.visionChannel.model =
@@ -3272,6 +3378,127 @@ const handleMemoryRefresh = async () => {
   }
 }
 
+const handleMemoryMaintain = async () => {
+  memoryBusy.value = true
+  try {
+    memoryDashboard.value = await runMemoryMaintenance()
+    announce('记忆维护完成，已合并重复项并清理低置信度条目。', 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '记忆维护失败'), 'guarded')
+  } finally {
+    memoryBusy.value = false
+  }
+}
+
+const handleMemoryExport = async () => {
+  memoryBusy.value = true
+  try {
+    const backup = await exportMemoryBackup()
+    memoryBackupText.value = backup
+    try {
+      await navigator.clipboard?.writeText(backup)
+      announce('记忆备份已生成，并已复制到剪贴板。', 'idle')
+    } catch {
+      announce('记忆备份已生成，可在设置页复制 JSON。', 'idle')
+    }
+  } catch (error) {
+    announce(resolveErrorMessage(error, '导出记忆备份失败'), 'guarded')
+  } finally {
+    memoryBusy.value = false
+  }
+}
+
+const handleMemoryImport = async (backupJson: string) => {
+  const trimmed = backupJson.trim()
+  if (!trimmed) {
+    announce('请先粘贴记忆备份 JSON。', 'guarded')
+    return
+  }
+
+  memoryBusy.value = true
+  try {
+    memoryDashboard.value = await importMemoryBackup(trimmed)
+    memoryBackupText.value = trimmed
+    announce('记忆备份已导入，长期记忆面板已刷新。', 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '导入记忆备份失败'), 'guarded')
+  } finally {
+    memoryBusy.value = false
+  }
+}
+
+const handleHealthCheck = async () => {
+  healthBusy.value = true
+  try {
+    healthReport.value = await runHealthCheck()
+    const errorCount = healthReport.value.items.filter((item) => item.status === 'error').length
+    const warningCount = healthReport.value.items.filter((item) => item.status === 'warning').length
+    announce(`系统诊断完成：${errorCount} 个错误，${warningCount} 个提醒。`, errorCount ? 'guarded' : 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '系统诊断失败'), 'guarded')
+  } finally {
+    healthBusy.value = false
+  }
+}
+
+const refreshAgentRoadmapStatus = async (silent = false) => {
+  agentRoadmapBusy.value = true
+  try {
+    agentRoadmapStatus.value = await getAgentRoadmapStatus()
+    documentMemoryRecords.value = await listDocumentMemory()
+    browserAutomationTasks.value = await listBrowserAutomationTasks()
+    if (!silent) {
+      announce('四条落地路线状态已刷新。', 'idle')
+    }
+  } catch (error) {
+    announce(resolveErrorMessage(error, '刷新落地路线状态失败'), 'guarded')
+  } finally {
+    agentRoadmapBusy.value = false
+  }
+}
+
+const handlePluginToolScan = async () => {
+  agentRoadmapBusy.value = true
+  try {
+    pluginToolScan.value = await scanPluginTools()
+    await refreshAgentRoadmapStatus(true)
+    announce(`插件扫描完成：发现 ${pluginToolScan.value.tools.length} 个工具。`, 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '扫描插件工具失败'), 'guarded')
+  } finally {
+    agentRoadmapBusy.value = false
+  }
+}
+
+const handleDocumentImport = async (payload: { title: string; content: string }) => {
+  agentRoadmapBusy.value = true
+  try {
+    const result: DocumentImportResult = await importDocumentMemory(payload.title, payload.content)
+    await refreshMemoryDashboard()
+    documentMemoryRecords.value = await listDocumentMemory()
+    await refreshAgentRoadmapStatus(true)
+    announce(result.message, result.memoryWritten ? 'speaking' : 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '导入文档知识失败'), 'guarded')
+  } finally {
+    agentRoadmapBusy.value = false
+  }
+}
+
+const handleBrowserTaskCreate = async (payload: { goal: string; url: string }) => {
+  agentRoadmapBusy.value = true
+  try {
+    const task: BrowserAutomationTask = await createBrowserAutomationTask(payload.goal, payload.url)
+    browserAutomationTasks.value = await listBrowserAutomationTasks()
+    await refreshAgentRoadmapStatus(true)
+    announce(task.message, task.requiresConfirmation ? 'guarded' : 'idle')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '创建浏览器自动化任务失败'), 'guarded')
+  } finally {
+    agentRoadmapBusy.value = false
+  }
+}
+
 const handleArchiveRecallSearch = async (query: string) => {
   const trimmed = query.trim()
   if (!trimmed) {
@@ -3615,6 +3842,7 @@ onMounted(() => {
   void refreshTodayReplyHistory()
   void loadSnapshot()
   void refreshMemoryDashboard()
+  void refreshAgentRoadmapStatus(true)
   void refreshCodexLoginStatus(true)
   void refreshWhisperStatus()
   void refreshMicrophoneAvailability(!isNonPetWindowView.value).then(() => {
@@ -3690,6 +3918,14 @@ onBeforeUnmount(() => {
       :today-reply-history="todayReplyHistory"
       :memory-dashboard="memoryDashboard"
       :memory-busy="memoryBusy"
+      :memory-backup-text="memoryBackupText"
+      :health-report="healthReport"
+      :health-busy="healthBusy"
+      :agent-roadmap-status="agentRoadmapStatus"
+      :agent-roadmap-busy="agentRoadmapBusy"
+      :plugin-tool-scan="pluginToolScan"
+      :document-memory-records="documentMemoryRecords"
+      :browser-automation-tasks="browserAutomationTasks"
       :archive-recall-preview="archiveRecallPreview"
       :archive-recall-busy="archiveRecallBusy"
       :whisper-status="whisperStatus"
@@ -3705,6 +3941,14 @@ onBeforeUnmount(() => {
       @app-update-open="openSoftwareUpdateDownload"
       @open-research="openResearchBriefWindow"
       @memory-refresh="handleMemoryRefresh"
+      @memory-maintain="handleMemoryMaintain"
+      @memory-export="handleMemoryExport"
+      @memory-import="handleMemoryImport"
+      @health-check="handleHealthCheck"
+      @agent-roadmap-refresh="refreshAgentRoadmapStatus()"
+      @plugin-tool-scan="handlePluginToolScan"
+      @document-import="handleDocumentImport"
+      @browser-task-create="handleBrowserTaskCreate"
       @archive-recall-search="handleArchiveRecallSearch"
       @memory-delete="handleMemoryDelete"
       @memory-promote="handleMemoryPromote"

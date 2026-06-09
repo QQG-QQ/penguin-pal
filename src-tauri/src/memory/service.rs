@@ -12,10 +12,10 @@ use super::core_policy::{self, CorePolicyCheck};
 use super::retrieval::{build_memory_summary, render_memory_summary_for_prompt};
 use super::store::MemoryStore;
 use super::types::{
-    now_millis, ManagedMemoryKind, ManagedMemoryRecord, MemoryConflictGroup,
+    now_millis, ManagedMemoryKind, ManagedMemoryRecord, MemoryBackupSnapshot, MemoryConflictGroup,
     MemoryManagementSnapshot, MemoryManagementStats, MemoryQuery, MemoryStatus, MemorySummary,
     MetaMemory, MetaPreference, PolicySuggestion, ProceduralEntry, ProfileMemory,
-    SemanticEntry, SemanticMemory, WriteBackRequest,
+    SemanticEntry, SemanticMemory, WriteBackRequest, MEMORY_SCHEMA_VERSION,
 };
 use super::write_back;
 
@@ -190,6 +190,33 @@ impl MemoryService {
             candidate_records,
             conflicts,
         })
+    }
+
+    pub fn export_backup(&self) -> Result<MemoryBackupSnapshot, String> {
+        Ok(MemoryBackupSnapshot {
+            schema_version: MEMORY_SCHEMA_VERSION.to_string(),
+            exported_at: now_millis(),
+            profile: self.store.load_profile()?,
+            episodic: self.store.load_episodic()?,
+            procedural: self.store.load_procedural()?,
+            policy: self.store.load_policy()?,
+            semantic: self.store.load_semantic()?,
+            meta: self.store.load_meta()?,
+        })
+    }
+
+    pub fn import_backup(
+        &self,
+        backup: MemoryBackupSnapshot,
+    ) -> Result<MemoryManagementSnapshot, String> {
+        self.store.save_profile(&backup.profile)?;
+        self.store.save_episodic(&backup.episodic)?;
+        self.store.save_procedural(&backup.procedural)?;
+        self.store.save_policy(&backup.policy)?;
+        self.store.save_semantic(&backup.semantic)?;
+        self.store.save_meta(&backup.meta)?;
+        self.store.clear_cache();
+        self.management_snapshot()
     }
 
     pub fn delete_managed_memory(

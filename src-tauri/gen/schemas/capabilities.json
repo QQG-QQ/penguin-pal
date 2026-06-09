@@ -1,1 +1,1 @@
-{}
+{"desktop-core":{"identifier":"desktop-core","description":"Core permissions for local PenguinPal desktop windows.","local":true,"windows":["main","settings","bubble"],"permissions":["core:default","core:window:allow-set-size","core:window:allow-set-position","core:window:allow-show","core:window:allow-hide","core:window:allow-set-ignore-cursor-events"]}}

@@ -221,6 +221,10 @@ pub struct AgentLoopSummary {
     pub goal: String,
     pub steps_taken: usize,
     pub final_status: AgentTaskStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_used: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_stage: Option<FailureStage>,
     pub failure_reason_code: FailureReasonCode,

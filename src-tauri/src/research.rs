@@ -44,6 +44,17 @@ pub struct ResearchFundQuote {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResearchNewsItem {
+    pub source: String,
+    pub title: String,
+    pub url: String,
+    pub related_asset: Option<String>,
+    pub published_at: Option<String>,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResearchBriefSnapshot {
     pub generated_at: u64,
     pub day_key: String,
@@ -53,6 +64,7 @@ pub struct ResearchBriefSnapshot {
     pub sections: Vec<ResearchBriefSection>,
     pub alerts: Vec<ResearchBriefAlert>,
     pub fund_quotes: Vec<ResearchFundQuote>,
+    pub news_items: Vec<ResearchNewsItem>,
     pub memory_hints: Vec<String>,
     pub alert_fingerprint: String,
     pub has_updates: bool,
@@ -159,6 +171,7 @@ pub async fn build_brief(
                 summary: "开启后，桌宠会在独立弹窗里展示每日研究简报，并用长期记忆记住你的投资习惯。".to_string(),
             }],
             fund_quotes: Vec::new(),
+            news_items: Vec::new(),
             memory_hints: Vec::new(),
             alert_fingerprint: String::new(),
             has_updates: false,
@@ -181,6 +194,8 @@ pub async fn build_brief(
     let memory_hints = collect_investment_memory_hints(&memory_service);
     let fund_quotes =
         fetch_research_quotes(&config, runtime.provider.allow_network, generated_at).await;
+    let news_items =
+        fetch_research_news(&config, runtime.provider.allow_network).await;
 
     let watchlist_label = if config.watchlist.is_empty() {
         "未配置股票/ETF 自选".to_string()
@@ -248,6 +263,21 @@ pub async fn build_brief(
             title: "增强分析执行面板".to_string(),
             summary: "把财报、基金风格、地缘主题和你的研究习惯串成今天应该先看的动作。".to_string(),
             bullets: build_analysis_actions(&config, &memory_hints),
+        },
+        ResearchBriefSection {
+            title: "数据健康检查".to_string(),
+            summary: "先确认本轮简报的数据覆盖率、离线状态和失败项，避免把缺失数据误读成投资结论。".to_string(),
+            bullets: build_quote_health_bullets(&fund_quotes, runtime.provider.allow_network),
+        },
+        ResearchBriefSection {
+            title: "今日优先级".to_string(),
+            summary: "把自选池波动、研究主题和长期记忆压成一组可执行的观察顺序。".to_string(),
+            bullets: build_priority_bullets(&config, &fund_quotes, &memory_hints),
+        },
+        ResearchBriefSection {
+            title: "新闻/公告源".to_string(),
+            summary: "把自选资产和主题对应到可复查的信息源，优先给出公告、新闻和搜索入口。".to_string(),
+            bullets: build_news_bullets(&news_items),
         },
     ];
 
@@ -347,6 +377,7 @@ pub async fn build_brief(
         &sections,
         &alerts,
         &fund_quotes,
+        &news_items,
         &day_key,
     )
     .await;
@@ -362,6 +393,7 @@ pub async fn build_brief(
         sections,
         alerts,
         fund_quotes,
+        news_items,
         memory_hints,
         alert_fingerprint,
         has_updates,
@@ -676,6 +708,131 @@ fn build_observation_checklist(config: &ResearchConfig, memory_hints: &[String])
     bullets
 }
 
+fn build_quote_health_bullets(
+    fund_quotes: &[ResearchFundQuote],
+    allow_network: bool,
+) -> Vec<String> {
+    if !allow_network {
+        return vec![
+            "当前已关闭网络访问，行情/估值只会给出占位状态，不参与涨跌判断。".to_string(),
+            "如果要使用实时快照，请在 Provider 设置里开启网络访问后刷新投研简报。".to_string(),
+        ];
+    }
+
+    if fund_quotes.is_empty() {
+        return vec![
+            "本轮没有配置可拉取行情的股票、ETF 或基金。".to_string(),
+            "先在自选池或基金观察池补充名称/代码，再刷新简报。".to_string(),
+        ];
+    }
+
+    let resolved = fund_quotes
+        .iter()
+        .filter(|quote| quote.note.as_ref().map(|note| note.trim().is_empty()).unwrap_or(true))
+        .count();
+    let failed = fund_quotes.len().saturating_sub(resolved);
+    let mut bullets = vec![format!(
+        "本轮尝试解析 {} 个资产，成功获取 {} 个，待处理/失败 {} 个。",
+        fund_quotes.len(),
+        resolved,
+        failed
+    )];
+
+    for quote in fund_quotes
+        .iter()
+        .filter(|quote| quote.note.as_ref().is_some_and(|note| !note.trim().is_empty()))
+        .take(3)
+    {
+        bullets.push(format!(
+            "{} ({}) 暂未形成可用行情：{}",
+            quote.name,
+            quote.code,
+            quote.note.as_deref().unwrap_or_default()
+        ));
+    }
+
+    if failed == 0 {
+        bullets.push("当前配置里的资产都拿到了可用快照，可以进入波动和基本面拆解。".to_string());
+    }
+
+    bullets
+}
+
+fn build_priority_bullets(
+    config: &ResearchConfig,
+    fund_quotes: &[ResearchFundQuote],
+    memory_hints: &[String],
+) -> Vec<String> {
+    let mut bullets = Vec::new();
+
+    if let Some(quote) = fund_quotes
+        .iter()
+        .filter_map(|quote| quote.change_percent.map(|change| (change.abs(), change, quote)))
+        .max_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        let (_, change, asset) = quote;
+        bullets.push(format!(
+            "先看波动最大的资产：{} ({}) 当前约 {:+.2}%，判断是基本面、风格还是短线情绪驱动。",
+            asset.name, asset.code, change
+        ));
+    }
+
+    if let Some(symbol) = config.watchlist.first() {
+        bullets.push(format!(
+            "再复核自选核心标的 {}：收入质量、现金流、估值支撑和最近公告是否一致。",
+            symbol
+        ));
+    }
+
+    if let Some(fund) = config.funds.first() {
+        bullets.push(format!(
+            "基金池优先看 {}：确认近期风格漂移、重仓拥挤度和回撤韧性。",
+            fund
+        ));
+    }
+
+    if let Some(theme) = config.themes.first() {
+        bullets.push(format!(
+            "主题侧跟踪 {}：只记录会改变盈利路径、估值锚或风险溢价的变量。",
+            theme
+        ));
+    }
+
+    if !memory_hints.is_empty() {
+        bullets.push("最后用长期记忆里的偏好做一次反向校准，避免今天的热点覆盖原有纪律。".to_string());
+    }
+
+    if bullets.is_empty() {
+        bullets.push("先补充自选池、基金池或主题，再生成可执行优先级。".to_string());
+    }
+
+    bullets
+}
+
+fn build_news_bullets(news_items: &[ResearchNewsItem]) -> Vec<String> {
+    if news_items.is_empty() {
+        return vec!["当前没有生成新闻/公告源。开启网络访问并配置自选资产后可刷新。".to_string()];
+    }
+
+    news_items
+        .iter()
+        .take(8)
+        .map(|item| {
+            let related = item
+                .related_asset
+                .as_deref()
+                .map(|asset| format!(" / {asset}"))
+                .unwrap_or_default();
+            let time = item
+                .published_at
+                .as_deref()
+                .map(|value| format!(" / {value}"))
+                .unwrap_or_default();
+            format!("{}{}{}：{}", item.source, related, time, item.title)
+        })
+        .collect()
+}
+
 fn local_day_key(timestamp: u64) -> String {
     Local
         .timestamp_millis_opt(timestamp as i64)
@@ -776,6 +933,7 @@ async fn build_ai_analysis(
     sections: &[ResearchBriefSection],
     alerts: &[ResearchBriefAlert],
     fund_quotes: &[ResearchFundQuote],
+    news_items: &[ResearchNewsItem],
     day_key: &str,
 ) -> ResearchAiAnalysis {
     if matches!(runtime.provider.kind, ProviderKind::Mock) {
@@ -811,6 +969,7 @@ async fn build_ai_analysis(
         sections,
         alerts,
         fund_quotes,
+        news_items,
         day_key,
     );
     let history = vec![
@@ -860,6 +1019,7 @@ fn build_research_analysis_prompt(
     sections: &[ResearchBriefSection],
     alerts: &[ResearchBriefAlert],
     fund_quotes: &[ResearchFundQuote],
+    news_items: &[ResearchNewsItem],
     day_key: &str,
 ) -> String {
     let watchlist = if config.watchlist.is_empty() {
@@ -937,6 +1097,28 @@ fn build_research_analysis_prompt(
             .join("\n")
     };
 
+    let news_text = if news_items.is_empty() {
+        "无".to_string()
+    } else {
+        news_items
+            .iter()
+            .map(|item| {
+                let related = item
+                    .related_asset
+                    .as_deref()
+                    .map(|value| format!(" / 相关：{value}"))
+                    .unwrap_or_default();
+                let summary = item
+                    .summary
+                    .as_deref()
+                    .map(|value| format!(" / 摘要：{value}"))
+                    .unwrap_or_default();
+                format!("{}{}：{} - {}{}", item.source, related, item.title, item.url, summary)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     format!(
         "你现在是桌宠内置的本地投研助手。请基于下面这些本地配置、长期记忆和简报骨架，直接给出一份中文研究分析。\n\
         重要约束：\n\
@@ -974,7 +1156,7 @@ fn build_research_analysis_prompt(
             config.habit_notes.trim()
         },
         config.decision_framework.trim(),
-        fund_quote_text = fund_quote_text,
+        fund_quote_text = format!("{fund_quote_text}\n\n新闻/公告源：\n{news_text}"),
     )
 }
 
@@ -1017,6 +1199,80 @@ async fn fetch_research_quotes(
     quotes.extend(fetch_stock_like_quotes(&config.watchlist, allow_network, stamp).await);
     quotes.extend(fetch_fund_quotes(&config.funds, allow_network, stamp).await);
     quotes
+}
+
+async fn fetch_research_news(
+    config: &ResearchConfig,
+    allow_network: bool,
+) -> Vec<ResearchNewsItem> {
+    let mut items = Vec::new();
+    let mut seeds = Vec::new();
+    seeds.extend(config.watchlist.iter().take(4).cloned());
+    seeds.extend(config.funds.iter().take(3).cloned());
+    seeds.extend(config.themes.iter().take(3).cloned());
+
+    if seeds.is_empty() {
+        return items;
+    }
+
+    if !allow_network {
+        return seeds
+            .into_iter()
+            .map(|seed| ResearchNewsItem {
+                source: "本地占位".to_string(),
+                title: format!("{seed} 的新闻/公告源待联网刷新"),
+                url: build_eastmoney_search_url(&seed),
+                related_asset: Some(seed),
+                published_at: None,
+                summary: Some("当前已关闭网络访问。".to_string()),
+            })
+            .collect();
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .user_agent("PenguinPal Assistant/0.2.0")
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return seeds
+                .into_iter()
+                .map(|seed| ResearchNewsItem {
+                    source: "搜索入口".to_string(),
+                    title: format!("{seed} 新闻/公告检索入口"),
+                    url: build_eastmoney_search_url(&seed),
+                    related_asset: Some(seed),
+                    published_at: None,
+                    summary: Some(format!("创建新闻客户端失败: {error}")),
+                })
+                .collect();
+        }
+    };
+
+    for seed in seeds {
+        items.push(ResearchNewsItem {
+            source: "东方财富搜索".to_string(),
+            title: format!("{seed} 新闻/公告检索入口"),
+            url: build_eastmoney_search_url(&seed),
+            related_asset: Some(seed.clone()),
+            published_at: None,
+            summary: None,
+        });
+
+        if let Ok(Some(asset)) = resolve_stock_like_name(&client, &seed).await {
+            items.push(ResearchNewsItem {
+                source: "东方财富个股资料".to_string(),
+                title: format!("{} ({}) 公司资讯与公告", asset.name, asset.code),
+                url: build_eastmoney_quote_url(&asset),
+                related_asset: Some(asset.name),
+                published_at: None,
+                summary: Some("打开后可复查最新公告、研报和资讯。".to_string()),
+            });
+        }
+    }
+
+    dedupe_news_items(items)
 }
 
 async fn fetch_fund_quotes(
@@ -1489,6 +1745,53 @@ fn resolve_fund_name(label: &str, catalog: &[FundCatalogEntry]) -> Option<Resolv
             name: entry.name.clone(),
             asset_type: entry.asset_type.clone(),
         })
+}
+
+fn build_eastmoney_search_url(keyword: &str) -> String {
+    format!(
+        "https://so.eastmoney.com/web/s?keyword={}",
+        percent_encode(keyword)
+    )
+}
+
+fn build_eastmoney_quote_url(asset: &ResolvedResearchAsset) -> String {
+    if let Some(secid) = asset.secid.as_deref() {
+        let mut parts = secid.split('.');
+        let market = parts.next().unwrap_or_default();
+        let code = parts.next().unwrap_or(asset.code.as_str());
+        let prefix = if market == "1" { "SH" } else { "SZ" };
+        format!("https://quote.eastmoney.com/{prefix}{code}.html")
+    } else {
+        build_eastmoney_search_url(&asset.name)
+    }
+}
+
+fn dedupe_news_items(items: Vec<ResearchNewsItem>) -> Vec<ResearchNewsItem> {
+    let mut deduped = Vec::new();
+    for item in items {
+        if deduped
+            .iter()
+            .any(|existing: &ResearchNewsItem| existing.url == item.url && existing.title == item.title)
+        {
+            continue;
+        }
+        deduped.push(item);
+    }
+    deduped.truncate(12);
+    deduped
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            b' ' => vec!['+'],
+            _ => format!("%{byte:02X}").chars().collect::<Vec<_>>(),
+        })
+        .collect()
 }
 
 fn extract_cn_security_code(raw: &str) -> Option<String> {

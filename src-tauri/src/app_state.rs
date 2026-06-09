@@ -420,6 +420,7 @@ pub struct AssistantSnapshot {
     pub ai_constraints: AiConstraintProfile,
     /// Shell Agent 权限设置
     pub shell_permissions: ShellPermissionSettings,
+    pub agent_roadmap: AgentRoadmapConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -468,6 +469,8 @@ pub struct ProviderConfigInput {
     /// Shell Agent 权限设置
     #[serde(default)]
     pub shell_permissions: ShellPermissionSettings,
+    #[serde(default)]
+    pub agent_roadmap: AgentRoadmapConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -561,6 +564,126 @@ pub struct ResearchRuntimeStatus {
     pub last_startup_popup_day: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRoadmapConfig {
+    #[serde(default)]
+    pub plugin_tools: PluginToolsConfig,
+    #[serde(default)]
+    pub document_memory: DocumentMemoryConfig,
+    #[serde(default)]
+    pub browser_automation: BrowserAutomationConfig,
+    #[serde(default)]
+    pub local_voice_loop: LocalVoiceLoopConfig,
+}
+
+impl Default for AgentRoadmapConfig {
+    fn default() -> Self {
+        Self {
+            plugin_tools: PluginToolsConfig::default(),
+            document_memory: DocumentMemoryConfig::default(),
+            browser_automation: BrowserAutomationConfig::default(),
+            local_voice_loop: LocalVoiceLoopConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mcp_gateway_enabled: bool,
+    #[serde(default)]
+    pub tool_dirs: Vec<String>,
+    #[serde(default = "default_true")]
+    pub require_confirmation: bool,
+}
+
+impl Default for PluginToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mcp_gateway_enabled: false,
+            tool_dirs: Vec::new(),
+            require_confirmation: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentMemoryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_summarize: bool,
+    #[serde(default = "default_true")]
+    pub write_to_long_term_memory: bool,
+    #[serde(default)]
+    pub watched_dirs: Vec<String>,
+}
+
+impl Default for DocumentMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_summarize: true,
+            write_to_long_term_memory: true,
+            watched_dirs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAutomationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub require_confirmation: bool,
+    #[serde(default)]
+    pub allow_research_fetch: bool,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+}
+
+impl Default for BrowserAutomationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_confirmation: true,
+            allow_research_fetch: false,
+            allowed_domains: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalVoiceLoopConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub local_tts_enabled: bool,
+    #[serde(default)]
+    pub offline_llm_fallback: bool,
+    #[serde(default = "default_voice_wake_phrase")]
+    pub wake_phrase: String,
+}
+
+impl Default for LocalVoiceLoopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            local_tts_enabled: false,
+            offline_llm_fallback: false,
+            wake_phrase: default_voice_wake_phrase(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatResponse {
@@ -639,6 +762,7 @@ pub struct RuntimeState {
     pub pending_action_approvals: Vec<ActionApprovalRequest>,
     /// Shell Agent 权限设置
     pub shell_permissions: ShellPermissionSettings,
+    pub agent_roadmap: AgentRoadmapConfig,
     /// Shell Agent 待确认的命令（会话级别，不持久化）
     pub pending_shell_command: Option<PendingShellCommand>,
 }
@@ -731,6 +855,7 @@ impl Default for RuntimeState {
             pending_oauth: None,
             pending_action_approvals: vec![],
             shell_permissions: ShellPermissionSettings::default(),
+            agent_roadmap: AgentRoadmapConfig::default(),
             pending_shell_command: None,
         }
     }
@@ -796,6 +921,7 @@ impl RuntimeState {
             audio_profile,
             ai_constraints,
             shell_permissions: self.shell_permissions.clone(),
+            agent_roadmap: self.agent_roadmap.clone(),
         }
     }
 }
@@ -831,6 +957,8 @@ struct PersistedState {
     /// Shell Agent 权限设置
     #[serde(default)]
     shell_permissions: ShellPermissionSettings,
+    #[serde(default)]
+    agent_roadmap: AgentRoadmapConfig,
 }
 
 fn default_vision_timeout_ms() -> u64 {
@@ -839,6 +967,10 @@ fn default_vision_timeout_ms() -> u64 {
 
 fn default_push_to_talk_shortcut() -> String {
     "CommandOrControl+Alt+Space".to_string()
+}
+
+fn default_voice_wake_phrase() -> String {
+    "小企鹅".to_string()
 }
 
 fn default_research_themes() -> Vec<String> {
@@ -964,6 +1096,7 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         pending_oauth: None,
         pending_action_approvals: vec![],
         shell_permissions: persisted.shell_permissions,
+        agent_roadmap: persisted.agent_roadmap,
         pending_shell_command: None,
     };
 
@@ -1046,6 +1179,7 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
         permission_level: runtime.permission_level.min(2),
         audit_trail: runtime.audit_trail.clone(),
         shell_permissions: runtime.shell_permissions.clone(),
+        agent_roadmap: runtime.agent_roadmap.clone(),
     };
 
     let content = serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?;

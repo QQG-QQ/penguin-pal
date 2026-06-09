@@ -2352,11 +2352,42 @@ fn build_auto_completion_summary(task: &AgentTaskRun) -> AgentLoopSummary {
         goal: task.goal.clone(),
         steps_taken: task.recent_steps.len(),
         final_status: AgentTaskStatus::Completed,
+        tools_used: summarize_task_tools(task),
+        warnings: summarize_task_warnings(task),
         failure_stage: None,
         failure_reason_code: FailureReasonCode::None,
         used_probe: task.used_probe,
         used_retry: task.used_retry,
     }
+}
+
+fn summarize_task_tools(task: &AgentTaskRun) -> Vec<String> {
+    let mut tools = Vec::new();
+    for step in &task.recent_steps {
+        let Some(tool) = step.tool.as_ref() else {
+            continue;
+        };
+        if !tools.iter().any(|existing| existing == tool) {
+            tools.push(tool.clone());
+        }
+    }
+    tools
+}
+
+fn summarize_task_warnings(task: &AgentTaskRun) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if task.used_retry {
+        warnings.push("任务过程中触发过重试。".to_string());
+    }
+    if task.used_probe {
+        warnings.push("任务过程中使用过探测/观察步骤。".to_string());
+    }
+    for step in task.recent_steps.iter().filter(|step| step.outcome == "failure").take(3) {
+        if let Some(detail) = step.detail.as_ref().filter(|value| !value.trim().is_empty()) {
+            warnings.push(detail.clone());
+        }
+    }
+    warnings
 }
 
 async fn confirm_loop_pending(app: &AppHandle, pending_id: &str) -> Result<ToolInvokeResponse, String> {
@@ -2722,6 +2753,8 @@ fn fail_result(route: AgentRoute, provider_label: &str, task: &AgentTaskRun, rea
         goal: task.goal.clone(),
         steps_taken: task.recent_steps.len(),
         final_status: AgentTaskStatus::Failed,
+        tools_used: summarize_task_tools(task),
+        warnings: summarize_task_warnings(task),
         failure_stage: task.failure_stage.clone(),
         failure_reason_code: task.failure_reason_code.clone(),
         used_probe: task.used_probe,

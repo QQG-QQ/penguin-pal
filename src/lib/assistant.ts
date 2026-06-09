@@ -7,7 +7,9 @@ import type {
   AssistantWindowView,
   AiConstraintProfile,
   ActionExecutionResult,
+  AgentRoadmapStatus,
   AssistantSnapshot,
+  BrowserAutomationTask,
   BubbleLayoutMetrics,
   BubbleWindowState,
   ChatMessage,
@@ -17,7 +19,10 @@ import type {
   ControlPendingRequest,
   ControlServiceStatus,
   ControlToolInvokeResponse,
+  DocumentImportResult,
+  DocumentMemoryRecord,
   DownloadProgress,
+  HealthCheckReport,
   ManagedMemoryKind,
   MemoryManagementSnapshot,
   ModelInfo,
@@ -25,6 +30,7 @@ import type {
   OAuthState,
   ProviderConfigInput,
   ProviderKind,
+  PluginToolScanResult,
   RecordingState,
   ResearchBriefSnapshot,
   ReplyHistoryEntry,
@@ -208,6 +214,33 @@ const fallbackVisionStatus = (
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const now = () => Date.now()
 
+const defaultAgentRoadmapConfig = () => ({
+  pluginTools: {
+    enabled: false,
+    mcpGatewayEnabled: false,
+    toolDirs: [],
+    requireConfirmation: true
+  },
+  documentMemory: {
+    enabled: false,
+    autoSummarize: true,
+    writeToLongTermMemory: true,
+    watchedDirs: []
+  },
+  browserAutomation: {
+    enabled: false,
+    requireConfirmation: true,
+    allowResearchFetch: false,
+    allowedDomains: []
+  },
+  localVoiceLoop: {
+    enabled: false,
+    localTtsEnabled: false,
+    offlineLlmFallback: false,
+    wakePhrase: '小企鹅'
+  }
+})
+
 const fallbackMessage = (role: ChatMessage['role'], content: string): ChatMessage => ({
   id: `${role}-${now()}`,
   role,
@@ -319,7 +352,8 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
     ]
   },
   aiConstraints: defaultConstraintsProfile(),
-  shellPermissions: defaultShellPermissions()
+  shellPermissions: defaultShellPermissions(),
+  agentRoadmap: defaultAgentRoadmapConfig()
 })
 
 let fallbackSnapshot = buildFallbackSnapshot()
@@ -785,6 +819,48 @@ const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
   stableRecords: [],
   candidateRecords: [],
   conflicts: []
+})
+
+const emptyHealthCheckReport = (): HealthCheckReport => ({
+  generatedAt: Date.now(),
+  overallStatus: 'warning',
+  items: [
+    {
+      id: 'runtime',
+      title: '桌面运行时',
+      status: 'warning',
+      severity: 'watch',
+      detail: '当前不是 Tauri 桌面运行时，无法执行本地健康检查。'
+    }
+  ]
+})
+
+const emptyAgentRoadmapStatus = (): AgentRoadmapStatus => ({
+  generatedAt: Date.now(),
+  pluginTools: {
+    enabled: false,
+    status: 'disabled',
+    summary: '插件/MCP 工具层未启用。',
+    detail: []
+  },
+  documentMemory: {
+    enabled: false,
+    status: 'disabled',
+    summary: '文档导入知识库未启用。',
+    detail: []
+  },
+  browserAutomation: {
+    enabled: false,
+    status: 'disabled',
+    summary: '浏览器自动化入口未启用。',
+    detail: []
+  },
+  localVoiceLoop: {
+    enabled: false,
+    status: 'disabled',
+    summary: '本地语音闭环未启用。',
+    detail: []
+  }
 })
 
 const normalizeControlResponseMessage = (payload: unknown) => {
@@ -1576,6 +1652,107 @@ export const resolveMemoryConflict = async (
   }
 }
 
+export const runMemoryMaintenance = async (): Promise<MemoryManagementSnapshot> => {
+  try {
+    return await safeInvoke<MemoryManagementSnapshot>('run_memory_maintenance')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return emptyMemoryManagementSnapshot()
+  }
+}
+
+export const exportMemoryBackup = async (): Promise<string> => {
+  try {
+    return await safeInvoke<string>('export_memory_backup')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return JSON.stringify(emptyMemoryManagementSnapshot(), null, 2)
+  }
+}
+
+export const importMemoryBackup = async (
+  backupJson: string
+): Promise<MemoryManagementSnapshot> => {
+  try {
+    return await safeInvoke<MemoryManagementSnapshot>('import_memory_backup', { backupJson })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('导入记忆备份需要桌面运行时')
+  }
+}
+
+export const runHealthCheck = async (): Promise<HealthCheckReport> => {
+  try {
+    return await safeInvoke<HealthCheckReport>('run_health_check')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return emptyHealthCheckReport()
+  }
+}
+
+export const getAgentRoadmapStatus = async (): Promise<AgentRoadmapStatus> => {
+  try {
+    return await safeInvoke<AgentRoadmapStatus>('get_agent_roadmap_status')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return emptyAgentRoadmapStatus()
+  }
+}
+
+export const scanPluginTools = async (): Promise<PluginToolScanResult> => {
+  try {
+    return await safeInvoke<PluginToolScanResult>('scan_plugin_tools')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return { scannedAt: Date.now(), directories: [], tools: [], warnings: ['桌面运行时不可用。'] }
+  }
+}
+
+export const listDocumentMemory = async (): Promise<DocumentMemoryRecord[]> => {
+  try {
+    return await safeInvoke<DocumentMemoryRecord[]>('list_document_memory')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return []
+  }
+}
+
+export const importDocumentMemory = async (
+  title: string,
+  content: string
+): Promise<DocumentImportResult> => {
+  try {
+    return await safeInvoke<DocumentImportResult>('import_document_memory', { title, content })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('导入文档知识需要桌面运行时')
+  }
+}
+
+export const listBrowserAutomationTasks = async (): Promise<BrowserAutomationTask[]> => {
+  try {
+    return await safeInvoke<BrowserAutomationTask[]>('list_browser_automation_tasks')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return []
+  }
+}
+
+export const createBrowserAutomationTask = async (
+  goal: string,
+  url?: string | null
+): Promise<BrowserAutomationTask> => {
+  try {
+    return await safeInvoke<BrowserAutomationTask>('create_browser_automation_task', {
+      goal,
+      url: url ?? null
+    })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('创建浏览器自动化任务需要桌面运行时')
+  }
+}
+
 export const clearTodayReplyHistory = async (): Promise<ReplyHistoryEntry[]> => {
   try {
     return await safeInvoke<ReplyHistoryEntry[]>('clear_today_reply_history')
@@ -1896,6 +2073,7 @@ export const getResearchBriefSnapshot = async (): Promise<ResearchBriefSnapshot>
       sections: [],
       alerts: [],
       fundQuotes: [],
+      newsItems: [],
       memoryHints: [],
       alertFingerprint: '',
       hasUpdates: false,

@@ -4,17 +4,22 @@ import ControlPanel from './ControlPanel.vue'
 import { presetModelCatalog } from '../lib/modelCatalog'
 import type {
   ArchiveRecallPreview,
+  AgentRoadmapStatus,
   AppUpdateStatus,
   AiConstraintProfile,
+  BrowserAutomationTask,
   CodexCliStatus,
   DesktopAction,
+  DocumentMemoryRecord,
   DownloadProgress,
+  HealthCheckReport,
   ManagedMemoryKind,
   MemoryConflictGroup,
   MemoryManagementSnapshot,
   ManagedMemoryRecord,
   ProviderConfigInput,
   ProviderKind,
+  PluginToolScanResult,
   ReplyHistoryEntry,
   VoiceInputMode,
   VisionChannelKind,
@@ -41,6 +46,14 @@ const props = defineProps<{
   todayReplyHistory: ReplyHistoryEntry[]
   memoryDashboard: MemoryManagementSnapshot
   memoryBusy: boolean
+  memoryBackupText: string
+  healthReport: HealthCheckReport
+  healthBusy: boolean
+  agentRoadmapStatus: AgentRoadmapStatus
+  agentRoadmapBusy: boolean
+  pluginToolScan: PluginToolScanResult
+  documentMemoryRecords: DocumentMemoryRecord[]
+  browserAutomationTasks: BrowserAutomationTask[]
   archiveRecallPreview: ArchiveRecallPreview
   archiveRecallBusy: boolean
   whisperStatus: WhisperStatus
@@ -59,6 +72,14 @@ const emit = defineEmits<{
   appUpdateOpen: []
   openResearch: []
   memoryRefresh: []
+  memoryMaintain: []
+  memoryExport: []
+  memoryImport: [backupJson: string]
+  healthCheck: []
+  agentRoadmapRefresh: []
+  pluginToolScan: []
+  documentImport: [payload: { title: string; content: string }]
+  browserTaskCreate: [payload: { goal: string; url: string }]
   archiveRecallSearch: [query: string]
   memoryDelete: [kind: ManagedMemoryKind, id: string]
   memoryPromote: [id: string]
@@ -74,7 +95,21 @@ const emit = defineEmits<{
 const cloneDraft = (value: ProviderConfigInput): ProviderConfigInput =>
   JSON.parse(JSON.stringify(value)) as ProviderConfigInput
 
-const localDraft = ref<ProviderConfigInput>(cloneDraft(props.draft))
+const ensureAgentRoadmapDraft = (draft: ProviderConfigInput) => {
+  draft.agentRoadmap ??= {
+    pluginTools: { enabled: false, mcpGatewayEnabled: false, toolDirs: [], requireConfirmation: true },
+    documentMemory: { enabled: false, autoSummarize: true, writeToLongTermMemory: true, watchedDirs: [] },
+    browserAutomation: { enabled: false, requireConfirmation: true, allowResearchFetch: false, allowedDomains: [] },
+    localVoiceLoop: { enabled: false, localTtsEnabled: false, offlineLlmFallback: false, wakePhrase: '小企鹅' }
+  }
+  draft.agentRoadmap.pluginTools ??= { enabled: false, mcpGatewayEnabled: false, toolDirs: [], requireConfirmation: true }
+  draft.agentRoadmap.documentMemory ??= { enabled: false, autoSummarize: true, writeToLongTermMemory: true, watchedDirs: [] }
+  draft.agentRoadmap.browserAutomation ??= { enabled: false, requireConfirmation: true, allowResearchFetch: false, allowedDomains: [] }
+  draft.agentRoadmap.localVoiceLoop ??= { enabled: false, localTtsEnabled: false, offlineLlmFallback: false, wakePhrase: '小企鹅' }
+  return draft
+}
+
+const localDraft = ref<ProviderConfigInput>(ensureAgentRoadmapDraft(cloneDraft(props.draft)))
 
 const providerOptions: Array<{ label: string; value: ProviderKind }> = [
   { label: 'Codex CLI', value: 'codexCli' },
@@ -110,6 +145,11 @@ const memoryPanelOpen = ref<Record<MemoryPanelKey, boolean>>({
   conflicts: false
 })
 const archiveRecallQuery = ref('')
+const memoryBackupDraft = ref(props.memoryBackupText)
+const documentImportTitle = ref('')
+const documentImportContent = ref('')
+const browserTaskGoal = ref('')
+const browserTaskUrl = ref('')
 
 const modifierOrder = ['CommandOrControl', 'Alt', 'Shift']
 
@@ -137,6 +177,27 @@ const researchThemesText = computed({
   get: () => localDraft.value.research.themes.join('\n'),
   set: (value: string) => {
     localDraft.value.research.themes = normalizeResearchList(value)
+  }
+})
+
+const pluginToolDirsText = computed({
+  get: () => localDraft.value.agentRoadmap.pluginTools.toolDirs.join('\n'),
+  set: (value: string) => {
+    localDraft.value.agentRoadmap.pluginTools.toolDirs = normalizeResearchList(value)
+  }
+})
+
+const documentWatchedDirsText = computed({
+  get: () => localDraft.value.agentRoadmap.documentMemory.watchedDirs.join('\n'),
+  set: (value: string) => {
+    localDraft.value.agentRoadmap.documentMemory.watchedDirs = normalizeResearchList(value)
+  }
+})
+
+const browserAllowedDomainsText = computed({
+  get: () => localDraft.value.agentRoadmap.browserAutomation.allowedDomains.join('\n'),
+  set: (value: string) => {
+    localDraft.value.agentRoadmap.browserAutomation.allowedDomains = normalizeResearchList(value)
   }
 })
 
@@ -226,6 +287,20 @@ const submitArchiveRecallSearch = () => {
 const clearArchiveRecallSearch = () => {
   archiveRecallQuery.value = ''
   emit('archiveRecallSearch', '')
+}
+
+const submitDocumentImport = () => {
+  emit('documentImport', {
+    title: documentImportTitle.value,
+    content: documentImportContent.value
+  })
+}
+
+const submitBrowserTask = () => {
+  emit('browserTaskCreate', {
+    goal: browserTaskGoal.value,
+    url: browserTaskUrl.value
+  })
 }
 
 const commitShortcutCapture = (value: string) => {
@@ -353,11 +428,18 @@ watch(
   () => props.draft,
   (value) => {
     stopShortcutCapture()
-    localDraft.value = cloneDraft(value)
+    localDraft.value = ensureAgentRoadmapDraft(cloneDraft(value))
     selectedPreset.value = 'custom'
     applyProviderRules()
   },
   { deep: true, immediate: true }
+)
+
+watch(
+  () => props.memoryBackupText,
+  (value) => {
+    memoryBackupDraft.value = value
+  }
 )
 
 watch(
@@ -773,6 +855,158 @@ onBeforeUnmount(() => {
           <p v-if="localDraft.visionChannel.kind === 'disabled' || !localDraft.visionChannel.enabled">
             当前不会做真正图像分析，只会保留 UIA 和必要时的截图工件。
           </p>
+        </div>
+      </section>
+
+      <section class="roadmap-shell full-row">
+        <div class="memory-header">
+          <div>
+            <strong>Agent 落地路线</strong>
+            <p>把插件工具、文档知识库、浏览器自动化和本地语音闭环先接成可配置、可诊断的能力骨架。</p>
+          </div>
+          <button
+            type="button"
+            class="ghost-button"
+            :disabled="agentRoadmapBusy"
+            @click="emit('agentRoadmapRefresh')"
+          >
+            {{ agentRoadmapBusy ? '刷新中...' : '刷新路线状态' }}
+          </button>
+        </div>
+
+        <div class="roadmap-status-grid">
+          <article
+            v-for="item in [
+              agentRoadmapStatus.pluginTools,
+              agentRoadmapStatus.documentMemory,
+              agentRoadmapStatus.browserAutomation,
+              agentRoadmapStatus.localVoiceLoop
+            ]"
+            :key="item.summary"
+            class="health-item"
+            :data-status="item.enabled ? 'ok' : 'warning'"
+          >
+            <div class="constraint-item-top">
+              <strong>{{ item.status }}</strong>
+              <span class="constraint-status">{{ item.enabled ? 'enabled' : 'disabled' }}</span>
+            </div>
+            <p>{{ item.summary }}</p>
+            <p v-for="detail in item.detail" :key="detail">{{ detail }}</p>
+          </article>
+        </div>
+
+        <div class="roadmap-grid">
+          <article class="roadmap-panel">
+            <h3>插件 / MCP 工具层</h3>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.pluginTools.enabled" type="checkbox" />
+              启用插件工具层
+            </label>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.pluginTools.mcpGatewayEnabled" type="checkbox" />
+              预留 MCP 网关
+            </label>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.pluginTools.requireConfirmation" type="checkbox" />
+              工具调用需要确认
+            </label>
+            <label class="field">
+              <span>工具目录</span>
+              <textarea v-model="pluginToolDirsText" rows="4" placeholder="每行一个本地工具目录"></textarea>
+            </label>
+          </article>
+
+          <article class="roadmap-panel">
+            <h3>文档导入知识库</h3>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.documentMemory.enabled" type="checkbox" />
+              启用文档导入
+            </label>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.documentMemory.autoSummarize" type="checkbox" />
+              预留自动摘要
+            </label>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.documentMemory.writeToLongTermMemory" type="checkbox" />
+              写入长期记忆
+            </label>
+            <label class="field">
+              <span>监听目录</span>
+              <textarea v-model="documentWatchedDirsText" rows="3" placeholder="每行一个文档目录"></textarea>
+            </label>
+            <label class="field">
+              <span>导入标题</span>
+              <input v-model="documentImportTitle" type="text" placeholder="例如：基金研报摘录" />
+            </label>
+            <label class="field">
+              <span>Markdown 文本</span>
+              <textarea v-model="documentImportContent" rows="5" placeholder="粘贴 MarkItDown 或手动整理后的 Markdown 文本"></textarea>
+            </label>
+            <button
+              type="button"
+              class="ghost-button"
+              :disabled="agentRoadmapBusy || !documentImportContent.trim()"
+              @click="submitDocumentImport"
+            >
+              导入到知识库
+            </button>
+          </article>
+
+          <article class="roadmap-panel">
+            <h3>浏览器自动化</h3>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.browserAutomation.enabled" type="checkbox" />
+              启用浏览器任务入口
+            </label>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.browserAutomation.requireConfirmation" type="checkbox" />
+              网页操作需要确认
+            </label>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.browserAutomation.allowResearchFetch" type="checkbox" />
+              允许投研网页抓取
+            </label>
+            <label class="field">
+              <span>允许域名</span>
+              <textarea v-model="browserAllowedDomainsText" rows="3" placeholder="eastmoney.com&#10;cninfo.com.cn"></textarea>
+            </label>
+            <label class="field">
+              <span>任务目标</span>
+              <input v-model="browserTaskGoal" type="text" placeholder="例如：打开公告页并整理最近三条公告" />
+            </label>
+            <label class="field">
+              <span>起始 URL</span>
+              <input v-model="browserTaskUrl" type="text" placeholder="可选，例如 https://..." />
+            </label>
+            <button
+              type="button"
+              class="ghost-button"
+              :disabled="agentRoadmapBusy || !browserTaskGoal.trim()"
+              @click="submitBrowserTask"
+            >
+              创建任务草案
+            </button>
+          </article>
+
+          <article class="roadmap-panel">
+            <h3>本地语音闭环</h3>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.localVoiceLoop.enabled" type="checkbox" />
+              启用语音闭环策略
+            </label>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.localVoiceLoop.localTtsEnabled" type="checkbox" />
+              预留本地 TTS
+            </label>
+            <label class="toggle">
+              <input v-model="localDraft.agentRoadmap.localVoiceLoop.offlineLlmFallback" type="checkbox" />
+              预留离线模型兜底
+            </label>
+            <label class="field">
+              <span>唤醒词</span>
+              <input v-model="localDraft.agentRoadmap.localVoiceLoop.wakePhrase" type="text" />
+            </label>
+          </article>
         </div>
       </section>
 
@@ -1315,6 +1549,42 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
+      <section class="health-shell full-row">
+        <div class="memory-header">
+          <div>
+            <strong>自动健康检查</strong>
+            <p>一次性检查 Codex CLI、Whisper、麦克风、本地控制服务、软件更新、投研配置和长期记忆状态。</p>
+          </div>
+          <button
+            type="button"
+            class="ghost-button"
+            :disabled="healthBusy"
+            @click="emit('healthCheck')"
+          >
+            {{ healthBusy ? '诊断中...' : '运行系统诊断' }}
+          </button>
+        </div>
+
+        <div v-if="healthReport.items.length" class="health-grid">
+          <article
+            v-for="item in healthReport.items"
+            :key="item.id"
+            class="health-item"
+            :data-status="item.status"
+          >
+            <div class="constraint-item-top">
+              <strong>{{ item.title }}</strong>
+              <span class="constraint-status">{{ item.status }}</span>
+            </div>
+            <p>{{ item.detail }}</p>
+          </article>
+        </div>
+
+        <div v-else class="memory-empty">
+          还没有运行诊断。点击按钮后，这里会显示每个本地模块的健康状态。
+        </div>
+      </section>
+
       <section class="memory-shell full-row">
         <div class="memory-header">
           <div>
@@ -1328,6 +1598,14 @@ onBeforeUnmount(() => {
             @click="emit('memoryRefresh')"
           >
             {{ memoryBusy ? '刷新中...' : '刷新记忆' }}
+          </button>
+          <button
+            type="button"
+            class="ghost-button"
+            :disabled="memoryBusy"
+            @click="emit('memoryMaintain')"
+          >
+            维护记忆
           </button>
         </div>
 
@@ -1353,6 +1631,39 @@ onBeforeUnmount(() => {
             <span>偏好总量</span>
           </article>
         </div>
+
+        <article class="memory-panel memory-panel-full">
+          <div class="memory-panel-header">
+            <div>
+              <h3>记忆导入 / 导出</h3>
+              <p>导出会生成完整长期记忆 JSON；导入会用备份覆盖当前本地记忆，请先确认来源可信。</p>
+            </div>
+            <div class="memory-inline-actions">
+              <button
+                type="button"
+                class="ghost-button"
+                :disabled="memoryBusy"
+                @click="emit('memoryExport')"
+              >
+                导出记忆
+              </button>
+              <button
+                type="button"
+                class="ghost-button"
+                :disabled="memoryBusy || !memoryBackupDraft.trim()"
+                @click="emit('memoryImport', memoryBackupDraft)"
+              >
+                导入记忆
+              </button>
+            </div>
+          </div>
+          <textarea
+            v-model="memoryBackupDraft"
+            class="memory-backup-textarea"
+            spellcheck="false"
+            placeholder="在这里粘贴记忆备份 JSON，或点击导出后查看当前备份。"
+          ></textarea>
+        </article>
 
         <article class="memory-panel memory-panel-full">
           <div class="memory-panel-header">
@@ -1845,6 +2156,75 @@ textarea {
   background: rgba(12, 42, 57, 0.07);
 }
 
+.health-shell {
+  padding: 18px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.76);
+  display: grid;
+  gap: 14px;
+}
+
+.roadmap-shell {
+  padding: 18px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.76);
+  display: grid;
+  gap: 16px;
+}
+
+.roadmap-status-grid,
+.roadmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.roadmap-panel {
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(17, 59, 79, 0.06);
+  display: grid;
+  gap: 12px;
+}
+
+.roadmap-panel h3 {
+  margin: 0;
+  font-size: 15px;
+  color: #17384b;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.health-item {
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(17, 59, 79, 0.06);
+  border: 1px solid rgba(23, 56, 75, 0.08);
+}
+
+.health-item[data-status='ok'] {
+  background: rgba(229, 249, 238, 0.78);
+}
+
+.health-item[data-status='warning'] {
+  background: rgba(255, 246, 222, 0.84);
+}
+
+.health-item[data-status='error'] {
+  background: rgba(255, 235, 235, 0.86);
+}
+
+.health-item p {
+  margin: 8px 0 0;
+  line-height: 1.5;
+  color: #476775;
+  font-size: 12px;
+}
+
 .history-shell {
   padding: 18px;
   border-radius: 22px;
@@ -1917,6 +2297,20 @@ textarea {
 
 .memory-panel-full {
   grid-column: 1 / -1;
+}
+
+.memory-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.memory-backup-textarea {
+  min-height: 150px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .memory-panel h3 {

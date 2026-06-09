@@ -129,6 +129,98 @@ export interface ShellPermissionSettings {
   durationHours: number
 }
 
+export interface PluginToolsConfig {
+  enabled: boolean
+  mcpGatewayEnabled: boolean
+  toolDirs: string[]
+  requireConfirmation: boolean
+}
+
+export interface DocumentMemoryConfig {
+  enabled: boolean
+  autoSummarize: boolean
+  writeToLongTermMemory: boolean
+  watchedDirs: string[]
+}
+
+export interface BrowserAutomationConfig {
+  enabled: boolean
+  requireConfirmation: boolean
+  allowResearchFetch: boolean
+  allowedDomains: string[]
+}
+
+export interface LocalVoiceLoopConfig {
+  enabled: boolean
+  localTtsEnabled: boolean
+  offlineLlmFallback: boolean
+  wakePhrase: string
+}
+
+export interface AgentRoadmapConfig {
+  pluginTools: PluginToolsConfig
+  documentMemory: DocumentMemoryConfig
+  browserAutomation: BrowserAutomationConfig
+  localVoiceLoop: LocalVoiceLoopConfig
+}
+
+export interface RoadmapCapabilityStatus {
+  enabled: boolean
+  status: string
+  summary: string
+  detail: string[]
+}
+
+export interface AgentRoadmapStatus {
+  generatedAt: number
+  pluginTools: RoadmapCapabilityStatus
+  documentMemory: RoadmapCapabilityStatus
+  browserAutomation: RoadmapCapabilityStatus
+  localVoiceLoop: RoadmapCapabilityStatus
+}
+
+export interface DocumentImportResult {
+  id: string
+  title: string
+  path: string
+  memoryWritten: boolean
+  message: string
+}
+
+export interface DocumentMemoryRecord {
+  id: string
+  title: string
+  path: string
+  importedAt: number
+  sizeBytes: number
+}
+
+export interface BrowserAutomationTask {
+  id: string
+  goal: string
+  url: string | null
+  status: string
+  requiresConfirmation: boolean
+  message: string
+  createdAt: number
+}
+
+export interface PluginToolManifest {
+  id: string
+  name: string
+  path: string
+  kind: string
+  enabled: boolean
+  summary: string
+}
+
+export interface PluginToolScanResult {
+  scannedAt: number
+  directories: string[]
+  tools: PluginToolManifest[]
+  warnings: string[]
+}
+
 export interface ResearchConfig {
   enabled: boolean
   startupPopup: boolean
@@ -157,6 +249,7 @@ export interface AssistantSnapshot {
   audioProfile: AudioProfile
   aiConstraints: AiConstraintProfile
   shellPermissions: ShellPermissionSettings
+  agentRoadmap: AgentRoadmapConfig
 }
 
 export interface ProviderConfigInput {
@@ -186,6 +279,7 @@ export interface ProviderConfigInput {
   clearOAuthToken?: boolean
   visionChannel: VisionChannelConfigInput
   shellPermissions: ShellPermissionSettings
+  agentRoadmap: AgentRoadmapConfig
 }
 
 export interface VisionChannelConfigInput {
@@ -220,6 +314,19 @@ export interface AgentMessageMeta {
   plannedTools: string[]
   pendingRequest?: ControlPendingRequest | null
   task?: AgentTaskProgress | null
+  summary?: AgentLoopSummary | null
+}
+
+export interface AgentLoopSummary {
+  goal: string
+  stepsTaken: number
+  finalStatus: AgentTaskStatus
+  toolsUsed: string[]
+  warnings: string[]
+  failureStage?: string | null
+  failureReasonCode: string
+  usedProbe: boolean
+  usedRetry: boolean
 }
 
 export interface ChatResponse {
@@ -346,6 +453,20 @@ export interface MemoryManagementSnapshot {
   stableRecords: ManagedMemoryRecord[]
   candidateRecords: ManagedMemoryRecord[]
   conflicts: MemoryConflictGroup[]
+}
+
+export interface HealthCheckItem {
+  id: string
+  title: string
+  status: 'ok' | 'warning' | 'error' | string
+  severity: 'info' | 'watch' | 'urgent' | string
+  detail: string
+}
+
+export interface HealthCheckReport {
+  generatedAt: number
+  overallStatus: 'ok' | 'warning' | 'error' | string
+  items: HealthCheckItem[]
 }
 
 export interface ControlServiceStatus {
@@ -512,6 +633,15 @@ export interface ResearchFundQuote {
   note?: string | null
 }
 
+export interface ResearchNewsItem {
+  source: string
+  title: string
+  url: string
+  relatedAsset?: string | null
+  publishedAt?: string | null
+  summary?: string | null
+}
+
 export interface ResearchBriefSnapshot {
   generatedAt: number
   dayKey: string
@@ -521,6 +651,7 @@ export interface ResearchBriefSnapshot {
   sections: ResearchBriefSection[]
   alerts: ResearchBriefAlert[]
   fundQuotes: ResearchFundQuote[]
+  newsItems: ResearchNewsItem[]
   memoryHints: string[]
   alertFingerprint: string
   hasUpdates: boolean

@@ -764,3 +764,16 @@ pub struct MemoryManagementSnapshot {
     pub candidate_records: Vec<ManagedMemoryRecord>,
     pub conflicts: Vec<MemoryConflictGroup>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryBackupSnapshot {
+    pub schema_version: String,
+    pub exported_at: u64,
+    pub profile: ProfileMemory,
+    pub episodic: EpisodicMemory,
+    pub procedural: ProceduralMemory,
+    pub policy: PolicyMemory,
+    pub semantic: SemanticMemory,
+    pub meta: MetaMemory,
+}

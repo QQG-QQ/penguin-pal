@@ -49,6 +49,7 @@ pub use types::{
     MemoryManagementStats,
     MemoryConflictGroup,
     MemoryManagementSnapshot,
+    MemoryBackupSnapshot,
     // 辅助类型
     LanguageStyle,
     FrequentPath,

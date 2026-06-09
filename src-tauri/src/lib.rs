@@ -366,6 +366,107 @@ struct BasicCodexCliStatus {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HealthCheckItem {
+    id: String,
+    title: String,
+    status: String,
+    severity: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HealthCheckReport {
+    generated_at: u64,
+    overall_status: String,
+    items: Vec<HealthCheckItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoadmapCapabilityStatus {
+    enabled: bool,
+    status: String,
+    summary: String,
+    detail: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentRoadmapStatus {
+    generated_at: u64,
+    plugin_tools: RoadmapCapabilityStatus,
+    document_memory: RoadmapCapabilityStatus,
+    browser_automation: RoadmapCapabilityStatus,
+    local_voice_loop: RoadmapCapabilityStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentImportResult {
+    id: String,
+    title: String,
+    path: String,
+    memory_written: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentMemoryRecord {
+    id: String,
+    title: String,
+    path: String,
+    imported_at: u64,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredBrowserAutomationTask {
+    id: String,
+    goal: String,
+    url: Option<String>,
+    status: String,
+    requires_confirmation: bool,
+    message: String,
+    created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserAutomationTask {
+    id: String,
+    goal: String,
+    url: Option<String>,
+    status: String,
+    requires_confirmation: bool,
+    message: String,
+    created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginToolManifest {
+    id: String,
+    name: String,
+    path: String,
+    kind: String,
+    enabled: bool,
+    summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginToolScanResult {
+    scanned_at: u64,
+    directories: Vec<String>,
+    tools: Vec<PluginToolManifest>,
+    warnings: Vec<String>,
+}
+
 fn first_non_empty_output(output: &std::process::Output) -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !stdout.is_empty() {
@@ -933,6 +1034,45 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn normalize_string_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || normalized.iter().any(|item: &String| item == trimmed) {
+            continue;
+        }
+        normalized.push(trimmed.to_string());
+    }
+    normalized
+}
+
+fn normalize_agent_roadmap_config(
+    mut config: app_state::AgentRoadmapConfig,
+) -> app_state::AgentRoadmapConfig {
+    config.plugin_tools.tool_dirs = normalize_string_list(config.plugin_tools.tool_dirs);
+    config.document_memory.watched_dirs =
+        normalize_string_list(config.document_memory.watched_dirs);
+    config.browser_automation.allowed_domains =
+        normalize_string_list(config.browser_automation.allowed_domains)
+            .into_iter()
+            .map(|domain| {
+                domain
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_matches('/')
+                    .to_lowercase()
+            })
+            .filter(|domain| !domain.is_empty())
+            .collect();
+    if config.local_voice_loop.wake_phrase.trim().is_empty() {
+        config.local_voice_loop.wake_phrase = "小企鹅".to_string();
+    } else {
+        config.local_voice_loop.wake_phrase =
+            config.local_voice_loop.wake_phrase.trim().to_string();
+    }
+    config
+}
+
 fn parse_scopes(value: &str) -> Vec<String> {
     let mut scopes = Vec::new();
     for item in value
@@ -1086,6 +1226,7 @@ fn save_provider_config(
         runtime.vision_api_key.as_ref(),
     );
     runtime.shell_permissions = input.shell_permissions.clone();
+    runtime.agent_roadmap = normalize_agent_roadmap_config(input.agent_roadmap);
 
     let oauth_identity_changed = previous_provider_kind != runtime.provider.kind
         || previous_auth_mode != runtime.provider.auth_mode
@@ -2561,6 +2702,524 @@ fn resolve_memory_conflict(
 }
 
 #[tauri::command]
+fn run_memory_maintenance(app: AppHandle) -> Result<memory::MemoryManagementSnapshot, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+    let _ = memory_service.run_maintenance();
+    memory_service.management_snapshot()
+}
+
+#[tauri::command]
+fn export_memory_backup(app: AppHandle) -> Result<String, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+    let backup = memory_service.export_backup()?;
+    serde_json::to_string_pretty(&backup).map_err(|error| format!("序列化记忆备份失败: {error}"))
+}
+
+#[tauri::command]
+fn import_memory_backup(
+    app: AppHandle,
+    backup_json: String,
+) -> Result<memory::MemoryManagementSnapshot, String> {
+    let backup = serde_json::from_str::<memory::MemoryBackupSnapshot>(&backup_json)
+        .map_err(|error| format!("解析记忆备份失败: {error}"))?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+    memory_service.import_backup(backup)
+}
+
+fn health_item(
+    id: &str,
+    title: &str,
+    status: &str,
+    severity: &str,
+    detail: impl Into<String>,
+) -> HealthCheckItem {
+    HealthCheckItem {
+        id: id.to_string(),
+        title: title.to_string(),
+        status: status.to_string(),
+        severity: severity.to_string(),
+        detail: detail.into(),
+    }
+}
+
+fn roadmap_status_from_runtime(runtime: &RuntimeState) -> AgentRoadmapStatus {
+    let config = &runtime.agent_roadmap;
+    AgentRoadmapStatus {
+        generated_at: now_millis(),
+        plugin_tools: RoadmapCapabilityStatus {
+            enabled: config.plugin_tools.enabled,
+            status: if config.plugin_tools.enabled { "ready" } else { "disabled" }.to_string(),
+            summary: if config.plugin_tools.enabled {
+                "插件/MCP 工具层已启用，外部工具仍会按权限级别确认。"
+            } else {
+                "插件/MCP 工具层未启用。"
+            }
+            .to_string(),
+            detail: vec![
+                format!("MCP 网关：{}", if config.plugin_tools.mcp_gateway_enabled { "启用" } else { "关闭" }),
+                format!("工具目录：{} 个", config.plugin_tools.tool_dirs.len()),
+            ],
+        },
+        document_memory: RoadmapCapabilityStatus {
+            enabled: config.document_memory.enabled,
+            status: if config.document_memory.enabled { "ready" } else { "disabled" }.to_string(),
+            summary: if config.document_memory.enabled {
+                "文档导入知识库已启用，可把 Markdown 文本写入本地文档库和长期记忆。"
+            } else {
+                "文档导入知识库未启用。"
+            }
+            .to_string(),
+            detail: vec![
+                format!("监听目录：{} 个", config.document_memory.watched_dirs.len()),
+                format!("写入长期记忆：{}", if config.document_memory.write_to_long_term_memory { "启用" } else { "关闭" }),
+            ],
+        },
+        browser_automation: RoadmapCapabilityStatus {
+            enabled: config.browser_automation.enabled,
+            status: if config.browser_automation.enabled { "ready" } else { "disabled" }.to_string(),
+            summary: if config.browser_automation.enabled {
+                "浏览器自动化入口已启用，高风险网页操作会进入确认流。"
+            } else {
+                "浏览器自动化入口未启用。"
+            }
+            .to_string(),
+            detail: vec![
+                format!("投研网页抓取：{}", if config.browser_automation.allow_research_fetch { "允许" } else { "关闭" }),
+                format!("允许域名：{} 个", config.browser_automation.allowed_domains.len()),
+            ],
+        },
+        local_voice_loop: RoadmapCapabilityStatus {
+            enabled: config.local_voice_loop.enabled,
+            status: if config.local_voice_loop.enabled { "ready" } else { "disabled" }.to_string(),
+            summary: if config.local_voice_loop.enabled {
+                "本地语音闭环已启用，可与 Whisper 输入和本地语音回复策略联动。"
+            } else {
+                "本地语音闭环未启用。"
+            }
+            .to_string(),
+            detail: vec![
+                format!("唤醒词：{}", config.local_voice_loop.wake_phrase),
+                format!("本地 TTS：{}", if config.local_voice_loop.local_tts_enabled { "启用" } else { "关闭" }),
+            ],
+        },
+    }
+}
+
+#[tauri::command]
+fn get_agent_roadmap_status(
+    state: State<'_, Mutex<RuntimeState>>,
+) -> Result<AgentRoadmapStatus, String> {
+    let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+    Ok(roadmap_status_from_runtime(&runtime))
+}
+
+fn agent_roadmap_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?
+        .join("agent-roadmap");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("创建 Agent 路线目录失败: {error}"))?;
+    Ok(dir)
+}
+
+fn document_memory_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = agent_roadmap_dir(app)?.join("documents");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("创建文档库目录失败: {error}"))?;
+    Ok(dir)
+}
+
+fn browser_task_queue_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(agent_roadmap_dir(app)?.join("browser-tasks.json"))
+}
+
+fn load_browser_task_queue(app: &AppHandle) -> Result<Vec<StoredBrowserAutomationTask>, String> {
+    let path = browser_task_queue_path(app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<Vec<StoredBrowserAutomationTask>>(&content)
+            .map_err(|error| format!("解析浏览器任务队列失败: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("读取浏览器任务队列失败: {error}")),
+    }
+}
+
+fn save_browser_task_queue(
+    app: &AppHandle,
+    tasks: &[StoredBrowserAutomationTask],
+) -> Result<(), String> {
+    let content = serde_json::to_string_pretty(tasks)
+        .map_err(|error| format!("序列化浏览器任务失败: {error}"))?;
+    std::fs::write(browser_task_queue_path(app)?, content)
+        .map_err(|error| format!("保存浏览器任务队列失败: {error}"))
+}
+
+fn safe_document_filename(title: &str, stamp: u64) -> String {
+    let mut name = title
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else if ch.is_whitespace() {
+                '-'
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    name = name.trim_matches(['-', '_', '.']).to_string();
+    if name.is_empty() {
+        name = "document".to_string();
+    }
+    format!("{stamp}-{name}.md")
+}
+
+fn first_markdown_heading(content: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# ").map(str::trim))
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+}
+
+fn plugin_manifest_from_path(path: &std::path::Path) -> Option<PluginToolManifest> {
+    let name = path.file_stem()?.to_string_lossy().to_string();
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let kind = match extension.as_str() {
+        "json" => "manifest",
+        "py" => "python",
+        "ps1" => "powershell",
+        "js" | "ts" => "node",
+        _ => return None,
+    };
+    Some(PluginToolManifest {
+        id: format!("tool-{name}"),
+        name,
+        path: path.to_string_lossy().to_string(),
+        kind: kind.to_string(),
+        enabled: true,
+        summary: format!("从本地工具目录发现 {kind} 工具。"),
+    })
+}
+
+#[tauri::command]
+fn scan_plugin_tools(
+    state: State<'_, Mutex<RuntimeState>>,
+) -> Result<PluginToolScanResult, String> {
+    let runtime = state
+        .lock()
+        .map_err(|_| "助手状态锁定失败".to_string())?
+        .clone();
+    if !runtime.agent_roadmap.plugin_tools.enabled {
+        return Err("请先在设置中启用插件/MCP 工具层。".to_string());
+    }
+
+    let mut tools = Vec::new();
+    let mut warnings = Vec::new();
+    for dir in &runtime.agent_roadmap.plugin_tools.tool_dirs {
+        let path = std::path::PathBuf::from(dir);
+        if !path.is_dir() {
+            warnings.push(format!("工具目录不可用：{dir}"));
+            continue;
+        }
+        match std::fs::read_dir(&path) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    if entry_path.is_file() {
+                        if let Some(tool) = plugin_manifest_from_path(&entry_path) {
+                            tools.push(tool);
+                        }
+                    } else if entry_path.is_dir() {
+                        let manifest = entry_path.join("plugin.json");
+                        if manifest.exists() {
+                            if let Some(tool) = plugin_manifest_from_path(&manifest) {
+                                tools.push(tool);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!("读取工具目录失败：{dir} / {error}")),
+        }
+    }
+
+    Ok(PluginToolScanResult {
+        scanned_at: now_millis(),
+        directories: runtime.agent_roadmap.plugin_tools.tool_dirs,
+        tools,
+        warnings,
+    })
+}
+
+#[tauri::command]
+fn list_document_memory(app: AppHandle) -> Result<Vec<DocumentMemoryRecord>, String> {
+    let dir = document_memory_dir(&app)?;
+    let mut records = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|error| format!("读取文档库失败: {error}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let file_stem = path
+            .file_stem()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| "document".to_string());
+        let imported_at = file_stem
+            .split('-')
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        let title = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| first_markdown_heading(&content))
+            .unwrap_or(file_stem);
+        records.push(DocumentMemoryRecord {
+            id: format!("doc-{imported_at}"),
+            title,
+            path: path.to_string_lossy().to_string(),
+            imported_at,
+            size_bytes: metadata.len(),
+        });
+    }
+    records.sort_by(|left, right| right.imported_at.cmp(&left.imported_at));
+    Ok(records)
+}
+
+#[tauri::command]
+fn import_document_memory(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+    title: String,
+    content: String,
+) -> Result<DocumentImportResult, String> {
+    let runtime = state
+        .lock()
+        .map_err(|_| "助手状态锁定失败".to_string())?
+        .clone();
+    if !runtime.agent_roadmap.document_memory.enabled {
+        return Err("请先在设置中启用文档导入知识库。".to_string());
+    }
+    let trimmed_content = content.trim();
+    if trimmed_content.is_empty() {
+        return Err("文档内容不能为空。".to_string());
+    }
+    let stamp = now_millis();
+    let title = if title.trim().is_empty() {
+        first_markdown_heading(trimmed_content).unwrap_or_else(|| "未命名文档".to_string())
+    } else {
+        title.trim().to_string()
+    };
+    let path = document_memory_dir(&app)?.join(safe_document_filename(&title, stamp));
+    std::fs::write(&path, format!("# {title}\n\n{trimmed_content}\n"))
+        .map_err(|error| format!("写入文档失败: {error}"))?;
+
+    let mut memory_written = false;
+    if runtime.agent_roadmap.document_memory.write_to_long_term_memory {
+        let app_data = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+        let memory_service = crate::memory::MemoryService::new(&app_data);
+        let excerpt = trimmed_content.chars().take(800).collect::<String>();
+        memory_service.store().upsert_semantic_entry(memory::SemanticEntry {
+            id: memory::generate_id("document_memory"),
+            memory_key: format!("document:{}", title.to_lowercase()),
+            topic: title.clone(),
+            knowledge: excerpt,
+            source_type: "document_import".to_string(),
+            confidence: 0.82,
+            created_at: stamp,
+            updated_at: stamp,
+            tags: vec!["document".to_string(), "knowledge_base".to_string()],
+            explicit: true,
+            mention_count: 2,
+            ttl: None,
+            status: memory::MemoryStatus::Active,
+            conflict_group: None,
+        })?;
+        memory_written = true;
+    }
+
+    Ok(DocumentImportResult {
+        id: format!("doc-{stamp}"),
+        title,
+        path: path.to_string_lossy().to_string(),
+        memory_written,
+        message: if memory_written {
+            "文档已保存，并写入长期记忆。".to_string()
+        } else {
+            "文档已保存到本地知识库。".to_string()
+        },
+    })
+}
+
+#[tauri::command]
+fn list_browser_automation_tasks(
+    app: AppHandle,
+) -> Result<Vec<StoredBrowserAutomationTask>, String> {
+    load_browser_task_queue(&app)
+}
+
+#[tauri::command]
+fn create_browser_automation_task(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+    goal: String,
+    url: Option<String>,
+) -> Result<BrowserAutomationTask, String> {
+    let runtime = state
+        .lock()
+        .map_err(|_| "助手状态锁定失败".to_string())?
+        .clone();
+    if !runtime.agent_roadmap.browser_automation.enabled {
+        return Err("请先在设置中启用浏览器自动化入口。".to_string());
+    }
+    let goal = goal.trim().to_string();
+    if goal.is_empty() {
+        return Err("浏览器任务目标不能为空。".to_string());
+    }
+    let created_at = now_millis();
+    let task = StoredBrowserAutomationTask {
+        id: format!("browser-task-{created_at}"),
+        goal,
+        url: normalize_optional(url),
+        status: if runtime.agent_roadmap.browser_automation.require_confirmation {
+            "waitingConfirmation".to_string()
+        } else {
+            "planned".to_string()
+        },
+        requires_confirmation: runtime.agent_roadmap.browser_automation.require_confirmation,
+        message: "已创建浏览器自动化任务草案；下一步可接 browser-use/Playwright 执行器。".to_string(),
+        created_at,
+    };
+    let mut tasks = load_browser_task_queue(&app)?;
+    tasks.insert(0, task.clone());
+    tasks.truncate(50);
+    save_browser_task_queue(&app, &tasks)?;
+    Ok(BrowserAutomationTask {
+        id: task.id,
+        goal: task.goal,
+        url: task.url,
+        status: task.status,
+        requires_confirmation: task.requires_confirmation,
+        message: task.message,
+        created_at: task.created_at,
+    })
+}
+
+fn build_health_check_report(
+    app: &AppHandle,
+    runtime: &RuntimeState,
+    transcriber: Option<&TranscriberService>,
+) -> HealthCheckReport {
+    let mut items = Vec::new();
+    let codex = inspect_codex_cli_status_unverified(app);
+    items.push(if codex.installed && codex.credential_present {
+        health_item("codex", "Codex CLI", "ok", "info", codex.message)
+    } else if codex.installed {
+        health_item("codex", "Codex CLI", "warning", "watch", codex.message)
+    } else {
+        health_item("codex", "Codex CLI", "error", "urgent", codex.message)
+    });
+
+    match transcriber {
+        Some(service) => {
+            let status = service.get_status();
+            items.push(if status.model_loaded {
+                health_item("whisper_model", "Whisper 模型", "ok", "info", "Whisper 模型已加载。")
+            } else {
+                health_item("whisper_model", "Whisper 模型", "warning", "watch", "Whisper 模型未加载。")
+            });
+            items.push(if status.input_ready {
+                health_item("microphone", "麦克风", "ok", "info", "检测到可用输入设备。")
+            } else {
+                health_item(
+                    "microphone",
+                    "麦克风",
+                    "error",
+                    "urgent",
+                    status.input_message.unwrap_or_else(|| "未检测到可用输入设备。".to_string()),
+                )
+            });
+        }
+        None => items.push(health_item(
+            "whisper_model",
+            "Whisper 服务",
+            "error",
+            "urgent",
+            "Whisper 服务未初始化。",
+        )),
+    }
+
+    let roadmap = roadmap_status_from_runtime(runtime);
+    items.push(health_item("plugin_tools", "插件/MCP 工具层", if roadmap.plugin_tools.enabled { "ok" } else { "warning" }, "watch", roadmap.plugin_tools.summary));
+    items.push(health_item("document_memory", "文档导入知识库", if roadmap.document_memory.enabled { "ok" } else { "warning" }, "watch", roadmap.document_memory.summary));
+    items.push(health_item("browser_automation", "浏览器自动化", if roadmap.browser_automation.enabled { "ok" } else { "warning" }, "watch", roadmap.browser_automation.summary));
+    items.push(health_item("local_voice_loop", "本地语音闭环", if roadmap.local_voice_loop.enabled { "ok" } else { "warning" }, "watch", roadmap.local_voice_loop.summary));
+
+    if let Ok(app_data) = app.path().app_data_dir() {
+        let memory_service = crate::memory::MemoryService::new(&app_data);
+        match memory_service.management_snapshot() {
+            Ok(snapshot) => items.push(health_item(
+                "memory",
+                "长期记忆",
+                "ok",
+                "info",
+                format!("稳定 {} 条，候选 {} 条，冲突 {} 组。", snapshot.stats.stable_count, snapshot.stats.candidate_count, snapshot.stats.conflict_count),
+            )),
+            Err(error) => items.push(health_item("memory", "长期记忆", "error", "urgent", error)),
+        }
+    }
+
+    let overall_status = if items.iter().any(|item| item.status == "error") {
+        "error"
+    } else if items.iter().any(|item| item.status == "warning") {
+        "warning"
+    } else {
+        "ok"
+    }.to_string();
+
+    HealthCheckReport {
+        generated_at: now_millis(),
+        overall_status,
+        items,
+    }
+}
+
+#[tauri::command]
+fn run_health_check(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+) -> Result<HealthCheckReport, String> {
+    let runtime = state
+        .lock()
+        .map_err(|_| "助手状态锁定失败".to_string())?
+        .clone();
+    let transcriber = app.try_state::<TranscriberService>();
+    Ok(build_health_check_report(&app, &runtime, transcriber.as_deref()))
+}
+
+#[tauri::command]
 fn clear_today_reply_history(app: AppHandle) -> Result<Vec<ReplyHistoryEntry>, String> {
     history::clear_today_reply_history(&app)
 }
@@ -2809,6 +3468,16 @@ pub fn run() {
             delete_managed_memory,
             promote_memory_candidate,
             resolve_memory_conflict,
+            run_memory_maintenance,
+            export_memory_backup,
+            import_memory_backup,
+            run_health_check,
+            get_agent_roadmap_status,
+            scan_plugin_tools,
+            list_document_memory,
+            import_document_memory,
+            list_browser_automation_tasks,
+            create_browser_automation_task,
             clear_today_reply_history,
             get_research_brief_snapshot,
             acknowledge_research_brief,

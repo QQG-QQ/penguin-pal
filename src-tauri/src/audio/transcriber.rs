@@ -10,6 +10,11 @@ use super::types::{
 };
 use super::whisper::WhisperEngine;
 
+const SAMPLE_RATE_HZ: usize = 16_000;
+const SILENCE_RMS_THRESHOLD: f32 = 0.006;
+const MIN_TRANSCRIBE_SAMPLES: usize = SAMPLE_RATE_HZ / 3;
+const SILENCE_PADDING_SAMPLES: usize = SAMPLE_RATE_HZ / 10;
+
 pub struct TranscriberService {
     recorder: AudioRecorder,
     engine: WhisperEngine,
@@ -113,13 +118,49 @@ impl TranscriberService {
             }
         };
 
+        let samples = trim_silence(samples);
+
         if samples.is_empty() {
             *self.state.lock() = RecordingState::Idle;
             return Err("未采集到音频数据".to_string());
         }
 
+        if samples.len() < MIN_TRANSCRIBE_SAMPLES {
+            *self.state.lock() = RecordingState::Idle;
+            return Err("Recording is too short or too quiet; please try again with a little more speech.".to_string());
+        }
+
         let result = self.engine.transcribe(&samples);
         *self.state.lock() = RecordingState::Idle;
         result
+    }
+}
+
+fn trim_silence(samples: Vec<f32>) -> Vec<f32> {
+    if samples.is_empty() {
+        return samples;
+    }
+
+    let window = (SAMPLE_RATE_HZ / 50).max(1);
+    let mut first_voice = None;
+    let mut last_voice = None;
+
+    for (index, chunk) in samples.chunks(window).enumerate() {
+        let rms = (chunk.iter().map(|sample| sample * sample).sum::<f32>() / chunk.len() as f32)
+            .sqrt();
+        if rms >= SILENCE_RMS_THRESHOLD {
+            let start = index * window;
+            first_voice.get_or_insert(start);
+            last_voice = Some((start + chunk.len()).min(samples.len()));
+        }
+    }
+
+    match (first_voice, last_voice) {
+        (Some(start), Some(end)) if end > start => {
+            let start = start.saturating_sub(SILENCE_PADDING_SAMPLES);
+            let end = (end + SILENCE_PADDING_SAMPLES).min(samples.len());
+            samples[start..end].to_vec()
+        }
+        _ => Vec::new(),
     }
 }

@@ -93,7 +93,7 @@ npm run tauri:build
 
 正式软件更新检查与下载页已经切到独立发布仓库：
 
-- `https://github.com/QQG-QQ/penguin-pal-releases`
+- `https://github.com/QQG-QQ/penguin-pal/releases`
 
 桌宠里的“软件更新”功能会从这个发布仓库读取最新 release，并优先打开适合当前平台的安装包资产。
 
