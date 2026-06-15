@@ -1,6 +1,7 @@
 export type PetMode = 'idle' | 'listening' | 'thinking' | 'speaking' | 'guarded'
 export type PetDockState = 'normal' | 'dockedLeft' | 'dockedRight' | 'dockedTop'
 export type AssistantWindowView = 'pet' | 'settings' | 'bubble' | 'research'
+export type PetMood = 'cheerful' | 'calm' | 'curious' | 'needy' | 'tired'
 
 export type ProviderKind = 'mock' | 'codexCli' | 'openAi' | 'anthropic' | 'openAiCompatible'
 export type ProviderAuthMode = 'apiKey' | 'oauth'
@@ -132,8 +133,22 @@ export interface ShellPermissionSettings {
 export interface PluginToolsConfig {
   enabled: boolean
   mcpGatewayEnabled: boolean
+  mcpServers: McpServerEntry[]
   toolDirs: string[]
   requireConfirmation: boolean
+}
+
+export interface McpServerEntry {
+  id: string
+  name: string
+  enabled: boolean
+  transport: string
+  command: string
+  args: string[]
+  env: string[]
+  toolAllowlist: string[]
+  readOnly: boolean
+  notes: string
 }
 
 export interface DocumentMemoryConfig {
@@ -221,6 +236,18 @@ export interface PluginToolScanResult {
   warnings: string[]
 }
 
+export interface McpGatewayDiagnosis {
+  ok: boolean
+  message: string
+  tools: PluginToolManifest[]
+  warnings: string[]
+}
+
+export interface DockerSetupResult {
+  status: string
+  message: string
+}
+
 export interface ResearchConfig {
   enabled: boolean
   startupPopup: boolean
@@ -232,8 +259,22 @@ export interface ResearchConfig {
   decisionFramework: string
 }
 
+export interface PetStatus {
+  mood: PetMood
+  energy: number
+  hunger: number
+  cleanliness: number
+  affection: number
+  curiosity: number
+  lastInteractionAt: number
+  lastCareAt: number
+  summary: string
+}
+
 export interface AssistantSnapshot {
   mode: PetMode
+  petStatus: PetStatus
+  petStatusVisible: boolean
   messages: ChatMessage[]
   provider: ProviderConfig
   launchAtStartup: boolean
@@ -261,6 +302,7 @@ export interface ProviderConfigInput {
   launchAtStartup: boolean
   autoUpdateCodex: boolean
   autoCheckAppUpdate: boolean
+  petStatusVisible: boolean
   research: ResearchConfig
   voiceReply: boolean
   retainHistory: boolean

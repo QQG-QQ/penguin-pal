@@ -29,3 +29,4 @@ tmp-cargo-target/
 Thumbs.db
 .vscode/
 .idea/
+.codex-bootstrap-backups/

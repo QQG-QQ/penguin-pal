@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import ControlPanel from './ControlPanel.vue'
+import { diagnoseMcpGateway, setupDockerDesktop } from '../lib/assistant'
 import { presetModelCatalog } from '../lib/modelCatalog'
 import type {
   ArchiveRecallPreview,
@@ -14,9 +15,12 @@ import type {
   DownloadProgress,
   HealthCheckReport,
   ManagedMemoryKind,
+  McpGatewayDiagnosis,
   MemoryConflictGroup,
   MemoryManagementSnapshot,
   ManagedMemoryRecord,
+  PetMood,
+  PetStatus,
   ProviderConfigInput,
   ProviderKind,
   PluginToolScanResult,
@@ -43,6 +47,7 @@ const props = defineProps<{
   actions: DesktopAction[]
   permissionLevel: number
   aiConstraints: AiConstraintProfile
+  petStatus: PetStatus
   todayReplyHistory: ReplyHistoryEntry[]
   memoryDashboard: MemoryManagementSnapshot
   memoryBusy: boolean
@@ -95,21 +100,52 @@ const emit = defineEmits<{
 const cloneDraft = (value: ProviderConfigInput): ProviderConfigInput =>
   JSON.parse(JSON.stringify(value)) as ProviderConfigInput
 
-const ensureAgentRoadmapDraft = (draft: ProviderConfigInput) => {
+const defaultMcpServers = () => [
+  {
+    id: 'github-mcp',
+    name: 'GitHub MCP Server',
+    enabled: false,
+    transport: 'stdio',
+    command: 'github-mcp-server',
+    args: ['stdio', '--read-only'],
+    env: ['GITHUB_PERSONAL_ACCESS_TOKEN='],
+    toolAllowlist: ['context', 'repos', 'issues', 'pull_requests', 'actions'],
+    readOnly: true,
+    notes: '官方 GitHub MCP Server。建议先用只读模式接入仓库、Issue、PR 和 Actions 查询。'
+  },
+  {
+    id: 'fastmcp-local',
+    name: 'FastMCP Local Tools',
+    enabled: false,
+    transport: 'stdio',
+    command: 'python',
+    args: ['path/to/server.py'],
+    env: [],
+    toolAllowlist: [],
+    readOnly: false,
+    notes: '用于接入 FastMCP 编写的本地 Python 工具。写操作仍应经过桌宠确认流。'
+  }
+]
+
+const ensureSettingsDraft = (draft: ProviderConfigInput) => {
   draft.agentRoadmap ??= {
-    pluginTools: { enabled: false, mcpGatewayEnabled: false, toolDirs: [], requireConfirmation: true },
+    pluginTools: { enabled: false, mcpGatewayEnabled: false, mcpServers: defaultMcpServers(), toolDirs: [], requireConfirmation: true },
     documentMemory: { enabled: false, autoSummarize: true, writeToLongTermMemory: true, watchedDirs: [] },
     browserAutomation: { enabled: false, requireConfirmation: true, allowResearchFetch: false, allowedDomains: [] },
     localVoiceLoop: { enabled: false, localTtsEnabled: false, offlineLlmFallback: false, wakePhrase: '小企鹅' }
   }
-  draft.agentRoadmap.pluginTools ??= { enabled: false, mcpGatewayEnabled: false, toolDirs: [], requireConfirmation: true }
+  draft.agentRoadmap.pluginTools ??= { enabled: false, mcpGatewayEnabled: false, mcpServers: defaultMcpServers(), toolDirs: [], requireConfirmation: true }
+  draft.agentRoadmap.pluginTools.mcpServers ??= defaultMcpServers()
+  if (!draft.agentRoadmap.pluginTools.mcpServers.length) {
+    draft.agentRoadmap.pluginTools.mcpServers = defaultMcpServers()
+  }
   draft.agentRoadmap.documentMemory ??= { enabled: false, autoSummarize: true, writeToLongTermMemory: true, watchedDirs: [] }
   draft.agentRoadmap.browserAutomation ??= { enabled: false, requireConfirmation: true, allowResearchFetch: false, allowedDomains: [] }
   draft.agentRoadmap.localVoiceLoop ??= { enabled: false, localTtsEnabled: false, offlineLlmFallback: false, wakePhrase: '小企鹅' }
   return draft
 }
 
-const localDraft = ref<ProviderConfigInput>(ensureAgentRoadmapDraft(cloneDraft(props.draft)))
+const localDraft = ref<ProviderConfigInput>(ensureSettingsDraft(cloneDraft(props.draft)))
 
 const providerOptions: Array<{ label: string; value: ProviderKind }> = [
   { label: 'Codex CLI', value: 'codexCli' },
@@ -150,6 +186,11 @@ const documentImportTitle = ref('')
 const documentImportContent = ref('')
 const browserTaskGoal = ref('')
 const browserTaskUrl = ref('')
+const mcpTestBusy = ref(false)
+const mcpTestResult = ref<McpGatewayDiagnosis | null>(null)
+const mcpTestError = ref('')
+const dockerSetupBusy = ref(false)
+const dockerSetupMessage = ref('')
 
 const modifierOrder = ['CommandOrControl', 'Alt', 'Shift']
 
@@ -303,6 +344,32 @@ const submitBrowserTask = () => {
   })
 }
 
+const submitMcpToolTest = async () => {
+  mcpTestBusy.value = true
+  mcpTestResult.value = null
+  mcpTestError.value = ''
+  try {
+    mcpTestResult.value = await diagnoseMcpGateway(localDraft.value.agentRoadmap.pluginTools)
+  } catch (error) {
+    mcpTestError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    mcpTestBusy.value = false
+  }
+}
+
+const installOrStartDocker = async () => {
+  dockerSetupBusy.value = true
+  dockerSetupMessage.value = ''
+  try {
+    const result = await setupDockerDesktop()
+    dockerSetupMessage.value = result.message
+  } catch (error) {
+    dockerSetupMessage.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    dockerSetupBusy.value = false
+  }
+}
+
 const commitShortcutCapture = (value: string) => {
   localDraft.value.pushToTalkShortcut = value
   stopShortcutCapture()
@@ -428,7 +495,7 @@ watch(
   () => props.draft,
   (value) => {
     stopShortcutCapture()
-    localDraft.value = ensureAgentRoadmapDraft(cloneDraft(value))
+    localDraft.value = ensureSettingsDraft(cloneDraft(value))
     selectedPreset.value = 'custom'
     applyProviderRules()
   },
@@ -561,6 +628,17 @@ const memoryStatusLabel = (status: ManagedMemoryRecord['status']) => {
 }
 
 const memoryKindLabel = (kind: ManagedMemoryKind) => (kind === 'semantic' ? '语义记忆' : '交互偏好')
+
+const petMoodLabel = (mood: PetMood) => {
+  const labels: Record<PetMood, string> = {
+    cheerful: '开心',
+    calm: '平稳',
+    curious: '好奇',
+    needy: '想被照顾',
+    tired: '有点累'
+  }
+  return labels[mood] ?? '平稳'
+}
 
 const conflictActionLabel = (group: MemoryConflictGroup) =>
   group.memoryType === 'semantic' ? '保留这条事实' : '保留这条偏好'
@@ -904,43 +982,142 @@ onBeforeUnmount(() => {
             </label>
             <label class="toggle">
               <input v-model="localDraft.agentRoadmap.pluginTools.mcpGatewayEnabled" type="checkbox" />
-              预留 MCP 网关
+              启用 MCP 网关
             </label>
             <label class="toggle">
               <input v-model="localDraft.agentRoadmap.pluginTools.requireConfirmation" type="checkbox" />
               工具调用需要确认
             </label>
+            <div class="mcp-server-list">
+              <article
+                v-for="server in localDraft.agentRoadmap.pluginTools.mcpServers"
+                :key="server.id"
+                class="mcp-server-card"
+              >
+                <div class="memory-entry-top">
+                  <div>
+                    <strong>{{ server.name }}</strong>
+                    <p>{{ server.notes }}</p>
+                  </div>
+                  <span class="constraint-status">{{ server.transport }}</span>
+                </div>
+                <div class="toggle-grid">
+                  <label class="toggle">
+                    <input v-model="server.enabled" type="checkbox" />
+                    启用这个 MCP Server
+                  </label>
+                  <label class="toggle">
+                    <input v-model="server.readOnly" type="checkbox" />
+                    只读模式
+                  </label>
+                </div>
+                <label class="field">
+                  <span>启动命令</span>
+                  <input v-model="server.command" type="text" />
+                </label>
+                <label class="field">
+                  <span>参数</span>
+                  <textarea
+                    :value="server.args.join('\n')"
+                    rows="3"
+                    placeholder="每行一个参数"
+                    @input="server.args = normalizeResearchList(($event.target as HTMLTextAreaElement).value)"
+                  ></textarea>
+                </label>
+                <label class="field">
+                  <span>环境变量</span>
+                  <textarea
+                    :value="server.env.join('\n')"
+                    rows="2"
+                    placeholder="KEY=value，每行一个"
+                    @input="server.env = normalizeResearchList(($event.target as HTMLTextAreaElement).value)"
+                  ></textarea>
+                </label>
+                <label class="field">
+                  <span>工具 allowlist</span>
+                  <textarea
+                    :value="server.toolAllowlist.join('\n')"
+                    rows="3"
+                    placeholder="留空表示后续由扫描结果决定"
+                    @input="server.toolAllowlist = normalizeResearchList(($event.target as HTMLTextAreaElement).value)"
+                  ></textarea>
+                </label>
+              </article>
+            </div>
             <label class="field">
               <span>工具目录</span>
               <textarea v-model="pluginToolDirsText" rows="4" placeholder="每行一个本地工具目录"></textarea>
             </label>
+            <div class="mcp-test-panel">
+              <div class="memory-entry-top">
+                <div>
+                  <strong>MCP 一键检测</strong>
+                  <p>自动检查开关、Server 是否能启动、能不能读到工具列表。</p>
+                </div>
+                <span class="constraint-status">auto</span>
+              </div>
+              <button
+                type="button"
+                class="ghost-button"
+                :disabled="mcpTestBusy"
+                @click="submitMcpToolTest"
+              >
+                {{ mcpTestBusy ? '检测中...' : '一键检测 MCP' }}
+              </button>
+              <button
+                type="button"
+                class="ghost-button"
+                :disabled="dockerSetupBusy"
+                @click="installOrStartDocker"
+              >
+                {{ dockerSetupBusy ? '处理中...' : '打开 Docker 安装 / 启动窗口' }}
+              </button>
+              <p v-if="dockerSetupMessage" class="memory-detail">
+                {{ dockerSetupMessage }}
+              </p>
+              <p v-if="mcpTestError" class="memory-detail">{{ mcpTestError }}</p>
+              <p v-if="mcpTestResult" class="memory-detail">
+                {{ mcpTestResult.message }}
+              </p>
+              <ul v-if="mcpTestResult?.tools.length" class="compact-list">
+                <li v-for="tool in mcpTestResult.tools.slice(0, 6)" :key="tool.id">
+                  {{ tool.name }}
+                </li>
+              </ul>
+              <p v-if="mcpTestResult && mcpTestResult.tools.length > 6" class="memory-detail">
+                还有 {{ mcpTestResult.tools.length - 6 }} 个工具未显示。
+              </p>
+              <ul v-if="mcpTestResult?.warnings.length" class="compact-list warning-list">
+                <li v-for="warning in mcpTestResult.warnings" :key="warning">{{ warning }}</li>
+              </ul>
+            </div>
           </article>
 
           <article class="roadmap-panel">
-            <h3>文档导入知识库</h3>
+            <h3>资料存入长期记忆</h3>
             <label class="toggle">
               <input v-model="localDraft.agentRoadmap.documentMemory.enabled" type="checkbox" />
-              启用文档导入
+              启用资料导入
             </label>
             <label class="toggle">
               <input v-model="localDraft.agentRoadmap.documentMemory.autoSummarize" type="checkbox" />
-              预留自动摘要
+              自动摘要，稍后接入
             </label>
             <label class="toggle">
               <input v-model="localDraft.agentRoadmap.documentMemory.writeToLongTermMemory" type="checkbox" />
-              写入长期记忆
+              让桌宠以后能参考
             </label>
             <label class="field">
-              <span>监听目录</span>
-              <textarea v-model="documentWatchedDirsText" rows="3" placeholder="每行一个文档目录"></textarea>
+              <span>资料目录，暂时只是记录</span>
+              <textarea v-model="documentWatchedDirsText" rows="3" placeholder="可不填"></textarea>
             </label>
             <label class="field">
-              <span>导入标题</span>
-              <input v-model="documentImportTitle" type="text" placeholder="例如：基金研报摘录" />
+              <span>标题</span>
+              <input v-model="documentImportTitle" type="text" placeholder="例如：我的偏好、项目说明、资料摘录" />
             </label>
             <label class="field">
-              <span>Markdown 文本</span>
-              <textarea v-model="documentImportContent" rows="5" placeholder="粘贴 MarkItDown 或手动整理后的 Markdown 文本"></textarea>
+              <span>内容</span>
+              <textarea v-model="documentImportContent" rows="5" placeholder="粘贴一段你希望桌宠以后记住或参考的文字"></textarea>
             </label>
             <button
               type="button"
@@ -948,7 +1125,7 @@ onBeforeUnmount(() => {
               :disabled="agentRoadmapBusy || !documentImportContent.trim()"
               @click="submitDocumentImport"
             >
-              导入到知识库
+              存入长期记忆
             </button>
           </article>
 
@@ -1547,6 +1724,41 @@ onBeforeUnmount(() => {
             </div>
           </article>
         </div>
+      </section>
+
+      <section class="health-shell pet-life-shell full-row">
+        <div class="memory-header">
+          <div>
+            <strong>企鹅生活状态</strong>
+            <p>这些状态会根据日常对话、任务压力、维护操作和长期记忆自动变化，并影响桌宠的性格与语气。</p>
+          </div>
+          <span class="constraint-status">{{ petMoodLabel(petStatus.mood) }}</span>
+        </div>
+
+        <div class="pet-status-grid">
+          <article class="memory-stat-card">
+            <strong>{{ petStatus.energy }}</strong>
+            <span>精力</span>
+          </article>
+          <article class="memory-stat-card">
+            <strong>{{ petStatus.hunger }}</strong>
+            <span>社交需求</span>
+          </article>
+          <article class="memory-stat-card">
+            <strong>{{ petStatus.cleanliness }}</strong>
+            <span>秩序感</span>
+          </article>
+          <article class="memory-stat-card">
+            <strong>{{ petStatus.affection }}</strong>
+            <span>亲近</span>
+          </article>
+          <article class="memory-stat-card">
+            <strong>{{ petStatus.curiosity }}</strong>
+            <span>好奇</span>
+          </article>
+        </div>
+
+        <p class="memory-detail">{{ petStatus.summary }}</p>
       </section>
 
       <section class="health-shell full-row">
@@ -2187,6 +2399,41 @@ textarea {
   gap: 12px;
 }
 
+.mcp-server-list {
+  display: grid;
+  gap: 12px;
+}
+
+.mcp-server-card {
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  display: grid;
+  gap: 10px;
+}
+
+.mcp-test-panel {
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(17, 68, 92, 0.06);
+  display: grid;
+  gap: 10px;
+}
+
+.mcp-test-output {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(12, 31, 45, 0.92);
+  color: #eaf8fc;
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
 .roadmap-panel h3 {
   margin: 0;
   font-size: 15px;
@@ -2261,6 +2508,12 @@ textarea {
 
 .memory-stats {
   flex-wrap: wrap;
+}
+
+.pet-status-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .memory-stat-card {

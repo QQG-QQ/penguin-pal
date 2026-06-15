@@ -1,10 +1,20 @@
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::{TrayIconBuilder, TrayIconEvent},
+    tray::{TrayIcon, TrayIconBuilder, TrayIconEvent},
     Manager, Runtime,
 };
 
-pub fn create_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
+pub const MAIN_TRAY_ID: &str = "penguinpal-main-tray";
+
+pub fn remove_tray<R: Runtime>(app: &tauri::AppHandle<R>) {
+    let _ = app.remove_tray_by_id(MAIN_TRAY_ID);
+}
+
+pub fn create_tray<R: Runtime>(
+    app: &tauri::App<R>,
+) -> Result<TrayIcon<R>, Box<dyn std::error::Error>> {
+    remove_tray(&app.handle());
+
     let show_item = MenuItem::with_id(app, "show", "显示/隐藏", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -18,7 +28,7 @@ pub fn create_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::e
             std::io::Error::new(std::io::ErrorKind::NotFound, "未找到默认托盘图标资源")
         })?;
 
-    let _tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::with_id(MAIN_TRAY_ID)
         .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -55,5 +65,5 @@ pub fn create_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::e
         })
         .build(app)?;
 
-    Ok(())
+    Ok(tray)
 }

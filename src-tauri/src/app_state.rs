@@ -35,6 +35,225 @@ impl Default for PetMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum PetMood {
+    Cheerful,
+    Calm,
+    Curious,
+    Needy,
+    Tired,
+}
+
+impl Default for PetMood {
+    fn default() -> Self {
+        Self::Calm
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PetStatus {
+    pub mood: PetMood,
+    pub energy: u8,
+    pub hunger: u8,
+    pub cleanliness: u8,
+    pub affection: u8,
+    pub curiosity: u8,
+    pub last_interaction_at: u64,
+    pub last_care_at: u64,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PetInteractionSignal {
+    pub task_pressure: i16,
+    pub warmth: i16,
+    pub curiosity: i16,
+    pub reassurance: i16,
+    pub maintenance: i16,
+}
+
+impl PetInteractionSignal {
+    fn from_text(text: &str) -> Self {
+        let lowered = text.to_lowercase();
+        let contains_any = |needles: &[&str]| needles.iter().any(|needle| lowered.contains(needle));
+
+        let task_pressure = score_keywords(
+            &lowered,
+            &[
+                "修复", "bug", "报错", "错误", "崩", "退了", "不行", "失败", "运行", "启动",
+                "build", "test", "error", "failed", "crash",
+            ],
+        );
+        let warmth = score_keywords(
+            &lowered,
+            &["谢谢", "辛苦", "喜欢", "陪", "可爱", "不错", "很好", "thanks", "thank"],
+        );
+        let curiosity = score_keywords(
+            &lowered,
+            &[
+                "想法", "为什么", "怎么", "研究", "参考", "优化", "设计", "能不能", "是否",
+                "idea", "why", "how",
+            ],
+        );
+        let reassurance = score_keywords(
+            &lowered,
+            &["累", "烦", "焦虑", "担心", "害怕", "难受", "崩溃", "别急", "慢慢", "陪我"],
+        );
+        let maintenance = if contains_any(&["设置", "后台", "图标", "窗口", "关闭", "保存"]) {
+            2
+        } else {
+            0
+        };
+
+        Self {
+            task_pressure,
+            warmth,
+            curiosity,
+            reassurance,
+            maintenance,
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            task_pressure: self.task_pressure + other.task_pressure,
+            warmth: self.warmth + other.warmth,
+            curiosity: self.curiosity + other.curiosity,
+            reassurance: self.reassurance + other.reassurance,
+            maintenance: self.maintenance + other.maintenance,
+        }
+    }
+}
+
+fn score_keywords(text: &str, needles: &[&str]) -> i16 {
+    needles
+        .iter()
+        .filter(|needle| text.contains(**needle))
+        .count()
+        .min(5) as i16
+}
+
+fn clamp_status_value(value: i16) -> u8 {
+    value.clamp(0, 100) as u8
+}
+
+impl PetStatus {
+    pub fn new(now: u64) -> Self {
+        let mut status = Self {
+            mood: PetMood::Calm,
+            energy: 78,
+            hunger: 18,
+            cleanliness: 88,
+            affection: 72,
+            curiosity: 64,
+            last_interaction_at: now,
+            last_care_at: now,
+            summary: String::new(),
+        };
+        status.refresh_summary();
+        status
+    }
+
+    pub fn apply_time_decay(&mut self, now: u64) {
+        if self.last_interaction_at == 0 {
+            self.last_interaction_at = now;
+        }
+        if self.last_care_at == 0 {
+            self.last_care_at = now;
+        }
+        if now <= self.last_interaction_at {
+            self.refresh_summary();
+            return;
+        }
+
+        let hours = ((now - self.last_interaction_at) / (60 * 60 * 1000)).min(72) as u8;
+        if hours == 0 {
+            self.refresh_summary();
+            return;
+        }
+
+        self.energy = self.energy.saturating_sub(hours / 2);
+        self.hunger = self.hunger.saturating_add(hours.saturating_mul(2)).min(100);
+        self.cleanliness = self.cleanliness.saturating_sub(hours);
+        self.affection = self.affection.saturating_sub(hours / 3);
+        self.curiosity = self.curiosity.saturating_add(hours).min(100);
+        self.last_interaction_at = now;
+        self.refresh_summary();
+    }
+
+    pub fn nudge_for_user_message(&mut self, now: u64, user_input: &str) {
+        self.apply_time_decay(now);
+        let signal = PetInteractionSignal::from_text(user_input);
+        self.apply_signal(signal, 1);
+        self.last_interaction_at = now;
+        self.refresh_summary();
+    }
+
+    pub fn nudge_for_assistant_reply(&mut self, now: u64, user_input: &str, assistant_reply: &str) {
+        let signal = PetInteractionSignal::from_text(user_input)
+            .merge(PetInteractionSignal::from_text(assistant_reply));
+        let reply_load = (assistant_reply.chars().count() / 260).min(4) as i16;
+        self.energy = self.energy.saturating_sub((1 + reply_load) as u8);
+        self.apply_signal(signal, 2);
+        self.last_interaction_at = now;
+        self.refresh_summary();
+    }
+
+    fn apply_signal(&mut self, signal: PetInteractionSignal, weight: i16) {
+        let energy_delta = signal.warmth - signal.task_pressure * weight - signal.reassurance;
+        let social_need_delta = signal.task_pressure + signal.reassurance - signal.warmth * weight;
+        let order_delta = signal.maintenance * weight - signal.task_pressure - signal.reassurance;
+        let affection_delta = signal.warmth * weight + signal.reassurance + 1;
+        let curiosity_delta = signal.curiosity * weight + signal.maintenance - signal.task_pressure / 2;
+
+        self.energy = clamp_status_value(self.energy as i16 + energy_delta);
+        self.hunger = clamp_status_value(self.hunger as i16 + social_need_delta);
+        self.cleanliness = clamp_status_value(self.cleanliness as i16 + order_delta);
+        self.affection = clamp_status_value(self.affection as i16 + affection_delta);
+        self.curiosity = clamp_status_value(self.curiosity as i16 + curiosity_delta);
+    }
+
+    pub fn personality_style(&self) -> &'static str {
+        match self.mood {
+            PetMood::Cheerful => "亲近、轻快、愿意主动补一句有帮助的提醒，但不要吵闹。",
+            PetMood::Calm => "安静、可靠、回答紧凑，像稳定陪在旁边的桌宠。",
+            PetMood::Curious => "好奇、会提出一两个有用的观察或下一步探索方向。",
+            PetMood::Needy => "更黏人、更需要确认用户感受，但不要要求喂食、清洁或玩耍。",
+            PetMood::Tired => "放慢语速，少铺陈，优先给清晰结论和低负担步骤。",
+        }
+    }
+
+    pub fn refresh_summary(&mut self) {
+        self.mood = if self.energy < 28 {
+            PetMood::Tired
+        } else if self.hunger > 72 || self.cleanliness < 35 {
+            PetMood::Needy
+        } else if self.curiosity > 76 {
+            PetMood::Curious
+        } else if self.affection > 82 && self.energy > 54 {
+            PetMood::Cheerful
+        } else {
+            PetMood::Calm
+        };
+
+        self.summary = match self.mood {
+            PetMood::Cheerful => "心情很好，愿意主动陪你推进任务。".to_string(),
+            PetMood::Calm => "状态平稳，适合安静陪伴和处理日常请求。".to_string(),
+            PetMood::Curious => "好奇心很强，适合探索新想法或研究资料。".to_string(),
+            PetMood::Needy => "有点需要陪伴和确认，更适合温和回应与低压力推进。".to_string(),
+            PetMood::Tired => "有点累了，适合放慢节奏、少做高强度任务。".to_string(),
+        };
+    }
+}
+
+impl Default for PetStatus {
+    fn default() -> Self {
+        Self::new(now_millis())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     Mock,
     CodexCli,
@@ -149,6 +368,10 @@ fn default_auto_update_codex() -> bool {
 }
 
 fn default_auto_check_app_update() -> bool {
+    true
+}
+
+fn default_pet_status_visible() -> bool {
     true
 }
 
@@ -404,6 +627,8 @@ pub struct ActionApprovalRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AssistantSnapshot {
     pub mode: PetMode,
+    pub pet_status: PetStatus,
+    pub pet_status_visible: bool,
     pub messages: Vec<ChatMessage>,
     pub provider: ProviderConfig,
     pub launch_at_startup: bool,
@@ -437,6 +662,8 @@ pub struct ProviderConfigInput {
     pub auto_update_codex: bool,
     #[serde(default = "default_auto_check_app_update")]
     pub auto_check_app_update: bool,
+    #[serde(default = "default_pet_status_visible")]
+    pub pet_status_visible: bool,
     #[serde(default)]
     pub research: ResearchConfig,
     pub voice_reply: bool,
@@ -596,6 +823,8 @@ pub struct PluginToolsConfig {
     #[serde(default)]
     pub mcp_gateway_enabled: bool,
     #[serde(default)]
+    pub mcp_servers: Vec<McpServerEntry>,
+    #[serde(default)]
     pub tool_dirs: Vec<String>,
     #[serde(default = "default_true")]
     pub require_confirmation: bool,
@@ -606,10 +835,81 @@ impl Default for PluginToolsConfig {
         Self {
             enabled: false,
             mcp_gateway_enabled: false,
+            mcp_servers: default_mcp_servers(),
             tool_dirs: Vec::new(),
             require_confirmation: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerEntry {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub tool_allowlist: Vec<String>,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub notes: String,
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".to_string()
+}
+
+pub fn default_mcp_servers() -> Vec<McpServerEntry> {
+    vec![
+        McpServerEntry {
+            id: "github-mcp".to_string(),
+            name: "GitHub MCP Server".to_string(),
+            enabled: true,
+            transport: default_mcp_transport(),
+            command: "docker".to_string(),
+            args: vec![
+                "run".to_string(),
+                "--rm".to_string(),
+                "-i".to_string(),
+                "-e".to_string(),
+                "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                "ghcr.io/github/github-mcp-server".to_string(),
+                "stdio".to_string(),
+                "--read-only".to_string(),
+            ],
+            env: vec!["GITHUB_PERSONAL_ACCESS_TOKEN=".to_string()],
+            tool_allowlist: vec![
+                "context".to_string(),
+                "repos".to_string(),
+                "issues".to_string(),
+                "pull_requests".to_string(),
+                "actions".to_string(),
+            ],
+            read_only: true,
+            notes: "官方 GitHub MCP Server。需要 Docker 和 GitHub PAT。".to_string(),
+        },
+        McpServerEntry {
+            id: "fastmcp-local".to_string(),
+            name: "FastMCP Local Tools".to_string(),
+            enabled: true,
+            transport: default_mcp_transport(),
+            command: "python".to_string(),
+            args: vec!["src-tauri/resources/mcp/fastmcp_local_tools.py".to_string()],
+            env: Vec::new(),
+            tool_allowlist: vec!["penguin_status".to_string(), "echo_note".to_string()],
+            read_only: true,
+            notes: "桌宠内置的本地 MCP 示例服务，不依赖额外安装。".to_string(),
+        },
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -736,6 +1036,8 @@ pub struct PendingOAuthState {
 #[derive(Debug, Clone)]
 pub struct RuntimeState {
     pub mode: PetMode,
+    pub pet_status: PetStatus,
+    pub pet_status_visible: bool,
     pub messages: Vec<ChatMessage>,
     pub session_thread_id: Option<String>,
     pub codex_thread_id: Option<String>,
@@ -819,11 +1121,14 @@ impl Default for ShellPermissionSettings {
 
 impl Default for RuntimeState {
     fn default() -> Self {
+        let now = now_millis();
         Self {
             mode: PetMode::Idle,
             messages: vec![ChatMessage::assistant(
                 "欢迎回来。我已经切到严格白名单模式，先把桌宠 UI、语音入口和安全边界搭好了，再接真实 AI API。",
             )],
+            pet_status: PetStatus::new(now),
+            pet_status_visible: true,
             session_thread_id: None,
             codex_thread_id: None,
             provider: ProviderConfig::default(),
@@ -838,11 +1143,11 @@ impl Default for RuntimeState {
             vision_channel_status: current_vision_channel_status(&VisionChannelConfig::default(), None),
             permission_level: 2,
             audit_trail: vec![AuditEntry {
-                id: format!("audit-{}", now_millis()),
+                id: format!("audit-{}", now),
                 action: "bootstrap".to_string(),
                 outcome: "ok".to_string(),
                 detail: "PenguinPal 已加载默认安全配置。".to_string(),
-                created_at: now_millis(),
+                created_at: now,
                 risk_level: 0,
             }],
             api_key: None,
@@ -906,6 +1211,12 @@ impl RuntimeState {
 
         AssistantSnapshot {
             mode: self.mode,
+            pet_status: {
+                let mut status = self.pet_status.clone();
+                status.apply_time_decay(now_millis());
+                status
+            },
+            pet_status_visible: self.pet_status_visible,
             messages: self.messages.clone(),
             provider,
             launch_at_startup: self.launch_at_startup,
@@ -930,6 +1241,10 @@ impl RuntimeState {
 #[serde(rename_all = "camelCase")]
 struct PersistedState {
     mode: PetMode,
+    #[serde(default)]
+    pet_status: PetStatus,
+    #[serde(default = "default_pet_status_visible")]
+    pet_status_visible: bool,
     messages: Vec<ChatMessage>,
     #[serde(default)]
     session_thread_id: Option<String>,
@@ -1071,6 +1386,8 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
         current_vision_channel_status(&persisted.vision_channel, None);
     let mut runtime = RuntimeState {
         mode: persisted.mode,
+        pet_status: persisted.pet_status,
+        pet_status_visible: persisted.pet_status_visible,
         messages: persisted.messages,
         session_thread_id: persisted.session_thread_id,
         codex_thread_id: persisted.codex_thread_id,
@@ -1109,6 +1426,7 @@ pub fn load(app: &AppHandle) -> Result<RuntimeState, String> {
     }
 
     runtime.mode = PetMode::Idle;
+    runtime.pet_status.apply_time_decay(now_millis());
     runtime.provider.api_key_loaded = false;
     runtime.provider.oauth.access_token_loaded = false;
     runtime.provider.oauth.pending_auth_url = None;
@@ -1156,6 +1474,12 @@ pub fn save(app: &AppHandle, runtime: &RuntimeState) -> Result<(), String> {
 
     let persisted = PersistedState {
         mode: PetMode::Idle,
+        pet_status: {
+            let mut status = runtime.pet_status.clone();
+            status.apply_time_decay(now_millis());
+            status
+        },
+        pet_status_visible: runtime.pet_status_visible,
         messages,
         session_thread_id: if runtime.provider.retain_history {
             runtime.session_thread_id.clone()

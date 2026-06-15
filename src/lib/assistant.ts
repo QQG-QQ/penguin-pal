@@ -21,13 +21,16 @@ import type {
   ControlToolInvokeResponse,
   DocumentImportResult,
   DocumentMemoryRecord,
+  DockerSetupResult,
   DownloadProgress,
   HealthCheckReport,
   ManagedMemoryKind,
+  McpGatewayDiagnosis,
   MemoryManagementSnapshot,
   ModelInfo,
   OAuthFlowResult,
   OAuthState,
+  PetStatus,
   ProviderConfigInput,
   ProviderKind,
   PluginToolScanResult,
@@ -214,10 +217,38 @@ const fallbackVisionStatus = (
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const now = () => Date.now()
 
+const defaultMcpServers = () => [
+  {
+    id: 'github-mcp',
+    name: 'GitHub MCP Server',
+    enabled: false,
+    transport: 'stdio',
+    command: 'github-mcp-server',
+    args: ['stdio', '--read-only'],
+    env: ['GITHUB_PERSONAL_ACCESS_TOKEN='],
+    toolAllowlist: ['context', 'repos', 'issues', 'pull_requests', 'actions'],
+    readOnly: true,
+    notes: '官方 GitHub MCP Server。建议先用只读模式接入仓库、Issue、PR 和 Actions 查询。'
+  },
+  {
+    id: 'fastmcp-local',
+    name: 'FastMCP Local Tools',
+    enabled: false,
+    transport: 'stdio',
+    command: 'python',
+    args: ['path/to/server.py'],
+    env: [],
+    toolAllowlist: [],
+    readOnly: false,
+    notes: '用于接入 FastMCP 编写的本地 Python 工具。写操作仍应经过桌宠确认流。'
+  }
+]
+
 const defaultAgentRoadmapConfig = () => ({
   pluginTools: {
     enabled: false,
     mcpGatewayEnabled: false,
+    mcpServers: defaultMcpServers(),
     toolDirs: [],
     requireConfirmation: true
   },
@@ -241,6 +272,18 @@ const defaultAgentRoadmapConfig = () => ({
   }
 })
 
+const defaultPetStatus = (): PetStatus => ({
+  mood: 'calm',
+  energy: 78,
+  hunger: 18,
+  cleanliness: 88,
+  affection: 72,
+  curiosity: 64,
+  lastInteractionAt: Date.now(),
+  lastCareAt: Date.now(),
+  summary: '状态平稳，适合安静陪伴和处理日常请求。'
+})
+
 const fallbackMessage = (role: ChatMessage['role'], content: string): ChatMessage => ({
   id: `${role}-${now()}`,
   role,
@@ -250,6 +293,7 @@ const fallbackMessage = (role: ChatMessage['role'], content: string): ChatMessag
 
 const buildFallbackSnapshot = (): AssistantSnapshot => ({
   mode: 'idle',
+  petStatus: defaultPetStatus(),
   messages: [
     fallbackMessage(
       'assistant',
@@ -274,6 +318,7 @@ const buildFallbackSnapshot = (): AssistantSnapshot => ({
   launchAtStartup: false,
   autoUpdateCodex: true,
   autoCheckAppUpdate: true,
+  petStatusVisible: true,
   research: defaultResearchConfig(),
   workspaceRoot: null,
   visionChannel: defaultVisionChannel(),
@@ -955,9 +1000,14 @@ const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapsho
 
   return {
     ...snapshot,
+    petStatus: {
+      ...defaultPetStatus(),
+      ...(snapshot.petStatus ?? {})
+    },
     launchAtStartup: Boolean(snapshot.launchAtStartup),
     autoUpdateCodex: snapshot.autoUpdateCodex !== false,
     autoCheckAppUpdate: snapshot.autoCheckAppUpdate !== false,
+    petStatusVisible: snapshot.petStatusVisible !== false,
     research: {
       ...defaultResearchConfig(),
       ...(snapshot.research ?? {})
@@ -1705,6 +1755,51 @@ export const scanPluginTools = async (): Promise<PluginToolScanResult> => {
   } catch (error) {
     rethrowIfDesktopRuntime(error)
     return { scannedAt: Date.now(), directories: [], tools: [], warnings: ['桌面运行时不可用。'] }
+  }
+}
+
+export const diagnoseMcpGateway = async (
+  config: ProviderConfigInput['agentRoadmap']['pluginTools']
+): Promise<McpGatewayDiagnosis> => {
+  try {
+    return await safeInvoke<McpGatewayDiagnosis>('diagnose_mcp_gateway', { config })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return {
+      ok: false,
+      message: 'MCP 检测需要桌面运行时。',
+      tools: [],
+      warnings: ['桌面运行时不可用。']
+    }
+  }
+}
+
+export const setupDockerDesktop = async (): Promise<DockerSetupResult> => {
+  try {
+    return await safeInvoke<DockerSetupResult>('setup_docker_desktop')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    return {
+      status: 'error',
+      message: 'Docker 安装需要桌面运行时。'
+    }
+  }
+}
+
+export const invokeMcpTool = async (
+  serverId: string,
+  toolName: string,
+  argumentsValue: Record<string, unknown> = {}
+): Promise<ControlToolInvokeResponse> => {
+  try {
+    return await safeInvoke<ControlToolInvokeResponse>('invoke_mcp_tool', {
+      serverId,
+      toolName,
+      arguments: argumentsValue
+    })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('MCP 工具调用需要桌面运行时')
   }
 }
 

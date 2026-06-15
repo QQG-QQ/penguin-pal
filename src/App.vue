@@ -118,6 +118,7 @@ import type {
   BrowserAutomationTask,
   ManagedMemoryKind,
   MemoryManagementSnapshot,
+  PetStatus,
   PetLayoutMetrics,
   PetDockState,
   PetMode,
@@ -152,6 +153,33 @@ const DEFAULT_OAUTH_REDIRECT_URL = 'http://127.0.0.1:8976/oauth/callback'
 const DEFAULT_PUSH_TO_TALK_SHORTCUT = 'CommandOrControl+Alt+Space'
 const WHISPER_CAPTURE_WINDOW_MS = 3600
 
+const defaultMcpServers = () => [
+  {
+    id: 'github-mcp',
+    name: 'GitHub MCP Server',
+    enabled: false,
+    transport: 'stdio',
+    command: 'github-mcp-server',
+    args: ['stdio', '--read-only'],
+    env: ['GITHUB_PERSONAL_ACCESS_TOKEN='],
+    toolAllowlist: ['context', 'repos', 'issues', 'pull_requests', 'actions'],
+    readOnly: true,
+    notes: '官方 GitHub MCP Server。建议先用只读模式接入仓库、Issue、PR 和 Actions 查询。'
+  },
+  {
+    id: 'fastmcp-local',
+    name: 'FastMCP Local Tools',
+    enabled: false,
+    transport: 'stdio',
+    command: 'python',
+    args: ['path/to/server.py'],
+    env: [],
+    toolAllowlist: [],
+    readOnly: false,
+    notes: '用于接入 FastMCP 编写的本地 Python 工具。写操作仍应经过桌宠确认流。'
+  }
+]
+
 const defaultResearchConfig = () => ({
   enabled: false,
   startupPopup: true,
@@ -168,6 +196,7 @@ const defaultAgentRoadmapConfig = () => ({
   pluginTools: {
     enabled: false,
     mcpGatewayEnabled: false,
+    mcpServers: defaultMcpServers(),
     toolDirs: [] as string[],
     requireConfirmation: true
   },
@@ -232,8 +261,21 @@ const emptyConstraints = (): AiConstraintProfile => ({
   runtimeBoundaries: []
 })
 
+const defaultPetStatus = (): PetStatus => ({
+  mood: 'calm',
+  energy: 78,
+  hunger: 18,
+  cleanliness: 88,
+  affection: 72,
+  curiosity: 64,
+  lastInteractionAt: Date.now(),
+  lastCareAt: Date.now(),
+  summary: '状态平稳，适合安静陪伴和处理日常请求。'
+})
+
 const emptySnapshot = (): AssistantSnapshot => ({
   mode: 'idle',
+  petStatus: defaultPetStatus(),
   messages: [],
   provider: {
     kind: 'mock',
@@ -266,6 +308,7 @@ const emptySnapshot = (): AssistantSnapshot => ({
   launchAtStartup: false,
   autoUpdateCodex: true,
   autoCheckAppUpdate: true,
+  petStatusVisible: true,
   research: defaultResearchConfig(),
   workspaceRoot: null,
   visionChannel: {
@@ -405,6 +448,7 @@ const toDraft = (state: AssistantSnapshot): ProviderConfigInput => ({
   launchAtStartup: state.launchAtStartup,
   autoUpdateCodex: state.autoUpdateCodex,
   autoCheckAppUpdate: state.autoCheckAppUpdate,
+  petStatusVisible: state.petStatusVisible,
   research: {
     ...defaultResearchConfig(),
     ...(state.research ?? {})
@@ -1960,6 +2004,23 @@ const persistSettings = async (draft: ProviderConfigInput) => {
   nextDraft.agentRoadmap.pluginTools.toolDirs = nextDraft.agentRoadmap.pluginTools.toolDirs
     .map((item) => item.trim())
     .filter(Boolean)
+  if (!nextDraft.agentRoadmap.pluginTools.mcpServers?.length) {
+    nextDraft.agentRoadmap.pluginTools.mcpServers = defaultMcpServers()
+  }
+  nextDraft.agentRoadmap.pluginTools.mcpServers =
+    nextDraft.agentRoadmap.pluginTools.mcpServers
+      .map((server) => ({
+        ...server,
+        id: server.id.trim() || server.name.trim().toLowerCase().replace(/\s+/g, '-'),
+        name: server.name.trim(),
+        transport: server.transport.trim().toLowerCase() || 'stdio',
+        command: server.command.trim(),
+        args: server.args.map((item) => item.trim()).filter(Boolean),
+        env: server.env.map((item) => item.trim()).filter(Boolean),
+        toolAllowlist: server.toolAllowlist.map((item) => item.trim()).filter(Boolean),
+        notes: server.notes.trim()
+      }))
+      .filter((server) => server.name && server.command)
   nextDraft.agentRoadmap.documentMemory.watchedDirs = nextDraft.agentRoadmap.documentMemory.watchedDirs
     .map((item) => item.trim())
     .filter(Boolean)
@@ -3237,7 +3298,7 @@ const saveSettings = async (draft: ProviderConfigInput) => {
     const nextSnapshot = await persistSettings(draft)
     await syncSnapshot(nextSnapshot)
     if (nextSnapshot.research.enabled || isResearchView.value) {
-      await refreshResearchBrief({ silent: true })
+      void refreshResearchBrief({ silent: true })
     } else {
       researchBrief.value = emptyResearchBrief()
       lastResearchAlertSignature = ''
@@ -3915,6 +3976,7 @@ onBeforeUnmount(() => {
       :actions="snapshot.allowedActions"
       :permission-level="snapshot.permissionLevel"
       :ai-constraints="snapshot.aiConstraints"
+      :pet-status="snapshot.petStatus"
       :today-reply-history="todayReplyHistory"
       :memory-dashboard="memoryDashboard"
       :memory-busy="memoryBusy"

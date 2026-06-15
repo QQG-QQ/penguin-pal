@@ -1,37 +1,201 @@
 # PenguinPal
 
-一个基于 Tauri + Vue + Rust 的 Windows 桌宠助手项目，目标是实现轻量化企鹅形象、语音交互和受控桌面动作执行。
+PenguinPal 是一个基于 Tauri 2 + Vue 3 + Rust 的 Windows 桌宠 Agent。它以轻量企鹅桌宠作为入口，把聊天、多模型接入、本地语音、长期记忆、受控桌面操作、Codex 私有运行时和本地投研简报放在同一个桌面助手里。
+
+当前版本：`0.2.2`
 
 ## 技术栈
 
 - 前端：Vue 3 + TypeScript + Vite
 - 客户端容器：Tauri 2
 - 后端：Rust
-- 动画：Lottie
-- 语音识别：本地 Whisper (whisper-rs)
+- 动画：Lottie + 企鹅 PNG 资源
+- 语音识别：Web Speech / 本地 Whisper (`whisper-rs`)
 - 音频采集：cpal
+- 桌面控制：Windows API / UI Automation / 本地 HTTP 控制层
 
-## 当前能力
+## 当前功能
 
-- 透明置顶桌宠窗口
-- 托盘图标与菜单（显示/隐藏、设置、退出）
-- 聊天界面与消息历史
-- 语音输入（Web Speech / 本地 Whisper）与语音播报（系统 TTS）
-- Provider 配置（Mock / Codex CLI / OpenAI / Anthropic / OpenAI-compatible）
-- 本地 Whisper 语音识别（支持模型下载/加载/管理）
-- 本地投研模式（每日简报、AI 分析、自选资产图表、长期记忆联动）
-- Shell Agent 权限控制
-- 白名单动作网关、权限等级、人工确认与审计日志
+### 桌宠体验
+
+- 透明、置顶、无边框桌宠窗口
+- 企鹅多状态展示：待机、聆听、思考、说话、警戒
+- 可拖动，并自动记住主窗口位置
+- 靠屏幕边缘自动停靠，支持左侧、右侧和顶部停靠状态
+- 托盘图标与菜单：显示/隐藏、设置、退出
+- 独立窗口视图：设置页、气泡消息、投研简报
+
+### 聊天与模型
+
+- 聊天输入、消息历史、今日回复历史
+- 输入历史上/下切换
+- Slash command：
+
+```text
+/help
+/windows list
+/window focus <title>
+/clipboard read
+/pending list
+/confirm
+/cancel
+/type <text>
+/hotkey <keys>
+/click <x> <y> [button]
+/model
+/model list
+/model set <name>
+/history
+/clear
+/settings
+```
+
+- Provider 配置：
+  - Mock
+  - Codex CLI
+  - OpenAI
+  - Anthropic
+  - OpenAI-compatible
+- Codex CLI 私有运行时与私有登录目录
+- Codex CLI 登录状态检测、启动登录、重新登录
+- Codex 自动更新与手动更新
+
+### 语音能力
+
+- Web Speech 语音输入
+- 本地 Whisper 语音识别
+- 连续监听与按键说话模式
+- 默认按键说话快捷键：`CommandOrControl+Alt+Space`
+- 系统 TTS 语音播报回复
+- Whisper 模型下载、加载、卸载、删除
+
+支持的 Whisper 模型：
+
+| 模型 | 大小 | 说明 |
+| --- | --- | --- |
+| Tiny | 75MB | 速度最快，准确率较低 |
+| Base | 142MB | 推荐，平衡速度和准确率 |
+| Small | 466MB | 准确率更高 |
+| Medium | 1.5GB | 高准确率 |
+| Large | 2.9GB | 最高准确率 |
+
+模型文件保存在：
+
+```text
+%APPDATA%/com.penguinpal.app/whisper-models/
+```
+
+### 本地控制电脑
+
+PenguinPal 内置本地控制层，默认监听：
+
+```text
+127.0.0.1:48765..48775
+```
+
+基础路由：
+
+- `GET /healthz`
+- `GET /v1/tools`
+- `GET /v1/pending`
+- `POST /v1/tools/invoke`
+- `POST /v1/pending/:id/confirm`
+- `POST /v1/pending/:id/cancel`
+
+已接入的控制能力：
+
+- 列出窗口、聚焦窗口
+- 打开白名单应用：记事本、计算器、资源管理器、画图、系统设置
+- 读取剪贴板文本
+- 输入单行文本
+- 发送快捷键
+- 截图当前活动窗口
+- 滚动活动窗口或指定坐标
+- 通过 Windows UI Automation 查找元素
+- 读取元素文本
+- 等待元素出现
+- 点击坐标或 UI 元素
+- 设置 UI 元素文本
+
+高风险写操作会进入待确认流，用户确认后才会执行。
+
+### Shell Agent 权限
+
+Shell Agent 权限和桌面控制权限分离。可以独立开关：
+
+- 命令执行
+- 文件修改
+- 文件删除
+- 网络访问
+- 系统级操作
+- 权限有效时长
+
+### 长期记忆
+
+- 长期记忆管理面板
+- 稳定记忆、候选记忆、冲突记忆
+- 记忆刷新与维护
+- 记忆导出和导入
+- 删除记忆
+- 提升候选记忆
+- 解决冲突记忆
+- 历史归档搜索与回忆预览
+
+### 本地投研模式
+
+- 独立投研简报窗口
+- 自选股票 / ETF / 基金统一研究
+- 每日启动弹出投研简报
+- 气泡提醒
+- AI 自动分析与分段展示
+- 自选资产涨跌图表
+- 名称输入与代码输入的 best-effort 解析
+- 研究主题、习惯笔记、决策框架配置
+- 联动长期记忆记录研究习惯
+
+### Agent 路线能力
+
+设置页中已经提供这些 Agent 能力入口：
+
+- 插件 / MCP 工具目录扫描
+- 文档导入本地知识库
+- 文档内容写入长期记忆
+- 浏览器自动化任务草案队列
+- 本地语音闭环配置：唤醒词、本地 TTS、离线 LLM fallback
+
+其中浏览器自动化目前主要是任务入口和队列能力，完整执行器仍属于后续扩展方向。
+
+### 更新与健康检查
+
+- 软件更新检查
+- 打开适合当前平台的 GitHub Release 安装包
+- 启动时自动检查软件更新开关
+- 启动时自动更新 Codex 开关
+- 健康检查：
+  - Codex CLI
+  - Whisper 模型
+  - 麦克风
+  - 插件 / MCP 工具层
+  - 文档记忆
+  - 浏览器自动化入口
+  - 本地语音闭环
+  - 长期记忆
+
+软件更新发布仓库：
+
+```text
+https://github.com/QQG-QQ/penguin-pal/releases
+```
 
 ## 快速开始
 
 ### 环境要求
 
 - Node.js 20+
-- Rust stable（建议 1.78+）
-- Windows 10 1903+（目标平台）
-- Visual Studio Build Tools（Desktop C++）+ Windows SDK
-- LLVM/Clang + CMake（whisper-rs 依赖，首次构建时自动安装）
+- Rust stable，建议 1.78+
+- Windows 10 1903+，当前目标平台
+- Visual Studio Build Tools，包含 Desktop C++ 与 Windows SDK
+- LLVM/Clang + CMake，供 `whisper-rs` 使用，首次构建时可自动安装
 
 ### 安装依赖
 
@@ -42,15 +206,29 @@ npm install
 ### 开发运行
 
 ```bash
-npm run tauri dev
+npm run tauri:dev
 ```
 
-首次运行会自动下载并安装 LLVM 和 CMake 到 `src-tauri/` 下（约 450MB），请耐心等待。MSVC 编译器和 Windows SDK 仍需通过 Visual Studio Build Tools 预先安装。
+首次运行会自动准备项目私有 Codex 运行时，并自动检测/安装 LLVM 与 CMake 到 `src-tauri/` 下。MSVC 编译器和 Windows SDK 仍需通过 Visual Studio Build Tools 预先安装。
 
-如果 PowerShell 的执行策略拦截了 `npx`，可改用：
+如果 PowerShell 执行策略拦截了脚本，可改用：
 
 ```bash
 npx.cmd tauri dev
+```
+
+### 前端开发
+
+```bash
+npm run dev
+```
+
+该命令只启动 Vite 前端。没有 Tauri 后端时，部分能力会进入浏览器调试 fallback。
+
+### 构建前端
+
+```bash
+npm run build
 ```
 
 ### 仅编译后端
@@ -69,15 +247,16 @@ cargo build
 ### 打包构建
 
 ```bash
-npm run tauri build
+npm run tauri:build
 ```
 
 如果 Windows `release` 打包阶段出现这类错误：
+
 - `failed to mmap rmeta metadata`
 - `found invalid metadata files`
 - `页面文件太小，无法完成操作`
 
-先执行：
+可先清理 release 构建产物后重试：
 
 ```bash
 cd src-tauri
@@ -87,103 +266,72 @@ cd ..
 npm run tauri:build
 ```
 
-当前项目的打包脚本在 Windows 发布模式下会自动改成单并发 Cargo，以降低 `rmeta` 损坏和分页文件压力导致的编译失败概率；如果仍然报相同错误，需要增大 Windows 虚拟内存（页面文件）。
-
-## 软件更新仓库
-
-正式软件更新检查与下载页已经切到独立发布仓库：
-
-- `https://github.com/QQG-QQ/penguin-pal/releases`
-
-桌宠里的“软件更新”功能会从这个发布仓库读取最新 release，并优先打开适合当前平台的安装包资产。
+当前打包脚本在 Windows 发布模式下会自动改成单并发 Cargo，以降低 `rmeta` 损坏和分页文件压力导致的编译失败概率。如果仍然报相同错误，需要增大 Windows 虚拟内存，也就是页面文件。
 
 ## 目录结构
 
 ```text
 penguin-pal/
-├─ src-tauri/                 # Rust + Tauri
+├─ src/                       # Vue 前端
+│  ├─ App.vue                 # 主界面与交互编排
+│  ├─ components/             # UI 组件
+│  ├─ lib/                    # 前端桥接、命令解析、模型目录、桌宠布局
+│  └─ types/                  # TypeScript 类型
+├─ src-tauri/                 # Rust + Tauri 后端
 │  ├─ src/
+│  │  ├─ agent/               # Agent 路由、规划、执行、测试循环
+│  │  ├─ ai/                  # Provider、guardrails、AI 记忆
+│  │  ├─ audio/               # Whisper、录音、TTS、模型管理
+│  │  ├─ codex_config/        # Codex 私有配置
+│  │  ├─ control/             # 本地控制服务与 Windows 控制适配
+│  │  ├─ memory/              # 长期记忆存储、检索、维护
+│  │  ├─ permission/          # 权限授予与检查
+│  │  ├─ rule_engine/         # 规则生成与解析
+│  │  ├─ security/            # 审计、OAuth、安全策略
+│  │  ├─ shell_agent/         # Shell Agent 权限与执行器
+│  │  ├─ lib.rs               # Tauri 命令入口与主流程
 │  │  ├─ main.rs              # 程序入口
-│  │  ├─ lib.rs               # Tauri 命令与主流程
-│  │  ├─ audio/               # 音频模块
-│  │  │  ├─ recorder.rs       # 麦克风采集 (cpal)
-│  │  │  ├─ whisper.rs        # Whisper 推理引擎
-│  │  │  ├─ transcriber.rs    # 转写服务
-│  │  │  └─ model_manager.rs  # 模型下载管理
 │  │  ├─ tray.rs              # 托盘逻辑
 │  │  └─ window.rs            # 窗口行为
-│  ├─ .llvm/                  # LLVM 本地安装 (自动下载，已 gitignore)
-│  ├─ .cmake/                 # CMake 本地安装 (自动下载，已 gitignore)
+│  ├─ capabilities/           # Tauri 权限能力配置
+│  ├─ resources/              # 内置资源，例如 Codex 运行时
 │  ├─ setup-llvm.ps1          # LLVM 安装脚本
 │  ├─ setup-cmake.ps1         # CMake 安装脚本
 │  └─ tauri.conf.json         # Tauri 配置
-├─ src/                       # Vue 前端
-│  ├─ App.vue                 # 主界面
-│  ├─ components/             # UI 组件
-│  ├─ lib/assistant.ts        # 前端与后端桥接
-│  └─ types/assistant.ts      # 类型定义
-├─ scripts/
-│  ├─ ensure-llvm.mjs         # LLVM 自动检测安装
-│  └─ ensure-codex-runtime.mjs
-├─ public/animations/         # 桌宠动画资源
+├─ docs/                      # 设计与接口文档
+├─ penguin/                   # 企鹅图像资源
+├─ public/animations/         # Lottie 动画
+├─ scripts/                   # 构建、运行时准备和发布脚本
 └─ package.json
 ```
 
-## Whisper 语音识别
-
-项目内置本地 Whisper 语音识别，无需外网即可使用。
-
-### 支持的模型
-
-| 模型 | 大小 | 说明 |
-|------|------|------|
-| Tiny | 75MB | 速度最快，准确率较低 |
-| Base | 142MB | 推荐，平衡速度和准确率 |
-| Small | 466MB | 准确率更高 |
-| Medium | 1.5GB | 高准确率 |
-| Large | 2.9GB | 最高准确率 |
-
-### 使用方式
-
-1. 打开设置面板
-2. 在"本地 Whisper 语音识别"区域下载模型
-3. 加载模型后即可使用本地语音识别
-
-模型文件保存在 `%APPDATA%/com.penguinpal.app/whisper-models/`。
-
-## 本地投研模式
-
-桌宠支持本地投研模式，会在独立投研简报窗口里生成 AI 分析，并联动长期记忆记录你的研究习惯。
-
-当前支持：
-
-- 自选股票 / ETF / 基金统一研究
-- 每日启动弹出投研简报
-- AI 自动分析与分段展示
-- 自选资产涨跌图表
-- 名称输入与代码输入的 best-effort 解析
-
-说明：
-
-- 股票 / ETF / 基金都可以直接填名称或代码
-- 图表会尽量解析名称并拉取最新涨跌快照
-- 若名称未解析成功，会保留该条并显示原因，不会整项消失
-
 ## 安全边界
 
-- AI API 调用从 Rust 后端发起，避免前端直接暴露密钥
+- AI API 调用由 Rust 后端发起，避免前端直接暴露密钥
 - API Key 默认只保留在运行期内存中，不写入磁盘明文
-- 桌面动作仅允许白名单指令，禁止任意命令执行
+- 桌面动作必须通过白名单动作网关
 - 高风险动作必须人工确认，并写入审计日志
-- Shell Agent 权限独立控制，支持细粒度权限管理
+- 本地控制层按权限等级区分只读、低风险写、高风险写
+- Shell Agent 权限独立控制，默认不授予任意命令能力
+- Codex CLI 即使使用内置私有运行时，也不能绕过 PenguinPal 的动作网关
 
-## 构建依赖
+## 构建依赖说明
 
-whisper-rs 需要 LLVM/Clang、CMake、MSVC C++ 工具链和 Windows SDK。项目已配置本地自动安装 LLVM/CMake：
+`whisper-rs` 需要 LLVM/Clang、CMake、MSVC C++ 工具链和 Windows SDK。项目已配置本地自动安装 LLVM/CMake：
 
-- `npm run tauri dev`：自动检测并安装 LLVM 和 CMake
+- `npm run tauri:dev`：自动检测并安装 LLVM、CMake，并准备开发用 Codex 私有运行时
 - `cargo build`：需先运行 `setup-llvm.ps1` 和 `setup-cmake.ps1`
 
-安装位置（已加入 .gitignore）：
-- LLVM：`src-tauri/.llvm/`（约 400MB）
-- CMake：`src-tauri/.cmake/`（约 50MB）
+安装位置已加入 `.gitignore`：
+
+- LLVM：`src-tauri/.llvm/`，约 400MB
+- CMake：`src-tauri/.cmake/`，约 50MB
+- 开发私有 Codex 运行时：`src-tauri/.codex-runtime/`
+
+## 相关文档
+
+- [本地控制层接口说明](docs/local-control-api.md)
+- [桌宠内置 Codex 运行时](docs/embedded-codex-runtime.md)
+- [Windows 烟测基线](docs/windows-smoke-baseline.md)
+- [角色形象再生成说明](docs/character-regeneration.md)
+- [Codex 开发衔接说明](CODEX_GUIDE.md)

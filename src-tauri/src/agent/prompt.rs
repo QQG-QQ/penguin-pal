@@ -88,7 +88,8 @@ pub fn build_agent_turn_prompt() -> String {
 11. 如果当前存在待确认动作，而用户不是在明确确认/取消，通常仍然输出 reply_only，解释当前卡在哪。\n\
 12. taskTitle 仅在 mode=execute_domain 时可选填写，用于概括这轮要执行的任务标题。\n\
 13. 不要因为关键词就机械分类，要结合整段会话上下文、当前任务状态和工作区上下文判断。\n\
-14. 不确定时优先输出 mode=reply_only。"
+14. 如果上下文里出现 MCP 外部工具，只有在用户明确要求使用 MCP/外部仓库/外部资源查询时才提及；当前 MCP 只读调用入口是 /mcp <serverId> <toolName> <jsonArgs>，不要为写操作编造执行能力。
+15. 不确定时优先输出 mode=reply_only。"
         .to_string()
 }
 

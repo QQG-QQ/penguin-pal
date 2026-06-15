@@ -227,6 +227,10 @@ const cancelPointerInteraction = () => {
 .pet-aura,
 .pet-shadow {
   position: absolute;
+}
+
+.pet-aura,
+.pet-shadow {
   pointer-events: none;
 }
 

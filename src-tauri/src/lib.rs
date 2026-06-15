@@ -21,9 +21,11 @@ mod tray;
 mod window;
 
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Write};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{process::Command, sync::Mutex, time::Duration};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
 /// Memory 维护线程停止标志
 static MEMORY_MAINTENANCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -31,6 +33,8 @@ const SESSION_TURN_CONTEXT_LIMIT: usize = 12;
 const PROVIDER_HISTORY_LIMIT: usize = 24;
 const WHISPER_PUSH_TO_TALK_EVENT: &str = "penguinpal://whisper-push-to-talk";
 const SHELL_CONFIRMATION_TIMEOUT_MS: u64 = 60_000;
+const MCP_CONTROL_PENDING_TOOL: &str = "mcp_tool_call";
+const MCP_CONTROL_PENDING_TTL_MS: u64 = 30_000;
 
 /// 请求停止 memory 维护线程
 #[allow(dead_code)]
@@ -49,13 +53,14 @@ use crate::{
     ai::{guardrails, memory as ai_memory, provider},
     app_state::{
         default_system_prompt, load, now_millis, save, ActionExecutionResult,
-        AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, OAuthFlowResult,
+        AssistantSnapshot, AuthMode, ChatMessage, ChatResponse, DesktopAction, OAuthFlowResult,
         PendingShellCommand, PendingShellConfirmationInfo, PetMode, ProviderConfigInput,
-        ProviderKind, RuntimeState, SavedWindowPosition, ShellPermissionSettings, VoiceInputMode,
+        ProviderConfig, ProviderKind, RuntimeState, SavedWindowPosition, ShellPermissionSettings, VoiceInputMode,
         DEFAULT_OAUTH_REDIRECT_URL,
     },
     audio::{types as audio_types, TranscriberService},
     codex_runtime::{apply_private_env, initialize_codex_config, load_codex_config, private_auth_path, resolve_for_app},
+    control::types::{ControlPendingRequest, ControlRiskLevel, ToolInvokeResponse},
     control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
@@ -340,6 +345,103 @@ fn sync_shell_permissions_to_checker(
     Ok(())
 }
 
+fn hide_instead_of_close<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    let event_window = window.clone();
+    let hide_window = window.clone();
+    event_window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = hide_window.hide();
+        }
+    });
+}
+
+fn bundled_fastmcp_script(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .resolve(
+            "resources/mcp/fastmcp_local_tools.py",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .ok()
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("resources")
+                .join("mcp")
+                .join("fastmcp_local_tools.py");
+            dev_path.is_file().then_some(dev_path)
+        })
+}
+
+fn prepare_fastmcp_local_script(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let source = bundled_fastmcp_script(app)
+        .ok_or_else(|| "未找到内置 FastMCP 本地服务脚本。".to_string())?;
+    let target_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?
+        .join("mcp");
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|error| format!("创建 MCP 数据目录失败: {error}"))?;
+    let target = target_dir.join("fastmcp_local_tools.py");
+    std::fs::copy(&source, &target)
+        .map_err(|error| format!("准备 FastMCP 本地服务失败: {error}"))?;
+    Ok(target)
+}
+
+fn configure_builtin_mcp_defaults(app: &AppHandle, runtime: &mut RuntimeState) -> Result<(), String> {
+    let fastmcp_script = prepare_fastmcp_local_script(app)?;
+    let fastmcp_script = fastmcp_script.to_string_lossy().to_string();
+    runtime.agent_roadmap.plugin_tools.enabled = true;
+    runtime.agent_roadmap.plugin_tools.mcp_gateway_enabled = true;
+
+    if runtime.agent_roadmap.plugin_tools.mcp_servers.is_empty() {
+        runtime.agent_roadmap.plugin_tools.mcp_servers = app_state::default_mcp_servers();
+    }
+
+    for server in &mut runtime.agent_roadmap.plugin_tools.mcp_servers {
+        if server.id == "github-mcp"
+            && (server.command == "github-mcp-server"
+                || server.command.trim().is_empty()
+                || server.args.iter().any(|arg| arg == "--read-only"))
+        {
+            server.enabled = true;
+            server.transport = "stdio".to_string();
+            server.command = "docker".to_string();
+            server.args = vec![
+                "run".to_string(),
+                "--rm".to_string(),
+                "-i".to_string(),
+                "-e".to_string(),
+                "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                "ghcr.io/github/github-mcp-server".to_string(),
+                "stdio".to_string(),
+                "--read-only".to_string(),
+            ];
+            if server.env.is_empty() {
+                server.env = vec!["GITHUB_PERSONAL_ACCESS_TOKEN=".to_string()];
+            }
+            server.read_only = true;
+            server.notes = "官方 GitHub MCP Server。需要 Docker 和 GitHub PAT。".to_string();
+        }
+
+        if server.id == "fastmcp-local"
+            && (server.args.iter().any(|arg| arg == "path/to/server.py")
+                || server.args.iter().any(|arg| arg.ends_with("fastmcp_local_tools.py"))
+                || server.args.is_empty())
+        {
+            server.enabled = true;
+            server.transport = "stdio".to_string();
+            server.command = "python".to_string();
+            server.args = vec![fastmcp_script.clone()];
+            server.tool_allowlist = vec!["penguin_status".to_string(), "echo_note".to_string()];
+            server.read_only = true;
+            server.notes = "桌宠内置的本地 MCP 示例服务，不依赖额外安装。".to_string();
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodexCliStatus {
@@ -465,6 +567,36 @@ struct PluginToolScanResult {
     directories: Vec<String>,
     tools: Vec<PluginToolManifest>,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpGatewayDiagnosis {
+    ok: bool,
+    message: String,
+    tools: Vec<PluginToolManifest>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DockerSetupResult {
+    status: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpNaturalToolDecision {
+    should_call: bool,
+    #[serde(default)]
+    server_id: Option<String>,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    arguments: Option<serde_json::Value>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 fn first_non_empty_output(output: &std::process::Output) -> Option<String> {
@@ -877,6 +1009,9 @@ fn get_control_service_status(app: AppHandle) -> Result<ControlServiceStatus, St
 
 #[tauri::command]
 async fn confirm_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
+    if let Some(pending) = try_take_mcp_pending(&app, &pending_id)? {
+        return confirm_mcp_pending(&app, pending).await;
+    }
     agent_router::confirm_control_pending(&app, &pending_id).await
 }
 
@@ -1050,6 +1185,36 @@ fn normalize_agent_roadmap_config(
     mut config: app_state::AgentRoadmapConfig,
 ) -> app_state::AgentRoadmapConfig {
     config.plugin_tools.tool_dirs = normalize_string_list(config.plugin_tools.tool_dirs);
+    if config.plugin_tools.mcp_servers.is_empty() {
+        config.plugin_tools.mcp_servers = app_state::default_mcp_servers();
+    } else {
+        config.plugin_tools.mcp_servers = config
+            .plugin_tools
+            .mcp_servers
+            .into_iter()
+            .filter_map(|mut server| {
+                server.id = server.id.trim().to_string();
+                server.name = server.name.trim().to_string();
+                server.transport = server.transport.trim().to_lowercase();
+                server.command = server.command.trim().to_string();
+                server.args = normalize_string_list(server.args);
+                server.env = normalize_string_list(server.env);
+                server.tool_allowlist = normalize_string_list(server.tool_allowlist);
+                server.notes = server.notes.trim().to_string();
+                if server.transport.is_empty() {
+                    server.transport = "stdio".to_string();
+                }
+                if server.id.is_empty() {
+                    server.id = server.name.to_lowercase().replace(' ', "-");
+                }
+                if server.name.is_empty() || server.command.is_empty() {
+                    None
+                } else {
+                    Some(server)
+                }
+            })
+            .collect();
+    }
     config.document_memory.watched_dirs =
         normalize_string_list(config.document_memory.watched_dirs);
     config.browser_automation.allowed_domains =
@@ -1162,6 +1327,7 @@ fn save_provider_config(
     runtime.launch_at_startup = input.launch_at_startup;
     runtime.auto_update_codex = input.auto_update_codex;
     runtime.auto_check_app_update = input.auto_check_app_update;
+    runtime.pet_status_visible = input.pet_status_visible;
     runtime.research = research::normalize_config(&input.research);
     runtime.provider.voice_reply = input.voice_reply;
     runtime.provider.retain_history = input.retain_history;
@@ -2002,6 +2168,20 @@ fn build_chat_history_for_provider(
     history
 }
 
+fn render_pet_status_context(status: &app_state::PetStatus) -> String {
+    format!(
+        "## 企鹅状态与性格\n- mood: {:?}\n- energy: {}\n- social_need: {}\n- orderliness: {}\n- affection: {}\n- curiosity: {}\n- summary: {}\n- personality_style: {}\n\n使用方式：这些状态由日常对话、任务压力、陪伴频率、维护操作和长期记忆自然形成。不要让用户喂食、清洁、休息或玩耍，也不要逐项汇报数值。把它们当作桌宠当前性格和语气的背景：结合长期记忆里的用户偏好，微调回答的亲近感、主动性、安抚程度和探索欲；功能性回答仍优先清晰、准确、可执行。",
+        status.mood,
+        status.energy,
+        status.hunger,
+        status.cleanliness,
+        status.affection,
+        status.curiosity,
+        status.summary.trim(),
+        status.personality_style()
+    )
+}
+
 fn render_recent_conversation_context(messages: &[ChatMessage]) -> Option<String> {
     let rendered = messages
         .iter()
@@ -2049,6 +2229,331 @@ fn render_active_task_context(task: Option<&agent::types::AgentTaskRun>) -> Opti
 fn render_workspace_context(workspace_root: Option<&str>) -> Option<String> {
     workspace_context::detect_workspace_context(workspace_root)
         .map(|context| context.render_for_prompt())
+}
+
+fn render_mcp_context(runtime: &RuntimeState) -> Option<String> {
+    let config = &runtime.agent_roadmap.plugin_tools;
+    if !config.enabled || !config.mcp_gateway_enabled {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    for server in config.mcp_servers.iter().filter(|server| server.enabled) {
+        lines.push(format!(
+            "- serverId: {}；name: {}；transport: {}；readOnly: {}",
+            server.id, server.name, server.transport, server.read_only
+        ));
+        if !server.tool_allowlist.is_empty() {
+            lines.push(format!("  allowlist: {}", server.tool_allowlist.join(", ")));
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "## MCP 外部工具\n{}\n使用方式：只有当用户明确要求查询外部 MCP 资源，或明确使用 /mcp 命令时才使用。当前自动直连只允许 readOnly=true 的 server；写操作必须等待确认流完善，不要自行调用。\n",
+            lines.join("\n")
+        ))
+    }
+}
+
+fn parse_mcp_chat_command(input: &str) -> Option<(String, String, serde_json::Value)> {
+    let rest = input
+        .trim()
+        .strip_prefix("/mcp")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let mut parts = rest.splitn(3, char::is_whitespace);
+    let server_id = parts.next()?.trim();
+    let tool_name = parts.next()?.trim();
+    if server_id.is_empty() || tool_name.is_empty() {
+        return None;
+    }
+    let args = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .flatten()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some((server_id.to_string(), tool_name.to_string(), args))
+}
+
+fn looks_like_mcp_natural_request(input: &str) -> bool {
+    let lowered = input.trim().to_lowercase();
+    if lowered.starts_with("/mcp") {
+        return false;
+    }
+    [
+        "mcp",
+        "github mcp",
+        "github",
+        "仓库",
+        "repo",
+        "repository",
+        "issue",
+        "pull request",
+        "pr",
+        "actions",
+        "外部工具",
+        "外部资源",
+    ]
+    .iter()
+    .any(|keyword| lowered.contains(keyword))
+}
+
+fn build_mcp_natural_prompt(mcp_context: &str) -> String {
+    format!(
+        "你是 PenguinPal 的 MCP 只读工具选择器。\n\
+只能输出一个 JSON 对象，不要输出 markdown、解释或代码块。\n\
+输出 schema：{{\"shouldCall\":true|false,\"serverId\":\"...|null\",\"toolName\":\"...|null\",\"arguments\":{{...}},\"reason\":\"...\"}}\n\
+规则：\n\
+1. 只有用户明确要求使用 MCP、GitHub MCP、GitHub/仓库/Issue/PR/Actions 等外部资源查询时，才 shouldCall=true。\n\
+2. 只能选择上下文中 enabled 且 readOnly=true 的 server。\n\
+3. toolName 必须来自 allowlist 或用户明确提到的已扫描工具名；不确定时 shouldCall=false。\n\
+4. arguments 必须是 JSON object；不要猜隐私 token 或本地路径。\n\
+5. 写操作、创建/修改/删除/评论/合并/触发工作流等请求必须 shouldCall=false。\n\n\
+{mcp_context}"
+    )
+}
+
+async fn plan_mcp_natural_tool_call(
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    mcp_context: &str,
+) -> Option<McpNaturalToolDecision> {
+    if !looks_like_mcp_natural_request(user_input) {
+        return None;
+    }
+    let prompt = build_mcp_natural_prompt(mcp_context);
+    let raw = agent::model_adapter::request_structured_agent_output(
+        provider_config,
+        api_key,
+        oauth_access_token,
+        codex_command,
+        codex_home,
+        codex_thread_id,
+        permission_level,
+        allowed_actions,
+        &prompt,
+        user_input,
+    )
+    .await
+    .ok()?;
+    serde_json::from_str::<McpNaturalToolDecision>(&raw).ok()
+}
+
+async fn summarize_mcp_tool_result(
+    provider_config: &ProviderConfig,
+    api_key: Option<String>,
+    oauth_access_token: Option<String>,
+    codex_command: Option<String>,
+    codex_home: Option<String>,
+    codex_thread_id: &mut Option<String>,
+    permission_level: u8,
+    allowed_actions: &[DesktopAction],
+    user_input: &str,
+    server: &app_state::McpServerEntry,
+    tool_name: &str,
+    result: &serde_json::Value,
+) -> Option<String> {
+    let result_json = serde_json::to_string_pretty(result).ok()?;
+    let system = ChatMessage::new(
+        "system",
+        "你是 PenguinPal 的 MCP 工具结果摘要器。把工具返回的 JSON 转成给用户看的简洁中文回答。不要编造 JSON 里没有的信息；保留关键名称、状态、链接、数量和下一步建议。若结果为空或报错，要直说。不要输出大段原始 JSON。".to_string(),
+    );
+    let user = ChatMessage::user(format!(
+        "用户原始问题：{}\nMCP Server：{}\n工具：{}\n工具结果 JSON：\n{}",
+        user_input.trim(),
+        server.name,
+        tool_name,
+        result_json
+    ));
+    provider::respond(
+        provider_config,
+        api_key,
+        oauth_access_token,
+        codex_command,
+        codex_home,
+        codex_thread_id,
+        permission_level,
+        allowed_actions,
+        &[system, user],
+    )
+    .await
+    .ok()
+    .map(|(reply, _)| reply)
+    .filter(|reply| !reply.trim().is_empty())
+}
+
+fn fallback_mcp_json_reply(prefix: &str, tool_name: &str, result: &serde_json::Value) -> String {
+    format!(
+        "{prefix}\n\nMCP 工具 `{}` 调用完成：\n```json\n{}\n```",
+        tool_name,
+        serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+    )
+}
+
+fn build_mcp_pending_request(
+    server: &app_state::McpServerEntry,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> ControlPendingRequest {
+    let created_at = now_millis();
+    ControlPendingRequest {
+        id: format!("mcp-{created_at}-{}", uuid::Uuid::new_v4().simple()),
+        tool: MCP_CONTROL_PENDING_TOOL.to_string(),
+        title: format!("待确认：{} / {}", server.name, tool_name),
+        prompt: format!(
+            "即将调用非只读 MCP 工具 `{}`。这可能会修改外部系统或远程资源，请确认。",
+            tool_name
+        ),
+        preview: serde_json::json!({
+            "serverId": server.id,
+            "serverName": server.name,
+            "toolName": tool_name,
+            "readOnly": server.read_only,
+            "arguments": arguments,
+        }),
+        args: serde_json::json!({
+            "serverId": server.id,
+            "toolName": tool_name,
+            "arguments": arguments,
+        }),
+        created_at,
+        expires_at: created_at + MCP_CONTROL_PENDING_TTL_MS,
+        minimum_permission_level: 2,
+        risk_level: ControlRiskLevel::WriteHigh,
+    }
+}
+
+fn insert_mcp_pending(app: &AppHandle, pending_request: ControlPendingRequest) -> Result<(), String> {
+    let control_state: State<'_, ControlServiceState> = app.state();
+    let mut pending_requests = control_state
+        .pending_requests()
+        .map_err(|error| format!("MCP pending 写入失败: {error}"))?;
+    pending_requests.insert(pending_request.id.clone(), pending_request);
+    Ok(())
+}
+
+fn try_take_mcp_pending(
+    app: &AppHandle,
+    pending_id: &str,
+) -> Result<Option<ControlPendingRequest>, String> {
+    let control_state: State<'_, ControlServiceState> = app.state();
+    let mut pending_requests = control_state
+        .pending_requests()
+        .map_err(|error| format!("读取 MCP pending 失败: {error}"))?;
+    let Some(pending) = pending_requests.get(pending_id).cloned() else {
+        return Ok(None);
+    };
+    if pending.tool != MCP_CONTROL_PENDING_TOOL {
+        return Ok(None);
+    }
+    Ok(pending_requests.remove(pending_id))
+}
+
+async fn confirm_mcp_pending(app: &AppHandle, pending: ControlPendingRequest) -> Result<ToolInvokeResponse, String> {
+    let server_id = pending
+        .args
+        .get("serverId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "MCP pending 缺少 serverId。".to_string())?;
+    let tool_name = pending
+        .args
+        .get("toolName")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "MCP pending 缺少 toolName。".to_string())?;
+    let arguments = pending
+        .args
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let (server, provider_config, api_key, oauth_access_token, permission_level, allowed_actions) = {
+        let runtime_state: State<'_, Mutex<RuntimeState>> = app.state();
+        let runtime = runtime_state
+            .lock()
+            .map_err(|_| "助手状态锁定失败".to_string())?;
+        let server = runtime
+            .agent_roadmap
+            .plugin_tools
+            .mcp_servers
+            .iter()
+            .find(|server| server.id == server_id)
+            .cloned()
+            .ok_or_else(|| format!("未找到 MCP Server：{server_id}"))?;
+        (
+            server,
+            runtime.provider.clone(),
+            runtime.api_key.clone(),
+            runtime.oauth_access_token.clone(),
+            runtime.permission_level,
+            policy::actions_for_level(runtime.permission_level),
+        )
+    };
+    let result = call_mcp_server_tool_confirmed(&server, tool_name, arguments)?;
+    let codex_runtime = resolve_for_app(app).ok();
+    let mut codex_thread_id = {
+        let runtime_state: State<'_, Mutex<RuntimeState>> = app.state();
+        runtime_state
+            .lock()
+            .ok()
+            .and_then(|runtime| runtime.codex_thread_id.clone())
+    };
+    let message = summarize_mcp_tool_result(
+        &provider_config,
+        api_key,
+        oauth_access_token,
+        codex_runtime
+            .as_ref()
+            .and_then(|item| item.command.as_ref())
+            .map(|path| path.to_string_lossy().to_string()),
+        codex_runtime
+            .as_ref()
+            .map(|item| item.home_root.to_string_lossy().to_string()),
+        &mut codex_thread_id,
+        permission_level,
+        &allowed_actions,
+        "用户确认执行 MCP 写操作",
+        &server,
+        tool_name,
+        &result,
+    )
+    .await
+    .unwrap_or_else(|| fallback_mcp_json_reply("MCP 写操作已确认并执行完成。", tool_name, &result));
+    {
+        let runtime_state: State<'_, Mutex<RuntimeState>> = app.state();
+        let mut runtime = runtime_state
+            .lock()
+            .map_err(|_| "助手状态锁定失败".to_string())?;
+        runtime.codex_thread_id = codex_thread_id.clone();
+        audit::push_entry(
+            &mut runtime.audit_trail,
+            audit::record(
+                "mcp_pending_confirmed",
+                "ok",
+                format!("server={} tool={} pending_id={}", server.id, tool_name, pending.id),
+                3,
+            ),
+        );
+        save(app, &runtime)?;
+    }
+    Ok(ToolInvokeResponse {
+        status: "success".to_string(),
+        result: Some(result),
+        message: Some(message),
+        pending_request: None,
+        error: None,
+    })
 }
 
 fn looks_like_control_confirmation_reply(input: &str) -> bool {
@@ -2138,6 +2643,108 @@ async fn send_chat_message(
         });
     }
 
+    if let Some((server_id, tool_name, arguments)) = parse_mcp_chat_command(trimmed) {
+        let runtime = state
+            .lock()
+            .map_err(|_| "助手状态锁定失败".to_string())?
+            .clone();
+        if !runtime.agent_roadmap.plugin_tools.enabled
+            || !runtime.agent_roadmap.plugin_tools.mcp_gateway_enabled
+        {
+            return Err("请先在设置中启用插件/MCP 工具层和 MCP 网关。".to_string());
+        }
+        let server = runtime
+            .agent_roadmap
+            .plugin_tools
+            .mcp_servers
+            .iter()
+            .find(|item| item.id == server_id)
+            .cloned()
+            .ok_or_else(|| format!("未找到 MCP Server：{server_id}"))?;
+        if runtime.agent_roadmap.plugin_tools.require_confirmation && !server.read_only {
+            let pending_request = build_mcp_pending_request(&server, &tool_name, arguments);
+            insert_mcp_pending(&app, pending_request.clone())?;
+            return Ok(ChatResponse {
+                reply: ChatMessage::assistant(format!(
+                    "MCP 工具 `{}` 不是只读调用，我已经放入确认队列。确认后再执行。",
+                    tool_name
+                )),
+                provider_label: "MCP".to_string(),
+                snapshot: snapshot_from_runtime(&runtime),
+                agent: Some(AgentMessageMeta {
+                    route: AgentRoute::Chat,
+                    planned_tools: vec![format!("mcp://{server_id}/{tool_name}")],
+                    pending_request: Some(pending_request),
+                    task: None,
+                    summary: None,
+                }),
+                pending_shell_confirmation: None,
+            });
+        }
+        let result = call_mcp_server_tool(&server, &tool_name, arguments)?;
+        let allowed_actions = policy::actions_for_level(runtime.permission_level);
+        let codex_runtime = resolve_for_app(&app).ok();
+        let mut codex_thread_id = runtime.codex_thread_id.clone();
+        let reply_text = summarize_mcp_tool_result(
+            &runtime.provider,
+            runtime.api_key.clone(),
+            runtime.oauth_access_token.clone(),
+            codex_runtime
+                .as_ref()
+                .and_then(|item| item.command.as_ref())
+                .map(|path| path.to_string_lossy().to_string()),
+            codex_runtime
+                .as_ref()
+                .map(|item| item.home_root.to_string_lossy().to_string()),
+            &mut codex_thread_id,
+            runtime.permission_level,
+            &allowed_actions,
+            trimmed,
+            &server,
+            &tool_name,
+            &result,
+        )
+        .await
+        .unwrap_or_else(|| fallback_mcp_json_reply("MCP 工具调用完成。", &tool_name, &result));
+        let reply_message = ChatMessage::assistant(reply_text);
+        let snapshot = {
+            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            let user_message = ChatMessage::user(trimmed.to_string());
+            runtime.messages.push(user_message.clone());
+            runtime.messages.push(reply_message.clone());
+            runtime.codex_thread_id = codex_thread_id.clone();
+            runtime.mode = PetMode::Idle;
+            ai_memory::trim_history(&mut runtime.messages);
+            let _ = session_thread::append_message(&app, &mut runtime, &user_message);
+            let _ = session_thread::append_message(&app, &mut runtime, &reply_message);
+            audit::push_entry(
+                &mut runtime.audit_trail,
+                audit::record(
+                    "mcp_chat_tool_call",
+                    "ok",
+                    format!("server={} tool={} readOnly={}", server.id, tool_name, server.read_only),
+                    if server.read_only { 1 } else { 3 },
+                ),
+            );
+            save(&app, &runtime)?;
+            snapshot_from_runtime(&runtime)
+        };
+
+        return Ok(ChatResponse {
+            reply: reply_message,
+            provider_label: "MCP".to_string(),
+            snapshot,
+            agent: Some(AgentMessageMeta {
+                route: AgentRoute::Chat,
+                planned_tools: vec![format!("mcp://{server_id}/{tool_name}")],
+                pending_request: None,
+                task: None,
+                summary: None,
+            }),
+            pending_shell_confirmation: None,
+        });
+    }
+
     let user_message = ChatMessage::user(trimmed.to_string());
     let (
         provider_config,
@@ -2152,9 +2759,12 @@ async fn send_chat_message(
         recent_conversation_context,
         permission_level,
         allowed_actions,
+        pet_status_context,
+        mcp_context,
     ) = {
         let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
         expire_transient_state(&mut runtime);
+        runtime.pet_status.nudge_for_user_message(now_millis(), trimmed);
         runtime.mode = PetMode::Thinking;
         runtime.messages.push(user_message.clone());
         ai_memory::trim_history(&mut runtime.messages);
@@ -2192,6 +2802,8 @@ async fn send_chat_message(
             render_recent_conversation_context(&session_turn_messages),
             runtime.permission_level,
             allowed_actions,
+            render_pet_status_context(&runtime.pet_status),
+            render_mcp_context(&runtime),
         )
     };
 
@@ -2202,9 +2814,148 @@ async fn send_chat_message(
         .ok()
         .flatten();
     let agent_turn_conversation_context = join_prompt_sections(&[
+        Some(pet_status_context.as_str()),
+        mcp_context.as_deref(),
         recent_conversation_context.as_deref(),
         archive_recall_context.as_deref(),
     ]);
+    let provider_extra_context = join_prompt_sections(&[
+        Some(pet_status_context.as_str()),
+        mcp_context.as_deref(),
+        archive_recall_context.as_deref(),
+    ]);
+
+    if let Some(mcp_context_text) = mcp_context.as_deref() {
+        let mut codex_thread_id = {
+            let runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+            runtime.codex_thread_id.clone()
+        };
+        if let Some(decision) = plan_mcp_natural_tool_call(
+            &provider_config,
+            api_key.clone(),
+            oauth_access_token.clone(),
+            codex_command.clone(),
+            codex_home.clone(),
+            &mut codex_thread_id,
+            permission_level,
+            &allowed_actions,
+            trimmed,
+            mcp_context_text,
+        )
+        .await
+        {
+            if decision.should_call {
+                let server_id = decision.server_id.unwrap_or_default();
+                let tool_name = decision.tool_name.unwrap_or_default();
+                if !server_id.trim().is_empty() && !tool_name.trim().is_empty() {
+                    let runtime = state
+                        .lock()
+                        .map_err(|_| "助手状态锁定失败".to_string())?
+                        .clone();
+                    let server = runtime
+                        .agent_roadmap
+                        .plugin_tools
+                        .mcp_servers
+                        .iter()
+                        .find(|item| item.id == server_id)
+                        .cloned()
+                        .ok_or_else(|| format!("未找到 MCP Server：{server_id}"))?;
+                    let arguments = decision.arguments.unwrap_or_else(|| serde_json::json!({}));
+                    if runtime.agent_roadmap.plugin_tools.require_confirmation && !server.read_only {
+                        let pending_request = build_mcp_pending_request(&server, &tool_name, arguments);
+                        insert_mcp_pending(&app, pending_request.clone())?;
+                        let reply_message = ChatMessage::assistant(format!(
+                            "MCP 工具 `{}` 不是只读调用，我已经放入确认队列。确认后再执行。",
+                            tool_name
+                        ));
+                        let snapshot = {
+                            let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+                            runtime.messages.push(reply_message.clone());
+                            runtime.codex_thread_id = codex_thread_id.clone();
+                            runtime.mode = PetMode::Idle;
+                            ai_memory::trim_history(&mut runtime.messages);
+                            let _ = session_thread::append_message(&app, &mut runtime, &reply_message);
+                            save(&app, &runtime)?;
+                            snapshot_from_runtime(&runtime)
+                        };
+                        return Ok(ChatResponse {
+                            reply: reply_message,
+                            provider_label: "MCP".to_string(),
+                            snapshot,
+                            agent: Some(AgentMessageMeta {
+                                route: AgentRoute::Chat,
+                                planned_tools: vec![format!("mcp://{server_id}/{tool_name}")],
+                                pending_request: Some(pending_request),
+                                task: None,
+                                summary: None,
+                            }),
+                            pending_shell_confirmation: None,
+                        });
+                    }
+                    let result = call_mcp_server_tool(
+                        &server,
+                        &tool_name,
+                        arguments,
+                    )?;
+                    let reason = decision.reason.unwrap_or_else(|| "自然语言 MCP 查询".to_string());
+                    let reply_text = summarize_mcp_tool_result(
+                        &provider_config,
+                        api_key.clone(),
+                        oauth_access_token.clone(),
+                        codex_command.clone(),
+                        codex_home.clone(),
+                        &mut codex_thread_id,
+                        permission_level,
+                        &allowed_actions,
+                        trimmed,
+                        &server,
+                        &tool_name,
+                        &result,
+                    )
+                    .await
+                    .unwrap_or_else(|| fallback_mcp_json_reply(&reason, &tool_name, &result));
+                    let reply_message = ChatMessage::assistant(reply_text);
+                    let snapshot = {
+                        let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+                        runtime.messages.push(reply_message.clone());
+                        runtime.codex_thread_id = codex_thread_id.clone();
+                        runtime
+                            .pet_status
+                            .nudge_for_assistant_reply(now_millis(), trimmed, &reply_message.content);
+                        runtime.mode = PetMode::Idle;
+                        ai_memory::trim_history(&mut runtime.messages);
+                        let _ = session_thread::append_message(&app, &mut runtime, &reply_message);
+                        audit::push_entry(
+                            &mut runtime.audit_trail,
+                            audit::record(
+                                "mcp_natural_tool_call",
+                                "ok",
+                                format!("server={} tool={} readOnly={}", server.id, tool_name, server.read_only),
+                                1,
+                            ),
+                        );
+                        save(&app, &runtime)?;
+                        snapshot_from_runtime(&runtime)
+                    };
+
+                    return Ok(ChatResponse {
+                        reply: reply_message,
+                        provider_label: "MCP".to_string(),
+                        snapshot,
+                        agent: Some(AgentMessageMeta {
+                            route: AgentRoute::Chat,
+                            planned_tools: vec![format!("mcp://{server_id}/{tool_name}")],
+                            pending_request: None,
+                            task: None,
+                            summary: None,
+                        }),
+                        pending_shell_confirmation: None,
+                    });
+                }
+            }
+        }
+    }
+
     let (
         reply_text,
         provider_label,
@@ -2224,7 +2975,7 @@ async fn send_chat_message(
             permission_level,
             &allowed_actions,
             &provider_history,
-            archive_recall_context.as_deref(),
+            provider_extra_context.as_deref(),
         );
         let (reply, label) = provider::respond(
             &provider_config,
@@ -2341,7 +3092,7 @@ async fn send_chat_message(
                     permission_level,
                     &allowed_actions,
                     &provider_history,
-                    archive_recall_context.as_deref(),
+                    provider_extra_context.as_deref(),
                 );
                 let (reply, label) = provider::respond(
                     &provider_config,
@@ -2380,6 +3131,9 @@ async fn send_chat_message(
     let snapshot = {
         let mut runtime = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
         runtime.messages.push(reply_message.clone());
+        runtime
+            .pet_status
+            .nudge_for_assistant_reply(now_millis(), trimmed, &reply_message.content);
         runtime.mode = PetMode::Idle;
         runtime.codex_thread_id = codex_thread_id.clone();
         ai_memory::trim_history(&mut runtime.messages);
@@ -2769,6 +3523,7 @@ fn roadmap_status_from_runtime(runtime: &RuntimeState) -> AgentRoadmapStatus {
             .to_string(),
             detail: vec![
                 format!("MCP 网关：{}", if config.plugin_tools.mcp_gateway_enabled { "启用" } else { "关闭" }),
+                format!("MCP Server：{} 个（启用 {} 个）", config.plugin_tools.mcp_servers.len(), config.plugin_tools.mcp_servers.iter().filter(|server| server.enabled).count()),
                 format!("工具目录：{} 个", config.plugin_tools.tool_dirs.len()),
             ],
         },
@@ -2916,6 +3671,485 @@ fn plugin_manifest_from_path(path: &std::path::Path) -> Option<PluginToolManifes
     })
 }
 
+fn mcp_tool_manifest(
+    server: &app_state::McpServerEntry,
+    tool: &serde_json::Value,
+) -> Option<PluginToolManifest> {
+    let name = tool.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if !server.tool_allowlist.is_empty()
+        && !server
+            .tool_allowlist
+            .iter()
+            .any(|allowed| allowed == name || name.starts_with(&format!("{allowed}.")))
+    {
+        return None;
+    }
+    let summary = tool
+        .get("description")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("MCP server 提供的工具。");
+
+    Some(PluginToolManifest {
+        id: format!("mcp-{}-{name}", server.id),
+        name: format!("{} / {name}", server.name),
+        path: format!("mcp://{}/{}", server.id, name),
+        kind: "mcp".to_string(),
+        enabled: server.enabled,
+        summary: summary.to_string(),
+    })
+}
+
+fn write_mcp_jsonrpc(
+    stdin: &mut std::process::ChildStdin,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<(), String> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    writeln!(stdin, "{request}").map_err(|error| format!("发送 MCP 请求失败: {error}"))?;
+    stdin
+        .flush()
+        .map_err(|error| format!("刷新 MCP 请求失败: {error}"))
+}
+
+fn read_mcp_jsonrpc(
+    reader: &mut BufReader<std::process::ChildStdout>,
+    expected_id: u64,
+) -> Result<serde_json::Value, String> {
+    let mut line = String::new();
+    for _ in 0..120 {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("读取 MCP 响应失败: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value = match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.get("id").and_then(|id| id.as_u64()) != Some(expected_id) {
+            continue;
+        }
+        if let Some(error) = value.get("error") {
+            return Err(format!("MCP 返回错误: {error}"));
+        }
+        return Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null));
+    }
+    Err("等待 MCP 响应超时或连接已关闭。".to_string())
+}
+
+fn scan_mcp_server_tools(
+    server: &app_state::McpServerEntry,
+) -> Result<Vec<PluginToolManifest>, String> {
+    if !server.enabled {
+        return Ok(Vec::new());
+    }
+    if server.transport != "stdio" {
+        return Err(format!("{} 暂不支持 {} transport。", server.name, server.transport));
+    }
+
+    let mut command = Command::new(&server.command);
+    command
+        .args(&server.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for item in &server.env {
+        if let Some((key, value)) = item.split_once('=') {
+            let key = key.trim();
+            if !key.is_empty() {
+                command.env(key, value.trim());
+            }
+        }
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("启动 MCP Server {} 失败: {error}", server.name))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{} 无法打开 stdin。", server.name))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{} 无法打开 stdout。", server.name))?;
+    let mut reader = BufReader::new(stdout);
+
+    let init_params = serde_json::json!({
+        "protocolVersion": "2024-11-05",
+        "capabilities": {},
+        "clientInfo": {
+            "name": "PenguinPal",
+            "version": env!("CARGO_PKG_VERSION")
+        }
+    });
+    write_mcp_jsonrpc(&mut stdin, 1, "initialize", init_params)?;
+    let _ = read_mcp_jsonrpc(&mut reader, 1)?;
+    write_mcp_jsonrpc(&mut stdin, 2, "tools/list", serde_json::json!({}))?;
+    let result = read_mcp_jsonrpc(&mut reader, 2)?;
+    let tools = result
+        .get("tools")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|tool| mcp_tool_manifest(server, tool))
+        .collect::<Vec<_>>();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(tools)
+}
+
+fn call_mcp_server_tool(
+    server: &app_state::McpServerEntry,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if !server.read_only {
+        return Err(format!(
+            "{} 不是只读 MCP Server，暂不允许绕过确认流直接调用。",
+            server.name
+        ));
+    }
+
+    call_mcp_server_tool_confirmed(server, tool_name, arguments)
+}
+
+fn call_mcp_server_tool_confirmed(
+    server: &app_state::McpServerEntry,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if !server.enabled {
+        return Err(format!("MCP Server {} 未启用。", server.name));
+    }
+    if server.transport != "stdio" {
+        return Err(format!("{} 暂不支持 {} transport。", server.name, server.transport));
+    }
+    if !server.tool_allowlist.is_empty()
+        && !server
+            .tool_allowlist
+            .iter()
+            .any(|allowed| allowed == tool_name || tool_name.starts_with(&format!("{allowed}.")))
+    {
+        return Err(format!("{tool_name} 不在 {} 的工具 allowlist 中。", server.name));
+    }
+
+    call_mcp_server_tool_unchecked(server, tool_name, arguments)
+}
+
+fn call_mcp_server_tool_unchecked(
+    server: &app_state::McpServerEntry,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut command = Command::new(&server.command);
+    command
+        .args(&server.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for item in &server.env {
+        if let Some((key, value)) = item.split_once('=') {
+            let key = key.trim();
+            if !key.is_empty() {
+                command.env(key, value.trim());
+            }
+        }
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("启动 MCP Server {} 失败: {error}", server.name))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{} 无法打开 stdin。", server.name))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{} 无法打开 stdout。", server.name))?;
+    let mut reader = BufReader::new(stdout);
+
+    write_mcp_jsonrpc(
+        &mut stdin,
+        1,
+        "initialize",
+        serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "PenguinPal",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }),
+    )?;
+    let _ = read_mcp_jsonrpc(&mut reader, 1)?;
+    write_mcp_jsonrpc(
+        &mut stdin,
+        2,
+        "tools/call",
+        serde_json::json!({
+            "name": tool_name,
+            "arguments": arguments,
+        }),
+    )?;
+    let result = read_mcp_jsonrpc(&mut reader, 2)?;
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(result)
+}
+
+#[tauri::command]
+fn invoke_mcp_tool(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+    server_id: String,
+    tool_name: String,
+    arguments: serde_json::Value,
+) -> Result<ToolInvokeResponse, String> {
+    let (server, require_confirmation) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "助手状态锁定失败".to_string())?
+            .clone();
+        if !runtime.agent_roadmap.plugin_tools.enabled
+            || !runtime.agent_roadmap.plugin_tools.mcp_gateway_enabled
+        {
+            return Err("请先在设置中启用插件/MCP 工具层和 MCP 网关。".to_string());
+        }
+        let server = runtime
+            .agent_roadmap
+            .plugin_tools
+            .mcp_servers
+            .iter()
+            .find(|item| item.id == server_id)
+            .cloned()
+            .ok_or_else(|| format!("未找到 MCP Server：{server_id}"))?;
+        (server, runtime.agent_roadmap.plugin_tools.require_confirmation)
+    };
+
+    if require_confirmation && !server.read_only {
+        let pending_request = build_mcp_pending_request(&server, &tool_name, arguments);
+        insert_mcp_pending(&app, pending_request.clone())?;
+        return Ok(ToolInvokeResponse {
+            status: "pending_confirmation".to_string(),
+            result: None,
+            message: Some("MCP 写操作需要确认后执行。".to_string()),
+            pending_request: Some(pending_request),
+            error: None,
+        });
+    }
+
+    let result = call_mcp_server_tool(&server, &tool_name, arguments)?;
+    {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "助手状态锁定失败".to_string())?;
+        audit::push_entry(
+            &mut runtime.audit_trail,
+            audit::record(
+                "mcp_tool_call",
+                "ok",
+                format!("server={} tool={} readOnly={}", server.id, tool_name, server.read_only),
+                if server.read_only { 1 } else { 3 },
+            ),
+        );
+        let _ = save(&app, &runtime);
+    }
+
+    Ok(ToolInvokeResponse {
+        status: "success".to_string(),
+        result: Some(result),
+        message: Some(format!("已调用 MCP 工具：{} / {}", server.name, tool_name)),
+        pending_request: None,
+        error: None,
+    })
+}
+
+#[tauri::command]
+fn diagnose_mcp_gateway(
+    config: app_state::PluginToolsConfig,
+) -> Result<McpGatewayDiagnosis, String> {
+    if !config.enabled || !config.mcp_gateway_enabled {
+        return Ok(McpGatewayDiagnosis {
+            ok: false,
+            message: "先打开“插件/MCP 工具层”和“MCP 网关”，再点检测。".to_string(),
+            tools: Vec::new(),
+            warnings: Vec::new(),
+        });
+    }
+
+    let enabled_servers = config
+        .mcp_servers
+        .iter()
+        .filter(|server| server.enabled)
+        .cloned()
+        .collect::<Vec<_>>();
+    if enabled_servers.is_empty() {
+        return Ok(McpGatewayDiagnosis {
+            ok: false,
+            message: "还没有启用任何 MCP Server。先打开一个 Server，例如 GitHub MCP Server。".to_string(),
+            tools: Vec::new(),
+            warnings: Vec::new(),
+        });
+    }
+
+    let mut tools = Vec::new();
+    let mut warnings = Vec::new();
+    for server in &enabled_servers {
+        if server.id == "github-mcp"
+            && server.env.iter().any(|item| {
+                item.trim() == "GITHUB_PERSONAL_ACCESS_TOKEN="
+                    || item.trim().eq_ignore_ascii_case("GITHUB_PERSONAL_ACCESS_TOKEN")
+            })
+        {
+            warnings.push(format!(
+                "{}：请先填写 GITHUB_PERSONAL_ACCESS_TOKEN。只读查询建议使用 repo/read:org 等最小权限。",
+                server.name
+            ));
+            continue;
+        }
+        match scan_mcp_server_tools(server) {
+            Ok(mut discovered) => tools.append(&mut discovered),
+            Err(error) => {
+                let lowered = error.to_lowercase();
+                let hint = if server.command == "docker" && lowered.contains("program not found") {
+                    "未找到 Docker 命令。请先安装并启动 Docker Desktop。".to_string()
+                } else if server.command == "python" && lowered.contains("program not found") {
+                    "未找到 Python 命令。请先安装 Python，或把 python 加入 PATH。".to_string()
+                } else {
+                    error
+                };
+                warnings.push(format!("{}：{}", server.name, hint));
+            }
+        }
+    }
+
+    let ok = !tools.is_empty();
+    let message = if ok {
+        format!(
+            "MCP 已连通，发现 {} 个可用工具。之后你可以直接在聊天里说要查 GitHub 仓库、Issue 或 PR，桌宠会按需调用。",
+            tools.len()
+        )
+    } else if warnings.is_empty() {
+        "MCP Server 已启动，但没有返回可用工具。".to_string()
+    } else {
+        "MCP 还没连通。请看下面的失败原因，通常是 server 命令未安装、Token 未填写，或命令参数不对。".to_string()
+    };
+
+    Ok(McpGatewayDiagnosis {
+        ok,
+        message,
+        tools,
+        warnings,
+    })
+}
+
+#[tauri::command]
+fn setup_docker_desktop() -> Result<DockerSetupResult, String> {
+    if Command::new("docker")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    {
+        let started = start_docker_desktop().unwrap_or(false);
+        return Ok(DockerSetupResult {
+            status: if started { "started" } else { "installed" }.to_string(),
+            message: if started {
+                "Docker 已安装，已尝试启动 Docker Desktop。启动完成后再点一键检测 MCP。".to_string()
+            } else {
+                "Docker 已安装。如果 Docker Desktop 还没启动，请从开始菜单打开它。".to_string()
+            },
+        });
+    }
+
+    if Command::new("winget")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    {
+        #[cfg(target_os = "windows")]
+        {
+            let mut command = Command::new("cmd");
+            command.args([
+                "/C",
+                "start",
+                "Docker Desktop Installer",
+                "powershell",
+                "-NoExit",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Write-Host 'Installing Docker Desktop for PenguinPal...'; winget install --id Docker.DockerDesktop -e --accept-package-agreements --accept-source-agreements; Write-Host ''; Write-Host 'If installation finished, start Docker Desktop from the Start Menu, then click MCP detection again.'",
+            ]);
+            command
+                .spawn()
+                .map_err(|error| format!("启动 Docker Desktop 安装窗口失败: {error}"))?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut command = Command::new("winget");
+            command.args([
+                "install",
+                "--id",
+                "Docker.DockerDesktop",
+                "-e",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ]);
+            command
+                .spawn()
+                .map_err(|error| format!("启动 Docker Desktop 安装失败: {error}"))?;
+        }
+        return Ok(DockerSetupResult {
+            status: "installing".to_string(),
+            message: "已打开 Docker Desktop 安装窗口。请查看任务栏或新 PowerShell 窗口；安装后可能需要重启电脑或启动 Docker Desktop。".to_string(),
+        });
+    }
+
+    Err("未找到 Docker，也未找到 winget。请手动安装 Docker Desktop 后再检测 MCP。".to_string())
+}
+
+fn start_docker_desktop() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let candidates = [
+            r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+            r"C:\Program Files\Docker\Docker\Docker Desktop Installer.exe",
+        ];
+        for candidate in candidates {
+            if std::path::Path::new(candidate).is_file() {
+                Command::new(candidate)
+                    .spawn()
+                    .map_err(|error| format!("启动 Docker Desktop 失败: {error}"))?;
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 #[tauri::command]
 fn scan_plugin_tools(
     state: State<'_, Mutex<RuntimeState>>,
@@ -2955,6 +4189,15 @@ fn scan_plugin_tools(
                 }
             }
             Err(error) => warnings.push(format!("读取工具目录失败：{dir} / {error}")),
+        }
+    }
+
+    if runtime.agent_roadmap.plugin_tools.mcp_gateway_enabled {
+        for server in &runtime.agent_roadmap.plugin_tools.mcp_servers {
+            match scan_mcp_server_tools(server) {
+                Ok(mut discovered) => tools.append(&mut discovered),
+                Err(error) => warnings.push(error),
+            }
         }
     }
 
@@ -3259,7 +4502,10 @@ fn acknowledge_research_brief(
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_shell::init());
+        .plugin(tauri_plugin_shell::init())
+        .manage(Mutex::new(RuntimeState::default()))
+        .manage(ControlServiceState::new())
+        .manage(AgentTaskState::new());
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_autostart::init(
         tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -3282,13 +4528,12 @@ pub fn run() {
                 }
             };
             let initial_window_position = runtime.main_window_position.clone();
-            app.manage(Mutex::new(runtime));
+            let runtime_state: State<'_, Mutex<RuntimeState>> = app.state();
+            if let Ok(mut current) = runtime_state.lock() {
+                *current = runtime;
+            }
             eprintln!("[Setup] RuntimeState managed");
-
-            app.manage(ControlServiceState::new());
             eprintln!("[Setup] ControlServiceState managed");
-
-            app.manage(AgentTaskState::new());
             eprintln!("[Setup] AgentTaskState managed");
 
             // 初始化 Whisper 语音识别服务
@@ -3319,6 +4564,9 @@ pub fn run() {
             if let Ok(mut runtime) = runtime_state.lock() {
                 if let Err(error) = session_thread::bootstrap_runtime_thread(&app.handle(), &mut runtime) {
                     eprintln!("Session thread bootstrap failed: {error}");
+                }
+                if let Err(error) = configure_builtin_mcp_defaults(&app.handle(), &mut runtime) {
+                    eprintln!("MCP bootstrap failed: {error}");
                 }
                 sync_codex_provider_view(&app.handle(), &mut runtime);
                 match sync_launch_at_startup(&app.handle(), runtime.launch_at_startup) {
@@ -3376,10 +4624,17 @@ pub fn run() {
                 let _ = save(&app.handle(), &runtime);
             }
 
-            tray::create_tray(app)?;
+            let tray_icon = tray::create_tray(app)?;
+            app.manage(tray_icon);
 
             if let Some(window) = app.get_webview_window("main") {
                 window::setup_window(&window, initial_window_position.as_ref())?;
+            }
+            if let Some(window) = app.get_webview_window("settings") {
+                hide_instead_of_close(&window);
+            }
+            if let Some(window) = app.get_webview_window("research") {
+                hide_instead_of_close(&window);
             }
 
             // 启动三层架构维护后台任务（记忆 + 规则 + 权限）
@@ -3474,6 +4729,9 @@ pub fn run() {
             run_health_check,
             get_agent_roadmap_status,
             scan_plugin_tools,
+            diagnose_mcp_gateway,
+            setup_docker_desktop,
+            invoke_mcp_tool,
             list_document_memory,
             import_document_memory,
             list_browser_automation_tasks,
@@ -3497,6 +4755,12 @@ pub fn run() {
             stop_whisper_recording,
             get_whisper_recording_state
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                tray::remove_tray(app);
+            }
+            _ => {}
+        });
 }
