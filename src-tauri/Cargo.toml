@@ -1,6 +1,6 @@
 [package]
 name = "penguin-pal"
-version = "0.2.2"
+version = "0.2.3"
 description = "AI Desktop Pet Assistant"
 authors = ["PenguinPal Team"]
 edition = "2021"
@@ -11,6 +11,7 @@ tauri-build = { version = "2.0", features = [] }
 [dependencies]
 tauri = { version = "2.0", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.0"
+tauri-plugin-dialog = "2.0"
 tauri-plugin-global-shortcut = "2.0"
 tauri-plugin-shell = "2.0"
 serde = { version = "1.0", features = ["derive"] }

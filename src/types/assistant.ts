@@ -248,6 +248,14 @@ export interface DockerSetupResult {
   message: string
 }
 
+export interface CleanUninstallPlan {
+  message: string
+}
+
+export interface CleanUninstallResult {
+  message: string
+}
+
 export interface ResearchConfig {
   enabled: boolean
   startupPopup: boolean
@@ -406,6 +414,19 @@ export interface ActionExecutionResult {
   message: string
   snapshot: AssistantSnapshot
   approvalRequest?: ActionApprovalRequest | null
+}
+
+export interface FullBackupImportResult {
+  message: string
+  snapshot: AssistantSnapshot
+  memory: MemoryManagementSnapshot
+  documentCount: number
+  browserTaskCount: number
+}
+
+export interface FullBackupExportResult {
+  message: string
+  path: string
 }
 
 export interface OAuthFlowResult {

@@ -1239,7 +1239,7 @@ impl RuntimeState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PersistedState {
+pub(crate) struct PersistedState {
     mode: PetMode,
     #[serde(default)]
     pet_status: PetStatus,
@@ -1362,7 +1362,7 @@ pub fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
-fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
     fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     Ok(dir.join(STATE_FILE))

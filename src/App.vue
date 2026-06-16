@@ -38,7 +38,9 @@ import {
   deleteManagedMemory,
   deleteWhisperModel,
   downloadWhisperModel,
-  exportMemoryBackup,
+  beginCleanUninstall,
+  confirmCleanUninstall as executeCleanUninstall,
+  exportFullBackupToFile,
   getAgentRoadmapStatus,
   getAssistantSnapshot,
   getArchiveRecallPreview,
@@ -50,7 +52,7 @@ import {
   getCodexCliStatus,
   getWhisperStatus,
   hideAssistantWindow,
-  importMemoryBackup,
+  importFullBackupFromFile,
   importDocumentMemory,
   listBrowserAutomationTasks,
   listDocumentMemory,
@@ -132,6 +134,10 @@ import type {
   WhisperStatus,
   PendingShellConfirmation
 } from './types/assistant'
+
+type CleanUninstallDialogState = {
+  message: string
+}
 
 const providerDefaults: Record<ProviderKind, string> = {
   mock: 'penguin-guardian',
@@ -535,7 +541,6 @@ const researchBrief = ref<ResearchBriefSnapshot>(emptyResearchBrief())
 const researchBriefBusy = ref(false)
 const memoryDashboard = ref<MemoryManagementSnapshot>(emptyMemoryManagementSnapshot())
 const memoryBusy = ref(false)
-const memoryBackupText = ref('')
 const healthReport = ref<HealthCheckReport>(emptyHealthCheckReport())
 const healthBusy = ref(false)
 const agentRoadmapStatus = ref<AgentRoadmapStatus>(emptyAgentRoadmapStatus())
@@ -556,6 +561,7 @@ const whisperStatus = ref<WhisperStatus>({
 const whisperDownloading = ref(false)
 const whisperDownloadProgress = ref<DownloadProgress | null>(null)
 const pendingApproval = ref<ActionApprovalRequest | null>(null)
+const cleanUninstallDialog = ref<CleanUninstallDialogState | null>(null)
 const controlPendingRequest = ref<ControlPendingRequest | null>(null)
 const pendingShellConfirmation = ref<PendingShellConfirmation | null>(null)
 const pendingCommandConfirmation = ref<PendingCommandConfirmation | null>(null)
@@ -3291,6 +3297,42 @@ const cancelPendingAction = async () => {
   }
 }
 
+const openCleanUninstallDialog = async () => {
+  if (busy.value || savingSettings.value || authBusy.value || memoryBusy.value) {
+    return
+  }
+
+  try {
+    const plan = await beginCleanUninstall()
+    cleanUninstallDialog.value = { message: plan.message }
+  } catch (error) {
+    announce(resolveErrorMessage(error, '打开彻底卸载确认失败'), 'guarded')
+  }
+}
+
+const cancelCleanUninstallDialog = () => {
+  cleanUninstallDialog.value = null
+}
+
+const confirmCleanUninstall = async () => {
+  if (!cleanUninstallDialog.value || busy.value) {
+    return
+  }
+
+  busy.value = true
+  visualMode.value = 'guarded'
+  try {
+    const plan = await executeCleanUninstall()
+    cleanUninstallDialog.value = null
+    announce(plan.message, 'guarded')
+  } catch (error) {
+    announce(resolveErrorMessage(error, '彻底卸载失败'), 'guarded')
+  } finally {
+    busy.value = false
+    resetVisualModeSoon(900)
+  }
+}
+
 const saveSettings = async (draft: ProviderConfigInput) => {
   savingSettings.value = true
 
@@ -3451,38 +3493,33 @@ const handleMemoryMaintain = async () => {
   }
 }
 
-const handleMemoryExport = async () => {
+const handleFullBackupExport = async () => {
   memoryBusy.value = true
   try {
-    const backup = await exportMemoryBackup()
-    memoryBackupText.value = backup
-    try {
-      await navigator.clipboard?.writeText(backup)
-      announce('记忆备份已生成，并已复制到剪贴板。', 'idle')
-    } catch {
-      announce('记忆备份已生成，可在设置页复制 JSON。', 'idle')
+    const result = await exportFullBackupToFile()
+    if (result) {
+      announce(result.message, 'idle')
     }
   } catch (error) {
-    announce(resolveErrorMessage(error, '导出记忆备份失败'), 'guarded')
+    announce(resolveErrorMessage(error, '??????'), 'guarded')
   } finally {
     memoryBusy.value = false
   }
 }
 
-const handleMemoryImport = async (backupJson: string) => {
-  const trimmed = backupJson.trim()
-  if (!trimmed) {
-    announce('请先粘贴记忆备份 JSON。', 'guarded')
-    return
-  }
-
+const handleFullBackupImport = async () => {
   memoryBusy.value = true
   try {
-    memoryDashboard.value = await importMemoryBackup(trimmed)
-    memoryBackupText.value = trimmed
-    announce('记忆备份已导入，长期记忆面板已刷新。', 'idle')
+    const result = await importFullBackupFromFile()
+    if (!result) {
+      return
+    }
+    await syncSnapshot(result.snapshot)
+    memoryDashboard.value = result.memory
+    await refreshAgentRoadmapStatus(true)
+    announce(result.message, 'idle')
   } catch (error) {
-    announce(resolveErrorMessage(error, '导入记忆备份失败'), 'guarded')
+    announce(resolveErrorMessage(error, '??????'), 'guarded')
   } finally {
     memoryBusy.value = false
   }
@@ -3980,7 +4017,6 @@ onBeforeUnmount(() => {
       :today-reply-history="todayReplyHistory"
       :memory-dashboard="memoryDashboard"
       :memory-busy="memoryBusy"
-      :memory-backup-text="memoryBackupText"
       :health-report="healthReport"
       :health-busy="healthBusy"
       :agent-roadmap-status="agentRoadmapStatus"
@@ -4001,11 +4037,12 @@ onBeforeUnmount(() => {
       @codex-refresh="refreshCodexLoginStatus()"
       @app-update-check="refreshAppUpdateStatus()"
       @app-update-open="openSoftwareUpdateDownload"
+      @clean-uninstall="openCleanUninstallDialog"
       @open-research="openResearchBriefWindow"
       @memory-refresh="handleMemoryRefresh"
       @memory-maintain="handleMemoryMaintain"
-      @memory-export="handleMemoryExport"
-      @memory-import="handleMemoryImport"
+      @full-backup-export="handleFullBackupExport"
+      @full-backup-import="handleFullBackupImport"
       @health-check="handleHealthCheck"
       @agent-roadmap-refresh="refreshAgentRoadmapStatus()"
       @plugin-tool-scan="handlePluginToolScan"
@@ -4022,6 +4059,31 @@ onBeforeUnmount(() => {
       @trigger-action="handleActionTrigger"
       @clear-today-history="clearTodayHistoryRecords"
     />
+
+    <transition name="confirm">
+      <div v-if="cleanUninstallDialog" class="confirm-shell settings-confirm-shell">
+        <section class="confirm-panel uninstall-confirm-panel">
+          <p class="eyebrow dark">Danger Zone</p>
+          <h2>彻底卸载 PenguinPal</h2>
+          <p>{{ cleanUninstallDialog.message }}</p>
+          <p class="approval-expiry">这会删除当前用户下的本地配置、记忆、知识库、模型和私有运行时数据。</p>
+
+          <div class="confirm-actions">
+            <button type="button" class="panel-chip muted" @click="cancelCleanUninstallDialog">
+              取消
+            </button>
+            <button
+              type="button"
+              class="confirm-button uninstall-confirm-button"
+              :disabled="busy"
+              @click="confirmCleanUninstall"
+            >
+              删除数据并卸载
+            </button>
+          </div>
+        </section>
+      </div>
+    </transition>
 
     <transition name="confirm">
       <div v-if="pendingApproval" class="confirm-shell settings-confirm-shell">
@@ -4570,6 +4632,14 @@ body {
 .confirm-button {
   background: linear-gradient(135deg, #0e7998, #18a07f);
   color: #effbff;
+}
+
+.uninstall-confirm-panel {
+  border: 1px solid rgba(181, 58, 58, 0.18);
+}
+
+.uninstall-confirm-button {
+  background: linear-gradient(135deg, #b24141, #d96b43);
 }
 
 .confirm-button:disabled {

@@ -26,6 +26,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{process::Command, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 
 /// Memory 维护线程停止标志
 static MEMORY_MAINTENANCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -67,6 +68,54 @@ use crate::{
     shell_agent::{ShellAgentExecutor, BehaviorState},
     permission::{PermissionScope, GrantSource},
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullBackupDocument {
+    filename: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FullBackupPayload {
+    schema: String,
+    app_version: String,
+    exported_at: u64,
+    state: app_state::PersistedState,
+    memory: memory::MemoryBackupSnapshot,
+    document_memory: Vec<FullBackupDocument>,
+    browser_tasks: Vec<StoredBrowserAutomationTask>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FullBackupImportResult {
+    message: String,
+    snapshot: AssistantSnapshot,
+    memory: memory::MemoryManagementSnapshot,
+    document_count: usize,
+    browser_task_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FullBackupExportResult {
+    message: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanUninstallPlan {
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanUninstallResult {
+    message: String,
+}
 
 fn snapshot_from_runtime(runtime: &RuntimeState) -> AssistantSnapshot {
     let allowed_actions = policy::actions_for_level(runtime.permission_level);
@@ -875,7 +924,9 @@ async fn get_codex_cli_status(app: AppHandle) -> CodexCliStatus {
 async fn check_codex_update(app: AppHandle) -> Result<codex_update::CodexUpdateStatus, String> {
     let status = inspect_codex_cli_status_basic(&app);
     Ok(codex_update::check_update_status(&app, status.version).await)
-}#[tauri::command]
+}
+
+#[tauri::command]
 async fn check_app_update() -> Result<app_update::AppUpdateStatus, String> {
     Ok(app_update::check_update_status().await)
 }
@@ -883,6 +934,29 @@ async fn check_app_update() -> Result<app_update::AppUpdateStatus, String> {
 #[tauri::command]
 async fn open_app_update_download() -> Result<app_update::AppUpdateStatus, String> {
     app_update::open_update_download().await
+}
+
+#[tauri::command]
+fn preview_clean_uninstall() -> Result<CleanUninstallPlan, String> {
+    Ok(CleanUninstallPlan {
+        message: "\u{8fd9}\u{4f1a}\u{5148}\u{5220}\u{9664}\u{5f53}\u{524d}\u{7528}\u{6237}\u{4e0b}\u{7684}\u{672c}\u{5730}\u{914d}\u{7f6e}\u{3001}\u{804a}\u{5929}\u{8bb0}\u{5f55}\u{3001}\u{957f}\u{671f}\u{8bb0}\u{5fc6}\u{3001}\u{6587}\u{6863}\u{77e5}\u{8bc6}\u{5e93}\u{3001} Whisper \u{6a21}\u{578b}\u{3001} Shell \u{6743}\u{9650}\u{8bb0}\u{5f55}\u{548c}\u{79c1}\u{6709} Codex \u{8fd0}\u{884c}\u{6570}\u{636e}\u{ff0c}\u{7136}\u{540e}\u{518d}\u{542f}\u{52a8}\u{7cfb}\u{7edf}\u{5378}\u{8f7d}\u{7a0b}\u{5e8f}\u{3002}\u{6267}\u{884c}\u{540e}\u{8fd9}\u{4e9b}\u{6570}\u{636e}\u{65e0}\u{6cd5}\u{6062}\u{590d}\u{3002}".to_string(),
+    })
+}
+
+#[tauri::command]
+fn confirm_clean_uninstall(app: AppHandle) -> Result<CleanUninstallResult, String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|error| format!("\u{83b7}\u{53d6}\u{5f53}\u{524d}\u{7a0b}\u{5e8f}\u{8def}\u{5f84}\u{5931}\u{8d25}: {error}"))?;
+    let uninstall_command = detect_windows_uninstall_command(&current_exe)
+        .ok_or_else(|| "\u{6ca1}\u{6709}\u{627e}\u{5230}\u{53ef}\u{7528}\u{7684}\u{7cfb}\u{7edf}\u{5378}\u{8f7d}\u{547d}\u{4ee4}\u{3002}\u{8bf7}\u{786e}\u{8ba4}\u{5f53}\u{524d}\u{662f}\u{5b89}\u{88c5}\u{7248}\u{ff0c}\u{800c}\u{4e0d}\u{662f}\u{5f00}\u{53d1}\u{7248}\u{6216}\u{4fbf}\u{643a}\u{8fd0}\u{884c}\u{76ee}\u{5f55}\u{3002}".to_string())?;
+    let cleanup_paths = collect_uninstall_cleanup_paths(&app);
+
+    start_windows_clean_uninstall_worker(&current_exe, &cleanup_paths, &uninstall_command)?;
+    app.exit(0);
+
+    Ok(CleanUninstallResult {
+        message: "\u{5df2}\u{5f00}\u{59cb}\u{5f7b}\u{5e95}\u{5378}\u{8f7d}\u{ff1a}\u{5e94}\u{7528}\u{9000}\u{51fa}\u{540e}\u{4f1a}\u{5148}\u{6e05}\u{9664}\u{672c}\u{5730}\u{6570}\u{636e}\u{ff0c}\u{518d}\u{7ee7}\u{7eed}\u{8c03}\u{7528}\u{7cfb}\u{7edf}\u{5378}\u{8f7d}\u{7a0b}\u{5e8f}\u{3002}".to_string(),
+    })
 }
 
 #[tauri::command]
@@ -3492,6 +3566,183 @@ fn import_memory_backup(
     memory_service.import_backup(backup)
 }
 
+#[tauri::command]
+fn export_full_backup(app: AppHandle) -> Result<String, String> {
+    let state_content = std::fs::read_to_string(app_state::state_path(&app)?)
+        .map_err(|error| format!("读取设置状态失败: {error}"))?;
+    let state = serde_json::from_str::<app_state::PersistedState>(&state_content)
+        .map_err(|error| format!("解析设置状态失败: {error}"))?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+    let memory = memory_service.export_backup()?;
+    let document_dir = document_memory_dir(&app)?;
+    let mut document_memory = Vec::new();
+    if document_dir.is_dir() {
+        let entries = std::fs::read_dir(&document_dir)
+            .map_err(|error| format!("读取文档知识库失败: {error}"))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(filename) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let content = std::fs::read_to_string(&path)
+                .map_err(|error| format!("读取文档 {} 失败: {error}", filename))?;
+            document_memory.push(FullBackupDocument {
+                filename: filename.to_string(),
+                content,
+            });
+        }
+    }
+    let browser_tasks = load_browser_task_queue(&app).unwrap_or_default();
+    let payload = FullBackupPayload {
+        schema: "penguin-pal-full-backup-v1".to_string(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        exported_at: now_millis(),
+        state,
+        memory,
+        document_memory,
+        browser_tasks,
+    };
+    serde_json::to_string_pretty(&payload).map_err(|error| format!("序列化完整备份失败: {error}"))
+}
+
+#[tauri::command]
+fn import_full_backup(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+    backup_json: String,
+) -> Result<FullBackupImportResult, String> {
+    let payload = serde_json::from_str::<FullBackupPayload>(&backup_json)
+        .map_err(|error| format!("解析完整备份失败: {error}"))?;
+    if payload.schema != "penguin-pal-full-backup-v1" {
+        return Err("完整备份格式不匹配。".to_string());
+    }
+
+    let state_content = serde_json::to_string_pretty(&payload.state)
+        .map_err(|error| format!("序列化设置状态失败: {error}"))?;
+    std::fs::write(app_state::state_path(&app)?, state_content)
+        .map_err(|error| format!("写入设置状态失败: {error}"))?;
+
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("获取应用数据目录失败: {error}"))?;
+    let memory_service = crate::memory::MemoryService::new(&app_data);
+    let memory = memory_service.import_backup(payload.memory)?;
+
+    let document_dir = document_memory_dir(&app)?;
+    std::fs::create_dir_all(&document_dir)
+        .map_err(|error| format!("创建文档知识库目录失败: {error}"))?;
+    for entry in std::fs::read_dir(&document_dir)
+        .map_err(|error| format!("读取文档知识库目录失败: {error}"))?
+        .flatten()
+    {
+        let path = entry.path();
+        if path.is_file() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("清理旧文档 {} 失败: {error}", path.display()))?;
+        }
+    }
+    for doc in &payload.document_memory {
+        let filename = doc
+            .filename
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') { ch } else { '_' })
+            .collect::<String>();
+        let filename = if filename.trim().is_empty() {
+            format!("document-{}.md", now_millis())
+        } else {
+            filename
+        };
+        std::fs::write(document_dir.join(filename), &doc.content)
+            .map_err(|error| format!("恢复文档知识库失败: {error}"))?;
+    }
+    save_browser_task_queue(&app, &payload.browser_tasks)?;
+
+    let mut runtime = load(&app)?;
+    configure_builtin_mcp_defaults(&app, &mut runtime)?;
+    let snapshot = {
+        let mut current = state.lock().map_err(|_| "助手状态锁定失败".to_string())?;
+        *current = runtime;
+        snapshot_from_runtime(&current)
+    };
+
+    Ok(FullBackupImportResult {
+        message: format!(
+            "完整备份已导入：{} 个文档，{} 个浏览器任务。",
+            payload.document_memory.len(),
+            payload.browser_tasks.len()
+        ),
+        snapshot,
+        memory,
+        document_count: payload.document_memory.len(),
+        browser_task_count: payload.browser_tasks.len(),
+    })
+}
+
+fn default_full_backup_filename() -> String {
+    format!(
+        "penguin-pal-backup-{}.json",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    )
+}
+
+#[tauri::command]
+fn export_full_backup_to_file(app: AppHandle) -> Result<Option<FullBackupExportResult>, String> {
+    let Some(file_path) = app
+        .dialog()
+        .file()
+        .add_filter("PenguinPal 备份", &["json"])
+        .set_file_name(&default_full_backup_filename())
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+
+    let path = file_path
+        .as_path()
+        .ok_or_else(|| "未选择有效的备份保存路径。".to_string())?
+        .to_path_buf();
+    let content = export_full_backup(app)?;
+    std::fs::write(&path, content)
+        .map_err(|error| format!("写入完整备份文件失败: {error}"))?;
+
+    Ok(Some(FullBackupExportResult {
+        message: format!("完整备份已导出到：{}", path.display()),
+        path: path.to_string_lossy().to_string(),
+    }))
+}
+
+#[tauri::command]
+fn import_full_backup_from_file(
+    app: AppHandle,
+    state: State<'_, Mutex<RuntimeState>>,
+) -> Result<Option<FullBackupImportResult>, String> {
+    let Some(file_path) = app
+        .dialog()
+        .file()
+        .add_filter("PenguinPal 备份", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+
+    let path = file_path
+        .as_path()
+        .ok_or_else(|| "未选择有效的备份文件路径。".to_string())?
+        .to_path_buf();
+    let backup_json = std::fs::read_to_string(&path)
+        .map_err(|error| format!("读取完整备份文件失败: {error}"))?;
+
+    import_full_backup(app, state, backup_json).map(Some)
+}
+
 fn health_item(
     id: &str,
     title: &str,
@@ -3618,6 +3869,203 @@ fn save_browser_task_queue(
         .map_err(|error| format!("序列化浏览器任务失败: {error}"))?;
     std::fs::write(browser_task_queue_path(app)?, content)
         .map_err(|error| format!("保存浏览器任务队列失败: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn parse_reg_query_value(output: &str, value_name: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        if !line.contains(value_name) || !line.contains("REG_") {
+            return None;
+        }
+        let mut parts = line.split_whitespace();
+        let _ = parts.next();
+        let _ = parts.next();
+        let value = parts.collect::<Vec<_>>().join(" ");
+        (!value.trim().is_empty()).then_some(value)
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn reg_query_value(key_path: &str, value_name: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let output = Command::new("reg")
+        .args(["query", key_path, "/v", value_name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_reg_query_value(&String::from_utf8_lossy(&output.stdout), value_name)
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_uninstall_command(current_exe: &std::path::Path) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let uninstall_roots = [
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ];
+    let current_exe = current_exe.to_string_lossy().to_lowercase();
+
+    for root in uninstall_roots {
+        let output = Command::new("reg")
+            .args(["query", root])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+
+        for key in String::from_utf8_lossy(&output.stdout).lines().map(str::trim) {
+            if !key.starts_with(root) {
+                continue;
+            }
+
+            let display_name = reg_query_value(key, "DisplayName");
+            let install_location = reg_query_value(key, "InstallLocation");
+            let display_icon = reg_query_value(key, "DisplayIcon");
+            let uninstall_command = reg_query_value(key, "QuietUninstallString")
+                .or_else(|| reg_query_value(key, "UninstallString"));
+            let Some(command) = uninstall_command.filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+
+            let matches_product = display_name
+                .as_deref()
+                .map(|value| value.to_ascii_lowercase().contains("penguinpal"))
+                .unwrap_or(false);
+            let matches_path = install_location
+                .as_deref()
+                .map(|value| current_exe.starts_with(&value.to_ascii_lowercase()))
+                .unwrap_or(false)
+                || display_icon
+                    .as_deref()
+                    .map(|value| current_exe.starts_with(&value.to_ascii_lowercase()))
+                    .unwrap_or(false)
+                || command.to_ascii_lowercase().contains("penguinpal");
+
+            if matches_product || matches_path {
+                return Some(command);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_windows_uninstall_command(_current_exe: &std::path::Path) -> Option<String> {
+    None
+}
+
+fn collect_uninstall_cleanup_paths(app: &AppHandle) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Ok(path) = app.path().app_data_dir() {
+        paths.push(path);
+    }
+    if let Ok(path) = app.path().app_local_data_dir() {
+        paths.push(path);
+    }
+    if let Ok(path) = app.path().app_config_dir() {
+        paths.push(path);
+    }
+    if let Ok(path) = app.path().app_cache_dir() {
+        paths.push(path);
+    }
+    if let Ok(path) = private_auth_path(app) {
+        if let Some(parent) = path.parent().and_then(|value| value.parent()) {
+            paths.push(parent.to_path_buf());
+        }
+    }
+    if let Ok(path) = codex_update::managed_install_dir(app) {
+        if let Some(parent) = path.parent() {
+            paths.push(parent.to_path_buf());
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+#[cfg(target_os = "windows")]
+fn escape_powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(target_os = "windows")]
+fn start_windows_clean_uninstall_worker(
+    current_exe: &std::path::Path,
+    cleanup_paths: &[std::path::PathBuf],
+    uninstall_command: &str,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let exe_literal = escape_powershell_single_quoted(&current_exe.to_string_lossy());
+    let uninstall_literal = escape_powershell_single_quoted(uninstall_command);
+    let cleanup_list = cleanup_paths
+        .iter()
+        .map(|path| {
+            format!(
+                "'{}'",
+                escape_powershell_single_quoted(&path.to_string_lossy())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let script = format!(
+        "$ErrorActionPreference='SilentlyContinue'; \
+Start-Sleep -Seconds 2; \
+$targetExe='{exe_literal}'; \
+for($i=0;$i -lt 120;$i++){{ \
+  $running=Get-Process | Where-Object {{ $_.Path -eq $targetExe }}; \
+  if(-not $running){{ break }}; \
+  Start-Sleep -Milliseconds 500; \
+}}; \
+$cleanupPaths=@({cleanup_list}); \
+foreach($path in $cleanupPaths){{ \
+  if([string]::IsNullOrWhiteSpace($path)){{ continue }}; \
+  if(Test-Path -LiteralPath $path){{ Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }} \
+}}; \
+$cmd='{uninstall_literal}'; \
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/C', $cmd -WindowStyle Hidden"
+    );
+
+    Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script.as_str(),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|error| format!("\u{83b7}\u{53d6}\u{5f53}\u{524d}\u{7a0b}\u{5e8f}\u{8def}\u{5f84}\u{5931}\u{8d25}: {error}"))?;
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn start_windows_clean_uninstall_worker(
+    _current_exe: &std::path::Path,
+    _cleanup_paths: &[std::path::PathBuf],
+    _uninstall_command: &str,
+) -> Result<(), String> {
+    Err("\u{5f53}\u{524d}\u{5e73}\u{53f0}\u{4e0d}\u{652f}\u{6301}\u{5f7b}\u{5e95}\u{5378}\u{8f7d}\u{3002}".to_string())
 }
 
 fn safe_document_filename(title: &str, stamp: u64) -> String {
@@ -4501,6 +4949,7 @@ fn acknowledge_research_brief(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .manage(Mutex::new(RuntimeState::default()))
@@ -4706,6 +5155,8 @@ pub fn run() {
             check_app_update,
             update_codex,
             open_app_update_download,
+            preview_clean_uninstall,
+            confirm_clean_uninstall,
             get_control_service_status,
             confirm_control_pending,
             cancel_control_pending,
@@ -4726,6 +5177,10 @@ pub fn run() {
             run_memory_maintenance,
             export_memory_backup,
             import_memory_backup,
+            export_full_backup,
+            import_full_backup,
+            export_full_backup_to_file,
+            import_full_backup_from_file,
             run_health_check,
             get_agent_roadmap_status,
             scan_plugin_tools,

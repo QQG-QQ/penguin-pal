@@ -23,6 +23,10 @@ import type {
   DocumentMemoryRecord,
   DockerSetupResult,
   DownloadProgress,
+  CleanUninstallPlan,
+  CleanUninstallResult,
+  FullBackupExportResult,
+  FullBackupImportResult,
   HealthCheckReport,
   ManagedMemoryKind,
   McpGatewayDiagnosis,
@@ -1731,6 +1735,44 @@ export const importMemoryBackup = async (
   }
 }
 
+export const exportFullBackup = async (): Promise<string> => {
+  try {
+    return await safeInvoke<string>('export_full_backup')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('导出完整备份需要桌面运行时')
+  }
+}
+
+export const importFullBackup = async (
+  backupJson: string
+): Promise<FullBackupImportResult> => {
+  try {
+    return await safeInvoke<FullBackupImportResult>('import_full_backup', { backupJson })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('导入完整备份需要桌面运行时')
+  }
+}
+
+export const exportFullBackupToFile = async (): Promise<FullBackupExportResult | null> => {
+  try {
+    return await safeInvoke<FullBackupExportResult | null>('export_full_backup_to_file')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('导出完整配置备份需要桌面运行时')
+  }
+}
+
+export const importFullBackupFromFile = async (): Promise<FullBackupImportResult | null> => {
+  try {
+    return await safeInvoke<FullBackupImportResult | null>('import_full_backup_from_file')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('导入完整配置备份需要桌面运行时')
+  }
+}
+
 export const runHealthCheck = async (): Promise<HealthCheckReport> => {
   try {
     return await safeInvoke<HealthCheckReport>('run_health_check')
@@ -2147,6 +2189,24 @@ export const openAppUpdateDownload = async (): Promise<AppUpdateStatus> => {
   } catch (error) {
     rethrowIfDesktopRuntime(error)
     throw new Error('打开软件更新下载页需要桌宠运行时')
+  }
+}
+
+export const beginCleanUninstall = async (): Promise<CleanUninstallPlan> => {
+  try {
+    return await safeInvoke<CleanUninstallPlan>('preview_clean_uninstall')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('彻底卸载需要桌面运行时')
+  }
+}
+
+export const confirmCleanUninstall = async (): Promise<CleanUninstallResult> => {
+  try {
+    return await safeInvoke<CleanUninstallResult>('confirm_clean_uninstall')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('执行彻底卸载需要桌面运行时')
   }
 }
 

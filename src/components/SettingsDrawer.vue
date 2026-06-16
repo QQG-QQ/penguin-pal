@@ -51,7 +51,6 @@ const props = defineProps<{
   todayReplyHistory: ReplyHistoryEntry[]
   memoryDashboard: MemoryManagementSnapshot
   memoryBusy: boolean
-  memoryBackupText: string
   healthReport: HealthCheckReport
   healthBusy: boolean
   agentRoadmapStatus: AgentRoadmapStatus
@@ -75,11 +74,12 @@ const emit = defineEmits<{
   codexRefresh: []
   appUpdateCheck: []
   appUpdateOpen: []
+  cleanUninstall: []
   openResearch: []
   memoryRefresh: []
   memoryMaintain: []
-  memoryExport: []
-  memoryImport: [backupJson: string]
+  fullBackupExport: []
+  fullBackupImport: []
   healthCheck: []
   agentRoadmapRefresh: []
   pluginToolScan: []
@@ -181,7 +181,6 @@ const memoryPanelOpen = ref<Record<MemoryPanelKey, boolean>>({
   conflicts: false
 })
 const archiveRecallQuery = ref('')
-const memoryBackupDraft = ref(props.memoryBackupText)
 const documentImportTitle = ref('')
 const documentImportContent = ref('')
 const browserTaskGoal = ref('')
@@ -500,13 +499,6 @@ watch(
     applyProviderRules()
   },
   { deep: true, immediate: true }
-)
-
-watch(
-  () => props.memoryBackupText,
-  (value) => {
-    memoryBackupDraft.value = value
-  }
 )
 
 watch(
@@ -1469,6 +1461,32 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
+      <section class="oauth-shell full-row uninstall-shell">
+        <div class="oauth-header">
+          <div>
+            <strong>彻底卸载</strong>
+            <p>会清除本地配置、记忆、知识库、Whisper 模型和私有 Codex 运行数据，然后继续系统卸载。</p>
+          </div>
+          <span class="oauth-status uninstall-status">危险操作</span>
+        </div>
+
+        <div class="oauth-actions">
+          <button
+            type="button"
+            class="ghost-button uninstall-button"
+            :disabled="saving || props.appUpdateBusy || props.oauthBusy || props.memoryBusy"
+            @click="emit('cleanUninstall')"
+          >
+            彻底卸载 PenguinPal
+          </button>
+        </div>
+
+        <div class="oauth-meta full-row">
+          <p>执行后会先删除当前用户下的本地数据，再启动系统卸载程序。</p>
+          <p>这个操作不可恢复，卸载后不会保留设置、记忆、知识库或本地模型文件。</p>
+        </div>
+      </section>
+
       <section class="constraint-shell full-row">
         <div class="constraint-header">
           <div>
@@ -1821,60 +1839,34 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div class="memory-stats">
-          <article class="memory-stat-card">
-            <strong>{{ memoryDashboard.stats.stableCount }}</strong>
-            <span>稳定长期记忆</span>
-          </article>
-          <article class="memory-stat-card">
-            <strong>{{ memoryDashboard.stats.candidateCount }}</strong>
-            <span>候选记忆</span>
-          </article>
-          <article class="memory-stat-card">
-            <strong>{{ memoryDashboard.stats.conflictCount }}</strong>
-            <span>冲突组</span>
-          </article>
-          <article class="memory-stat-card">
-            <strong>{{ memoryDashboard.stats.semanticCount }}</strong>
-            <span>语义总量</span>
-          </article>
-          <article class="memory-stat-card">
-            <strong>{{ memoryDashboard.stats.metaCount }}</strong>
-            <span>偏好总量</span>
-          </article>
-        </div>
-
         <article class="memory-panel memory-panel-full">
           <div class="memory-panel-header">
             <div>
-              <h3>记忆导入 / 导出</h3>
-              <p>导出会生成完整长期记忆 JSON；导入会用备份覆盖当前本地记忆，请先确认来源可信。</p>
+              <h3>完整配置备份</h3>
+              <p>一次性导出或恢复设置、聊天记录、长期记忆、文档知识库和浏览器任务。API Key 与 OAuth Token 不会写入备份。</p>
             </div>
             <div class="memory-inline-actions">
               <button
                 type="button"
                 class="ghost-button"
                 :disabled="memoryBusy"
-                @click="emit('memoryExport')"
+                @click="emit('fullBackupExport')"
               >
-                导出记忆
+                {{ memoryBusy ? '处理中...' : '导出到文件' }}
               </button>
               <button
                 type="button"
                 class="ghost-button"
-                :disabled="memoryBusy || !memoryBackupDraft.trim()"
-                @click="emit('memoryImport', memoryBackupDraft)"
+                :disabled="memoryBusy"
+                @click="emit('fullBackupImport')"
               >
-                导入记忆
+                从文件导入
               </button>
             </div>
           </div>
-          <textarea
-            v-model="memoryBackupDraft"
-            class="memory-backup-textarea"
-            spellcheck="false"
-            placeholder="在这里粘贴记忆备份 JSON，或点击导出后查看当前备份。"
-          ></textarea>
+          <div class="memory-empty">
+            导入会用备份内容覆盖当前本地配置和记忆，请只选择你信任的 PenguinPal 备份文件。
+          </div>
         </article>
 
         <article class="memory-panel memory-panel-full">
@@ -2853,6 +2845,21 @@ textarea {
   padding: 14px;
   border-radius: 18px;
   background: rgba(12, 89, 116, 0.08);
+}
+
+.uninstall-shell {
+  border: 1px solid rgba(181, 58, 58, 0.16);
+  background: rgba(255, 244, 242, 0.9);
+}
+
+.uninstall-status {
+  background: rgba(181, 58, 58, 0.12);
+  color: #a33838;
+}
+
+.uninstall-button {
+  background: rgba(181, 58, 58, 0.12);
+  color: #8f2b2b;
 }
 
 .release-note strong {
