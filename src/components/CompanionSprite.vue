@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-const props=defineProps<{src:string;alt:string;video?:string;paused:boolean;loop:boolean;probe?:boolean;request?:number}>()
+const props=defineProps<{src:string;alt:string;video?:string;paused:boolean;loop:boolean;probe?:boolean;request?:number;rate?:number}>()
 const emit=defineEmits<{failed:[string,string];playing:[string,number];ended:[number];imageFailed:[];verified:[{width:number;height:number;corner:number;center:number;playing:boolean}]}>()
 const active=ref(-1),loaded=ref(false)
 const videos:HTMLVideoElement[]=[],sources:string[]=[],attempts=[0,0],retries:(number|undefined)[]=[],frameCallbacks:(number|undefined)[]=[]
@@ -53,6 +53,7 @@ async function load(url:string|undefined){
   if(!v){emit('failed',url,'load');return}
   window.clearTimeout(timer);clear(index);pending=index;sources[index]=url
   v.muted=true;v.defaultMuted=true;v.playsInline=true;v.loop=props.loop
+  v.playbackRate=Number.isFinite(props.rate)?Math.max(.8,Math.min(1.25,props.rate!)):1
   v.onloadedmetadata=()=>{if(v.videoWidth!==256||v.videoHeight!==256||!Number.isFinite(v.duration)||v.duration<=0||v.duration>60)fail(index,token,'metadata')}
   v.onloadeddata=()=>{
     if(!current(index,token))return
@@ -68,6 +69,7 @@ async function load(url:string|undefined){
 }
 watch(()=>[props.video,props.request],()=>{void load(props.video)},{flush:'post'})
 onMounted(()=>{void load(props.video)})
+watch(()=>props.rate,rate=>{if(Number.isFinite(rate))videos.forEach(v=>{v.playbackRate=Math.max(.8,Math.min(1.25,rate!))})})
 watch(()=>[props.paused,props.loop],()=>{
   videos.forEach((v,i)=>{v.loop=props.loop;if(props.paused||i!==active.value){attempts[i]++;window.clearTimeout(retries[i]);v.pause()}})
   if(props.paused)window.clearTimeout(timer)

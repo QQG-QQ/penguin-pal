@@ -5,31 +5,33 @@ import ts from 'typescript'
 
 async function module(name){const source=readFileSync(new URL(`../src/lib/${name}.ts`,import.meta.url),'utf8');return import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText).toString('base64')}`)}
 const core=await module('companionCore'),media=await module('companionMedia'),animation=await module('companionAnimation')
+const musicModule=await module('companionMusic')
 const mediaJs=ts.transpileModule(readFileSync(new URL('../src/lib/companionMedia.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText,mediaUrl='data:text/javascript;base64,'+Buffer.from(mediaJs).toString('base64')
 const sequenceJs=ts.transpileModule(readFileSync(new URL('../src/lib/companionSequence.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText.replace("'./companionMedia'",JSON.stringify(mediaUrl)),sequence=await import('data:text/javascript;base64,'+Buffer.from(sequenceJs).toString('base64'))
 // Run the production component handlers and frame loop with deterministic native IPC.
 // Pointer capture delivery and Vue rendering are additionally checked in the browser.
-function app(preferences={}){
+const builtinPack={id:'builtin',clips:JSON.parse(readFileSync(new URL('../penguin/companion-v4/motions.json',import.meta.url),'utf8')).clips}
+function app(preferences={},pack={id:'builtin',clips:[]}){
  const component=readFileSync(process.env.PENGUIN_COMPANION_SOURCE??new URL('../src/CompanionApp.vue',import.meta.url),'utf8')
  const cancelled=component.match(/@pointercancel="([^"]+)"/)[1]
  const source=component.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1].replace(/^import[\s\S]*?from ['"][^'"]+['"]\r?$/mg,'')
  const js=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText
- let clock=0,held=true,defer=false,completeMove,moveStarted,failMove=false
+ let clock=0,held=true,defer=false,completeMove,moveStarted,failMove=false,nativeFullscreen=false,windowShown=true,nativeIgnored=false
  const pos={x:420,y:160},cursor={x:520,y:260},writes=[],timers=[]
- const win={scaleFactor:async()=>1,outerPosition:async()=>({...pos}),isVisible:async()=>true,
+ const win={scaleFactor:async()=>1,outerPosition:async()=>({...pos}),isVisible:async()=>windowShown,setIgnoreCursorEvents:async value=>{nativeIgnored=value},
   async setPosition(next){if(failMove)throw Error('position unavailable');if(defer){moveStarted?.();await new Promise(ok=>{completeMove=ok})}Object.assign(pos,next);writes.push({...pos})}}
- const invoke=async command=>{if(command==='companion_poll')return{safeMode:false,bridge:{status:'idle',lastReceived:0},desktop:{surfaces:[],context:'quiet',fullscreen:false,leftButtonDown:held,idleSeconds:0}}}
+ const invoke=async command=>{if(command==='companion_poll')return{safeMode:false,bridge:{status:'idle',lastReceived:0},desktop:{surfaces:[],context:'quiet',fullscreen:nativeFullscreen,leftButtonDown:held,idleSeconds:0}}}
  const window={__TAURI_INTERNALS__:{},location:{search:''},matchMedia:()=>({matches:false}),clearTimeout(){},setTimeout(fn){timers.push(fn);return timers.length}}
  const metrics={petLeft:0,petTop:0,petRight:160,petBottom:220}
- const deps={...core,...media,...animation,...sequence,window,document:{querySelectorAll:()=>[]},performance:{now:()=>clock},ref:value=>({value}),computed:fn=>({get value(){return fn()}}),onMounted(){},onBeforeUnmount(){},
+ const deps={...core,...media,...animation,...sequence,...musicModule,djPoster:'dj.png',djMetadata:{alphaBBox:[47,25,203,242]},window,document:{querySelectorAll:()=>[]},Math:Object.assign(Object.create(Math),{random:()=>.1}),Date:class extends Date{static now(){return 1720000000000+clock}},performance:{now:()=>clock},ref:value=>({value}),computed:fn=>({get value(){return fn()}}),onMounted(){},onBeforeUnmount(){},
   invoke,listen:async()=>()=>{},convertFileSrc:p=>p,cursorPosition:async()=>({...cursor}),currentMonitor:async()=>({workArea:{position:{x:0,y:0},size:{width:1920,height:1040}}}),primaryMonitor:async()=>null,getCurrentWindow:()=>win,
-  PhysicalPosition:class{constructor(x,y){this.x=x;this.y=y}},PhysicalSize:class{},computePetLayoutMetrics:()=>metrics,isPetOpaqueHit:()=>true,loadPetAlphaMask:async()=>null,
-  builtinMotionPack:{id:'builtin',clips:[]},companionArtwork:()=>({src:'poster.png'})}
- const run=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;\n${js}\ninitialized=true;img.value={getBoundingClientRect:()=>({left:0,top:0,width:160,height:220})};return {state,activity,airborne,dragging,pointerDown,release,frame,poll,error,cancel:()=>{return ${cancelled.endsWith('()')?cancelled:cancelled+'()'}},age(){heldAt=Date.now()-2000},getBody:()=>({...body})};`)(deps)
+  PhysicalPosition:class{constructor(x,y){this.x=x;this.y=y}},PhysicalSize:class{},computePetLayoutMetrics:()=>metrics,isPetOpaqueHit:(_a,_r,_m,x,y)=>x>=0&&x<=160&&y>=0&&y<=220,loadPetAlphaMask:async()=>null,
+  builtinMotionPack:pack,companionArtwork:()=>({src:'poster.png'})}
+ const run=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;\n${js}\ninitialized=true;img.value={getBoundingClientRect:()=>({left:0,top:0,width:160,height:220})};return {state,activity,airborne,dragging,pointerDown,release,frame,poll,error,musicScene,codexStatus,media,pose,facing,requestAction,refreshGeometry,updateHitTest,setFullscreen(value){fullscreen.value=value},setMusic(sample){music.value=sample;musicReceived=performance.now()},cancel:()=>{return ${cancelled.endsWith('()')?cancelled:cancelled+'()'}},age(){heldAt=Date.now()-2000},getBody:()=>({...body})};`)(deps)
  Object.assign(run.state.value.preferences,{gravity:true,edgeDock:false,springDrag:false,wander:false,movement:'still',...preferences})
  const press=()=>run.pointerDown({button:0,pointerId:1,clientX:80,clientY:100,currentTarget:{setPointerCapture(){}}})
  const frame=async(ms=33)=>{clock+=ms;await run.frame()}
- return {...run,pos,writes,timers,press,frame,async move(x=14,y=-4,ms=40){cursor.x+=x;cursor.y+=y;await frame(ms)},setHeld(value){held=value},deferMove(){defer=true;return new Promise(ok=>{moveStarted=ok})},finishMove(){defer=false;completeMove()},failMove(){failMove=true}}
+ return {...run,pos,writes,timers,press,frame,setDesktop(fullscreen,shown=true){nativeFullscreen=fullscreen;windowShown=shown},cursorIgnored:()=>nativeIgnored,resetNativeCursorMode(value){nativeIgnored=value},setCursor(x,y=cursor.y){cursor.x=x;cursor.y=y},async move(x=14,y=-4,ms=40){cursor.x+=x;cursor.y+=y;await frame(ms)},setHeld(value){held=value},deferMove(){defer=true;return new Promise(ok=>{moveStarted=ok})},finishMove(){defer=false;completeMove()},failMove(){failMove=true}}
 }
 async function drag(a){await a.press();for(let i=0;i<6;i++)await a.move()}
 test('normal release retains throw velocity and enters gravity',async()=>{const a=app();await drag(a);await a.release();assert.equal(a.airborne.value,true);assert.ok(a.getBody().vx>0);const y=a.pos.y;for(let i=0;i<15;i++)await a.frame();assert.ok(a.pos.y>y)})
@@ -40,3 +42,70 @@ test('lost mouse-up polling releases a moved pet',async()=>{const a=app();await 
 test('cancellation before moving does not throw or launch Codex',async()=>{const a=app();await a.press();await a.release();await a.frame();assert.equal(a.airborne.value,false);assert.equal(a.dragging.value,false);assert.equal(a.timers.length,0)})
 test('release waits for the last position write before reading its origin',async()=>{const a=app();await a.press();const started=a.deferMove();const move=a.move();await started;let finished=false;const release=a.release().then(()=>{finished=true});await Promise.resolve();assert.equal(finished,false);a.finishMove();await move;await release;assert.equal(a.airborne.value,true);assert.equal(a.getBody().x,a.pos.x)})
 test('a failed native move cancels motion and reports a recoverable error',async()=>{const a=app();await a.press();a.failMove();await a.move();assert.equal(a.dragging.value,false);assert.equal(a.airborne.value,false);assert.ok(a.error.value.includes('移动已暂停'))})
+
+test('active music immediately yields to dragging, throwing and Codex working feedback',async()=>{
+ const a=app(),audio={...musicModule.silentMusic(),active:true,bpm:120,confidence:1,level:.5}
+ a.setMusic(audio);await a.frame();await a.frame(150);assert.equal(a.musicScene.value.showing,true)
+ await drag(a);assert.equal(a.musicScene.value.showing,false);await a.release();assert.equal(a.airborne.value,true)
+ const b=app();b.setMusic(audio);await b.frame();await b.frame(150);assert.equal(b.musicScene.value.showing,true)
+ b.codexStatus.value='working';await b.frame();assert.equal(b.musicScene.value.showing,false);assert.equal(b.error.value,'')
+})
+
+test('following keeps one walk playback request alive across whole video and PNG cycles',async()=>{
+ for(const videoAnimations of [true,false]){
+  const a=app({movement:'follow',hoverPause:false,videoAnimations,musicMode:'off'},builtinPack)
+  a.setCursor(1800);await a.frame();await a.frame()
+  assert.equal(a.media.value.clip.slot,'walk-right')
+  const revision=a.media.value.revision,frames=new Set(),x=a.pos.x
+  for(let i=0;i<125;i++){await a.frame();frames.add(a.media.value.frame);assert.equal(a.media.value.revision,revision,`video=${videoAnimations}, frame=${i}`)}
+  assert.ok(frames.size>=6,'walk frames must advance instead of repeatedly restarting')
+  assert.ok(a.pos.x>x+180);assert.equal(a.activity.value,'walk');assert.equal(a.error.value,'')
+ }
+})
+
+test('following turns once, stops near cursor and resumes without stealing manual or Codex feedback',async()=>{
+ const a=app({movement:'follow',hoverPause:false,musicMode:'off'},builtinPack)
+ a.setCursor(1800);await a.frame();await a.frame();const right=a.media.value.revision
+ a.setCursor(-300);await a.frame();await a.frame();assert.equal(a.media.value.clip.slot,'walk-left');assert.ok(a.media.value.revision>right)
+ const left=a.media.value.revision;for(let i=0;i<8;i++){await a.frame();assert.equal(a.media.value.revision,left)}
+ a.setCursor(a.getBody().x+80);await a.frame();await a.frame();assert.equal(a.activity.value,'idle');const stopped=a.pos.x
+ await a.frame();assert.equal(a.pos.x,stopped)
+ a.requestAction('greet');a.setCursor(1800);await a.frame();assert.equal(a.activity.value,'greet');assert.equal(a.pos.x,stopped)
+ const b=app({movement:'follow',hoverPause:false,musicMode:'off'},builtinPack);b.setCursor(1800);b.codexStatus.value='working';await b.frame();assert.equal(b.pos.x,420)
+})
+
+test('visible fullscreen follows and wanders; fullscreen hiding pauses and then resumes',async()=>{
+ for(const movement of ['follow','wander']){
+  const a=app({movement,fullscreenHide:false,hoverPause:false,musicMode:'off',videoAnimations:false},builtinPack)
+  if(movement==='follow')a.setCursor(1800);else a.requestAction('walk')
+  a.setFullscreen(true);await a.frame();await a.frame();const x=a.pos.x,frame=a.media.value.frame
+  for(let i=0;i<15;i++)await a.frame()
+  assert.ok(a.pos.x>x,`${movement} must move in visible fullscreen`);assert.notEqual(a.media.value.frame,frame)
+  a.state.value.preferences.fullscreenHide=true;await a.frame();const hiddenX=a.pos.x,hiddenFrame=a.media.value.frame
+  for(let i=0;i<8;i++)await a.frame();assert.equal(a.pos.x,hiddenX);assert.equal(a.media.value.frame,hiddenFrame)
+  a.setFullscreen(false);for(let i=0;i<8;i++)await a.frame();assert.ok(a.pos.x>hiddenX);assert.equal(a.error.value,'')
+ }
+})
+
+test('fullscreen does not prevent a scheduled autonomous walk from starting',async()=>{
+ const a=app({movement:'wander',wander:true,fullscreenHide:false,hoverPause:false,musicMode:'off'},builtinPack)
+ a.setFullscreen(true);await a.frame(12001);assert.equal(a.activity.value,'walk')
+ await a.frame();assert.equal(a.media.value.clip.slot,'walk-right');const x=a.pos.x
+ for(let i=0;i<5;i++)await a.frame();assert.ok(a.pos.x>x)
+})
+
+test('leaving fullscreen resyncs a relocated window and restores mouse interaction',async()=>{
+ const a=app({fullscreenHide:true})
+ await a.refreshGeometry();await a.updateHitTest();assert.equal(a.cursorIgnored(),false)
+ a.setDesktop(true);await a.poll();await a.updateHitTest();assert.equal(a.cursorIgnored(),true)
+ a.pos.x=900;a.pos.y=500;a.setCursor(980,600);a.setDesktop(false)
+ await a.poll();await a.updateHitTest();assert.equal(a.cursorIgnored(),false);assert.equal(a.getBody().x,900)
+ await a.press();assert.equal(a.dragging.value,true);await a.release()
+})
+
+test('fullscreen exit reapplies mouse mode even when Windows changed its cached native state',async()=>{
+ const a=app({fullscreenHide:false});await a.refreshGeometry();await a.updateHitTest()
+ a.setDesktop(true);await a.poll();await a.updateHitTest();assert.equal(a.cursorIgnored(),false)
+ a.resetNativeCursorMode(true);a.setDesktop(false);await a.poll();await a.updateHitTest();assert.equal(a.cursorIgnored(),false)
+ a.state.value.preferences.passthrough=true;await a.updateHitTest();assert.equal(a.cursorIgnored(),true)
+})

@@ -1,6 +1,6 @@
 # Windows 安装与启动
 
-从 [GitHub Releases](https://github.com/QQG-QQ/penguin-pal/releases/latest) 下载 `PenguinPal-Companion-0.5.9-windows-x64-setup.exe`，双击并按向导完成安装。安装到当前用户；提供桌面快捷方式、开始菜单入口和卸载程序。全新安装通常不需要管理员权限；迁移机器级旧版 MSI 或安装缺少的 WebView2 时可能需要管理员确认。
+从 [GitHub Releases](https://github.com/QQG-QQ/penguin-pal/releases/latest) 下载 `PenguinPal-Companion-0.6.1-windows-x64-setup.exe`，双击并按向导完成安装。安装到当前用户；提供桌面快捷方式、开始菜单入口和卸载程序。全新安装通常不需要管理员权限；迁移机器级旧版 MSI 或安装缺少的 WebView2 时可能需要管理员确认。
 
 安装后双击桌面“PenguinPal 企鹅桌宠”即可启动，无需源码、Node.js、Rust 或开发服务器。企鹅本身可以独立运行；打开 Codex 后，已配置的本地联动继续显示任务状态，聊天仍由现有 Codex 窗口提供。
 

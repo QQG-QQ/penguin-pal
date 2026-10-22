@@ -15,4 +15,6 @@ mod companion_runtime;
 #[cfg(not(feature = "legacy-assistant"))]
 mod companion_updates;
 #[cfg(not(feature = "legacy-assistant"))]
+mod companion_music;
+#[cfg(not(feature = "legacy-assistant"))]
 pub use companion::run;

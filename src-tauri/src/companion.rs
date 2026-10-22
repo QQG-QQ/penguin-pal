@@ -1,5 +1,6 @@
 use crate::companion_media;
 use crate::companion_platform;
+use crate::companion_music::{MusicMode, MusicService, Snapshot as MusicSnapshot};
 use crate::{companion_data, companion_runtime, companion_updates};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,7 @@ pub struct Preferences {
     pub video_animations: bool,
     pub spring_drag: bool,
     pub status_animations: bool,
+    pub music_mode: MusicMode,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -103,6 +105,7 @@ impl Default for Preferences {
             video_animations: true,
             spring_drag: true,
             status_animations: true,
+            music_mode: MusicMode::Auto,
         }
     }
 }
@@ -492,6 +495,18 @@ fn companion_open_codex(window: WebviewWindow) -> Result<(), String> {
     companion_platform::open_codex()
 }
 #[tauri::command]
+fn companion_music_poll(window: WebviewWindow, store: State<Mutex<Store>>, music: State<MusicService>, enabled: bool) -> Result<MusicSnapshot, String> {
+    main_only(&window)?;
+    let store=store.lock().map_err(|_| "状态忙")?;
+    let prefs=&store.state.preferences;
+    let mode=if enabled && !store.runtime.safe_mode && !prefs.quiet && !prefs.reduced_motion {prefs.music_mode} else {MusicMode::Off};
+    if mode!=MusicMode::Off && std::env::args().any(|a|a=="--smoke") && std::env::args().any(|a|a=="--smoke-preview") && std::env::args().any(|a|a=="--smoke-music-simulated") {
+        let phase=(now()%500) as f32/500.;
+        return Ok(MusicSnapshot{available:true,active:true,level:0.6,bass:0.5,treble:0.4,pulse:(-phase*6.).exp(),bpm:120.,confidence:1.,source:"验收模拟节拍".into(),issue:String::new()});
+    }
+    Ok(music.poll(mode))
+}
+#[tauri::command]
 fn companion_quit(window: WebviewWindow) -> Result<(), String> {
     main_only(&window)?;
     window.app_handle().exit(0);
@@ -556,6 +571,8 @@ const PREVIEW_ACTIONS: &[&str] = &[
 #[tauri::command]
 fn companion_preview_plan(window: WebviewWindow) -> Result<Vec<&'static str>, String> {
     main_only(&window)?;
+    if std::env::args().any(|a| a=="--smoke") && std::env::args().any(|a| a=="--smoke-preview") && std::env::args().any(|a| a=="--smoke-motion") {return Ok(vec!["motion"]);}
+    if std::env::args().any(|a| a=="--smoke") && std::env::args().any(|a| a=="--smoke-preview") && std::env::args().any(|a| a=="--smoke-music") {return Ok(vec!["music"]);}
     if std::env::args().any(|a| a == "--smoke")
         && std::env::args().any(|a| a == "--smoke-preview")
         && std::env::args().any(|a| a == "--smoke-actions")
@@ -588,6 +605,17 @@ struct PreviewProbe {
     #[serde(default)]
     playing: bool,
     action: Option<String>,
+    motion: Option<MotionProbe>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MotionProbe {
+    ticks: u64,
+    fullscreen: bool,
+    document_visible: bool,
+    x: f64,
+    y: f64,
+    video_time: f64,
 }
 #[tauri::command]
 fn companion_preview_mode(
@@ -617,7 +645,7 @@ fn companion_preview_report(
     }
     let store = store.lock().map_err(|_| "状态忙")?;
     let file = match &probe.action {
-        Some(action) if PREVIEW_ACTIONS.contains(&action.as_str()) => {
+        Some(action) if PREVIEW_ACTIONS.contains(&action.as_str()) || action=="music" || action=="motion" => {
             format!("preview-{action}.json")
         }
         Some(_) => return Err("未知测试动作".into()),
@@ -1009,6 +1037,14 @@ pub fn run() {
             let restored_backup = read_state(&root.join("state.json")).is_none()
                 && read_state(&root.join("state.json.bak")).is_some();
             let mut state = load_state(&root);
+            if smoke_preview && std::env::args().any(|a|a=="--smoke-motion") {
+                state.preferences.movement=Movement::Follow;
+                state.preferences.wander=false;
+                state.preferences.fullscreen_hide=false;
+                state.preferences.edge_dock=false;
+                state.preferences.music_mode=MusicMode::Off;
+            }
+            if smoke_preview && std::env::args().any(|a|a=="--smoke-music") {state.preferences.music_mode=MusicMode::Audio;}
             if let Ok(enabled) = app.autolaunch().is_enabled() {
                 state.preferences.autostart = enabled;
             }
@@ -1033,6 +1069,7 @@ pub fn run() {
                 restored_backup,
                 update: None,
             }));
+            app.manage(MusicService::new());
             let show = MenuItem::with_id(app, "show", "显示/隐藏企鹅", true, None::<&str>)?;
             let controls = MenuItem::with_id(app, "controls", "快速控制", true, None::<&str>)?;
             let codex = MenuItem::with_id(app, "codex", "打开 Codex", true, None::<&str>)?;
@@ -1100,6 +1137,7 @@ pub fn run() {
             companion_load,
             companion_save,
             companion_poll,
+            companion_music_poll,
             companion_open_codex,
             companion_quit,
             companion_install_hooks,
@@ -1119,6 +1157,7 @@ pub fn run() {
         .expect("PenguinPal companion failed");
     application.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(music) = app.try_state::<MusicService>() { music.stop(); }
             if let Some(store) = app.try_state::<Mutex<Store>>() {
                 if let Ok(store) = store.lock() {
                     store.runtime.finish(now());
@@ -1257,6 +1296,7 @@ mod tests {
             serde_json::from_str(r#"{"schema":1,"preferences":{"wander":false}}"#).unwrap();
         assert_eq!(state.preferences.size, 1.0);
         assert!(state.preferences.hover_pause);
+        assert_eq!(state.preferences.music_mode, MusicMode::Auto);
         let mut invalid = state.clone();
         invalid.preferences.size = 9.0;
         assert!(invalid.validate().is_err());

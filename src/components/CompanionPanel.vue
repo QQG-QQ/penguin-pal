@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import type { MediaPack } from '../lib/companionMedia'
 import type { Activity, CareAction, CompanionState, Preferences } from '../lib/companionCore'
-const props = defineProps<{ state: CompanionState; status: string; connection: string; expanded: boolean; packs:MediaPack[]; native:boolean; importing:boolean; systemReduced:boolean }>()
+const props = defineProps<{ state: CompanionState; status: string; connection: string; expanded: boolean; packs:MediaPack[]; native:boolean; importing:boolean; systemReduced:boolean; musicStatus:string }>()
 const emit = defineEmits<{
   care: [CareAction]; action: [Activity]; codex: []; close: []; hide: []; quit: []; install: []
   preference: [Partial<Preferences>]; expand: [boolean]; snap: []; tools: []; importPack:[]; refreshPacks:[]; packFolder:[]
@@ -44,6 +44,9 @@ const toggles: { key: keyof Preferences; label: string }[] = [
         :class="{ selected: props.state.preferences.movement === mode }" :aria-pressed="props.state.preferences.movement === mode" @click="movement(mode)">{{ label }}</button>
     </div>
     <div class="panel-footer"><button @click="emit('expand', !expanded)">{{ expanded ? '收起设置' : '更多设置' }}</button><button @click="emit('tools')">工具箱</button><button @click="emit('hide')">隐藏</button></div>
+    <div class="rule"></div><label class="caption" for="music-mode">音乐打碟 · 双彩灯</label>
+    <select id="music-mode" :value="state.preferences.musicMode" @change="patch({musicMode:($event.target as HTMLSelectElement).value as Preferences['musicMode']})"><option value="auto">自动识别音乐</option><option value="audio">音频跟随（含浏览器）</option><option value="off">关闭</option></select>
+    <small role="status">{{musicStatus}}</small><small>关闭面板后开始律动。自动模式识别音乐播放器；浏览器未识别时选音频跟随，此时人声、游戏也可能触发。</small>
     <div v-if="expanded" class="advanced">
       <div class="rule"></div><label class="caption">大小</label>
       <div class="choices"><button v-for="item in [{label:'小',value:.8},{label:'中',value:1},{label:'大',value:1.2}]" :key="item.value" :class="{ selected: state.preferences.size === item.value }" @click="patch({ size: item.value })">{{ item.label }}</button></div>

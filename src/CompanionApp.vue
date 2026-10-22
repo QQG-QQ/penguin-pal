@@ -5,6 +5,10 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { cursorPosition, currentMonitor, primaryMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
 import CompanionPanel from './components/CompanionPanel.vue'
 import CompanionSprite from './components/CompanionSprite.vue'
+import CompanionDJ from './components/CompanionDJ.vue'
+import { MusicClock, MusicScene, musicAllowed, silentMusic, type MusicSnapshot } from './lib/companionMusic'
+import djPoster from '../penguin/music-dj/dj.png'
+import djMetadata from '../penguin/music-dj/media.json'
 import { DragTrail, motionDuration, motionPackForSlot, springStep, type MediaPack } from './lib/companionMedia'
 import { MotionSequencer } from './lib/companionSequence'
 import CompanionDiagnostics from './components/CompanionDiagnostics.vue'
@@ -18,6 +22,7 @@ const native = '__TAURI_INTERNALS__' in window
 const previewGreeting=ref(new URLSearchParams(window.location.search).get('preview')==='greet')
 const previewSuite=ref(false),previewAction=ref<string>(),previewPlan:string[]=[]
 let previewTimer:number|undefined
+let previewTicks=0
 const state = ref(defaultCompanion(Date.now())), activity = ref<Activity>('idle')
 const menu = ref(false), expanded = ref(false), food = ref(false), message = ref(''), error = ref('')
 const tools=ref(false),safeMode=ref(false),dock=ref<DockEdge>('none'),dockHidden=ref(false)
@@ -31,9 +36,14 @@ const busy = computed(() => ['working','waiting','toolError'].includes(codexStat
 const presentation = computed(() => codexPresentation(codexStatus.value))
 const packs=ref<MediaPack[]>([]), importing=ref(false), media=ref<ReturnType<MotionSequencer['sample']>>()
 const motionPicker=new MotionSequencer(),trail=new DragTrail(),failedVideos=new Set<string>()
+const music=ref<MusicSnapshot>(silentMusic()),musicClock=ref(new MusicClock()),musicScene=ref(new MusicScene()),djFailed=ref(false)
+let musicReceived=0,inMusic=false,musicTimer:number|undefined
+const musicEnabled=computed(()=>state.value.preferences.musicMode!=='off'&&!still.value&&!state.value.preferences.quiet&&visible.value&&!dockHidden.value&&!hiddenForFullscreen.value)
+const musicEligible=()=>musicAllowed({enabled:musicEnabled.value,reduced:still.value,quiet:state.value.preferences.quiet,visible:visible.value,hidden:hiddenForFullscreen.value||dockHidden.value,codex:codexStatus.value,pressed:dragging.value,falling:airborne.value,panel:menu.value||food.value,manual:Date.now()<manualUntil,activity:activity.value})
+const musicLabel=computed(()=>state.value.preferences.musicMode==='off'?'音乐打碟已关闭':still.value?'减少动态已开启，音乐打碟暂停':state.value.preferences.quiet?'安静陪伴中，音乐打碟暂停':music.value.issue||(!musicEligible()?'互动或 Codex 状态优先，打碟暂停':music.value.active?`正在跟随${music.value.confidence>=.3?` · ${Math.round(music.value.bpm)} BPM`:''}`:music.value.source||'等待音乐播放'))
 const resolveMedia=(file:string)=>media.value?.directory?convertFileSrc(`${media.value.directory}/${file}`):file
 const selectedPack=computed(()=>state.value.preferences.animationPack==='builtin'?builtinMotionPack:packs.value.find(p=>p.id===state.value.preferences.animationPack))
-const artwork = computed(() => media.value ? {...companionArtwork('idle'),src:resolveMedia(media.value.frame),alt:`企鹅 ${media.value.clip.id}`} : companionArtwork(pose.value))
+const artwork = computed(() => musicScene.value.showing ? {src:djPoster,alt:'企鹅打碟',naturalWidth:256,naturalHeight:256,alphaBBox:{left:djMetadata.alphaBBox[0],top:djMetadata.alphaBBox[1],right:djMetadata.alphaBBox[2],bottom:djMetadata.alphaBBox[3]}} : media.value ? {...companionArtwork('idle'),src:resolveMedia(media.value.frame),alt:`企鹅 ${media.value.clip.id}`} : companionArtwork(pose.value))
 const video=computed(()=>{const file=media.value?.clip.video;if(!file||!state.value.preferences.videoAnimations||still.value)return undefined;const url=resolveMedia(file);return failedVideos.has(url)?undefined:url})
 let videoNotice=''
 function clearVideoNotice(){if(error.value===videoNotice)error.value='';videoNotice=''}
@@ -51,11 +61,17 @@ function sendPreview(probe:{width:number;height:number;corner:number;center:numb
   if(!native||!previewGreeting.value)return
   const v=Array.from(document.querySelectorAll('video')).find(v=>url?v.src===new URL(url,location.href).href:v.style.visibility==='visible')
   if(playing&&!v)return
-  void invoke('companion_preview_report',{probe:{...probe,panel:menu.value,action:previewAction.value,playing,reduced:still.value,selected:!!video.value,ready:v?.readyState??0,network:v?.networkState??0,media_error:v?.error?.code??0,paused:v?.paused??true}}).catch(()=>{})
+  void invoke('companion_preview_report',{probe:{...probe,panel:menu.value,action:previewAction.value,playing,reduced:still.value,selected:!!video.value,ready:v?.readyState??0,network:v?.networkState??0,media_error:v?.error?.code??0,paused:v?.paused??true,motion:previewAction.value==='motion'?{ticks:previewTicks,fullscreen:fullscreen.value,document_visible:document.visibilityState==='visible',x:body.x,y:body.y,video_time:v?.currentTime??0}:undefined}}).catch(()=>{})
 }
 function verifyPreview(probe:{width:number;height:number;corner:number;center:number;playing?:boolean}){sendPreview(probe,probe.playing??false)}
 function runPreviewPlan(){
   if(!previewPlan.length)return
+  if(previewPlan.includes('motion')){
+    previewSuite.value=true;previewAction.value='motion';nextActivity=Date.now()+600000;nextMicro=Date.now()+600000
+    const report=()=>{if(disposed)return;sendPreview({width:256,height:256,corner:0,center:0},false);previewTimer=window.setTimeout(report,1000)}
+    report();return
+  }
+  if(previewPlan.includes('music')){previewSuite.value=true;previewAction.value='music';nextActivity=Date.now()+600000;nextMicro=Date.now()+600000;return}
   previewSuite.value=true;let step=0
   const next=()=>{const key=previewPlan[step++];if(!key||disposed)return;previewAction.value=key;facing.value=key==='walk-left'?-1:1;updateActivity(key.startsWith('walk-')?'walk':key as Activity,10000,true);nextActivity=Date.now()+600000;nextMicro=Date.now()+600000;previewTimer=window.setTimeout(next,2200)}
   next()
@@ -64,7 +80,7 @@ async function refreshPacks(){if(native)try{packs.value=(await invoke<MediaPack[
 async function importPack(){if(!native||importing.value)return;importing.value=true;try{const pack=await invoke<MediaPack|null>('companion_media_import');if(pack){await refreshPacks();await preferencesChanged({animationPack:pack.id});talk(`已启用 ${pack.name}。`)}}catch(e){error.value=`动画导入失败：${String(e)}`}finally{importing.value=false}}
 async function openPackFolder(){if(native)try{await invoke('companion_media_folder')}catch(e){error.value=String(e)}}
 const hiddenForFullscreen = computed(() => fullscreen.value && state.value.preferences.fullscreenHide && !menu.value)
-const statusLabel = computed(() => busy.value ? presentation.value.label.replace('Codex ','') : ({rest:'休息',walk:'散步',eat:'吃鱼',sweep:'扫地',happy:'开心',pat:'摸摸'} as Record<string,string>)[activity.value] ?? '待机')
+const statusLabel = computed(() => busy.value ? presentation.value.label.replace('Codex ','') : musicScene.value.showing?'音乐打碟':({rest:'休息',walk:'散步',eat:'吃鱼',sweep:'扫地',happy:'开心',pat:'摸摸'} as Record<string,string>)[activity.value] ?? '待机')
 const connection = computed(() => !state.value.preferences.codexEvents ? 'Codex 状态已关闭' : lastEvent.value ? '已收到 Codex 状态事件' : connected.value ? '等待事件，首次安装需在 Codex 信任 hooks' : native ? '本地连接中' : '浏览器预览')
 const unit = computed(() => state.value.preferences.size)
 const stageStyle = computed(() => ({left:`${stage.value.x}px`,top:`${stage.value.y}px`,transform:`scale(${unit.value})`}))
@@ -74,7 +90,8 @@ let body: Body = {x:200,y:200,vx:0,vy:0,width:160,height:220}, offset = {x:70,y:
 let windowOrigin = {x:0,y:0}, pointerOffset = {x:0,y:0}, pressed = false, moved = false, heldAt = 0, patAt = 0, heldPat = false
 let releasing=false,dragMove:Promise<void>|undefined,dragOrigin={x:0,y:0}
 let previousCursor = {x:0,y:0,at:0}, lastFrame = performance.now(), actionUntil = 0, manualUntil=0, nextActivity = Date.now()+12000, nextMicro = Date.now()+5000
-let recent: {action:CareAction;at:number}[] = [], inFrame = false, inPoll = false, inHit = false, ignored = false
+let recent: {action:CareAction;at:number}[] = [], inFrame = false, inPoll = false, inHit = false
+let ignored:boolean|undefined=false
 let initialized = false, saving = false, saveAgain = false, disposed = false, layingOut = false, lastContext = 'quiet', nextContext = 0
 const player=new AnimationPlayer()
 let maskSource = '', tapAt = 0,dockHome:{x:number;y:number}|undefined,dockHideAt=0,dockMoving=false,nextLine=Date.now()+180000
@@ -154,7 +171,7 @@ async function layoutPanel() {
       await win.setPosition(new PhysicalPosition(Math.round(base.x),Math.round(base.y)))
       await win.setSize(new PhysicalSize(Math.round(w),Math.round(h)));stage.value={x:0,y:0};windowOrigin=base
     }else{
-      const pw=(tools.value?440:280)*scale,ph=Math.min((tools.value?740:expanded.value?800:315)*scale,workArea.bottom-workArea.top)
+      const pw=(tools.value?440:280)*scale,ph=Math.min((tools.value?740:expanded.value?800:440)*scale,workArea.bottom-workArea.top)
       const px=base.x+w+pw<=workArea.right?base.x+w-12*scale:Math.max(workArea.left,base.x-pw+12*scale)
       const py=Math.max(workArea.top,Math.min(workArea.bottom-ph,base.y))
       const left=Math.min(base.x,px),top=Math.min(base.y,py),right=Math.max(base.x+w,px+pw),bottom=Math.max(base.y+h,py+ph)
@@ -233,7 +250,9 @@ function cancelDrag(){pressed=false;dragging.value=false;airborne.value=false;bo
 async function updateHitTest(){
   if(!native||!initialized||inHit||disposed||!visible.value||!img.value)return;inHit=true
   try{
-    const c=await cursorPosition(),x=(c.x-windowOrigin.x)/scale,y=(c.y-windowOrigin.y)/scale
+    // Fullscreen display changes can reposition the native window without moveBody().
+    const win=getCurrentWindow(),[c,origin,hitScale]=await Promise.all([cursorPosition(),win.outerPosition(),win.scaleFactor()])
+    const x=(c.x-origin.x)/hitScale,y=(c.y-origin.y)/hitScale
     const opaque=isPetOpaqueHit(artwork.value,img.value.getBoundingClientRect(),mask.value,x,y)
     const control=Array.from(document.querySelectorAll<HTMLElement>('.panel-host,.speech,.pet-tools,.food-picker,.notice,.codex-marker')).some(el=>{const r=el.getBoundingClientRect();return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom})
     hovered.value=opaque||control
@@ -249,21 +268,42 @@ async function poll(){
   if(!native||inPoll)return;inPoll=true
   try{
     const [data,shown]=await Promise.all([invoke<{safeMode:boolean;bridge:{status:string;lastReceived:number};desktop:{surfaces:Surface[];context:string;fullscreen:boolean;leftButtonDown:boolean;idleSeconds:number}}>('companion_poll'),getCurrentWindow().isVisible()])
-    if(disposed)return;const previous=codexStatus.value;connected.value=true;codexStatus.value=data.bridge.status;lastEvent.value=data.bridge.lastReceived;visible.value=shown
+    if(disposed)return;const previous=codexStatus.value,wasFullscreen=fullscreen.value,wasVisible=visible.value;connected.value=true;codexStatus.value=data.bridge.status;lastEvent.value=data.bridge.lastReceived;visible.value=shown
     await setSafety(data.safeMode)
     if(previous!==codexStatus.value&&['waiting','ended','interrupted','toolError'].includes(codexStatus.value)&&state.value.preferences.notifications&&!state.value.preferences.quiet){await showDock(false);talk(presentation.value.label);dockHideAt=Date.now()+8000}
     surfaces=data.desktop.surfaces;context.value=data.desktop.context;fullscreen.value=data.desktop.fullscreen
+    if(wasFullscreen!==fullscreen.value||wasVisible!==shown){
+      ignored=undefined
+      if(shown&&!pressed)await refreshGeometry()
+      await updateHitTest()
+    }
     if(hiddenForFullscreen.value)message.value=''
     if(shown&&context.value!==lastContext&&Date.now()>nextContext&&!busy.value&&!pressed&&!menu.value){if(context.value!=='quiet')talk(localLine(state.value.preferences.personality,context.value,Math.random()));nextContext=Date.now()+600000}lastContext=context.value
     if(pressed&&Date.now()-heldAt>1000&&!data.desktop.leftButtonDown)void release()
     if(shouldIdleRest(data.desktop.idleSeconds,Date.now(),actionUntil,busy.value||pressed||menu.value,activity.value))updateActivity('rest',30000)
   }catch{connected.value=false;codexStatus.value='idle';surfaces=[];fullscreen.value=false}finally{inPoll=false}
 }
+async function musicTick(){
+  if(disposed)return
+  if(native&&!inMusic){
+    inMusic=true
+    try{const sample=await invoke<MusicSnapshot>('companion_music_poll',{enabled:musicEnabled.value});if(!disposed){music.value=sample;musicReceived=performance.now()}}
+    catch{music.value=silentMusic()}
+    finally{inMusic=false}
+  }
+  if(!disposed)musicTimer=window.setTimeout(()=>{void musicTick()},musicEnabled.value?50:1000)
+}
 async function frame(){
   if(disposed||inFrame||!initialized)return
   const now=performance.now(),elapsed=(now-lastFrame)/1000,dt=Math.min(.05,elapsed);lastFrame=now;inFrame=true
+  if(previewAction.value==='motion')previewTicks++
   try{
     advanceNeeds(state.value,elapsed,activity.value==='rest')
+    const eligible=musicEligible(),wantsMusic=eligible&&music.value.active&&now-musicReceived<500
+    const wasMusic=musicScene.value.showing
+    musicClock.value.step(music.value,elapsed,!musicScene.value.showing)
+    musicScene.value.sample(wantsMusic,now,!eligible)
+    if(wasMusic!==musicScene.value.showing){motionPicker.reset(true);player.reset();if(musicScene.value.showing)musicClock.value.elapsed=0}
     const clip=selectClip(activity.value,state.value.preferences.statusAnimations?codexStatus.value:'idle',dragging.value&&moved,airborne.value,facing.value,Date.now()<manualUntil)
     pose.value=player.sample(clip,now,still.value)
     media.value=motionPicker.sample(motionPackForSlot(selectedPack.value,builtinMotionPack,clip.slot??'idle'),clip.slot??'idle',now,Math.random(),{video:state.value.preferences.videoAnimations&&!still.value&&!(media.value?.clip.video&&failedVideos.has(resolveMedia(media.value.clip.video))),paused:!visible.value||dockHidden.value||hiddenForFullscreen.value,immediate:['drag','fall','land','dizzy'].includes(clip.slot??''),reduced:still.value})
@@ -291,12 +331,16 @@ async function frame(){
         const result=stepPhysics(body,bounds,state.value.preferences.surfaces?surfaces:[],dt,scale);body=result.body;await moveBody()
         if(result.hard)updateActivity('dizzy',2400)
         if(result.landed){airborne.value=false;attached=surfaces.find(s=>s.id===result.surface);if(activity.value!=='dizzy')updateActivity('land',500);void save()}
-      }else if(!busy.value&&!still.value&&!(hovered.value&&state.value.preferences.hoverPause)&&!fullscreen.value){
+      }else if(!musicScene.value.showing&&!wantsMusic&&!busy.value&&!still.value&&!(hovered.value&&state.value.preferences.hoverPause)){
         let direction=activity.value==='walk'?facing.value:0
         if(state.value.preferences.movement==='follow'){
           const c=await cursorPosition(),distance=c.x-(body.x+body.width/2)
           direction=Math.abs(distance)>140*scale?Math.sign(distance):0
-          if(direction){facing.value=direction;if(activity.value==='idle'||activity.value==='walk')updateActivity('walk',500)}else if(activity.value==='walk')updateActivity('idle')
+          if(direction){
+            facing.value=direction
+            if(activity.value==='idle')updateActivity('walk',500)
+            if(activity.value==='walk')actionUntil=Math.max(actionUntil,Date.now()+500)
+          }else if(activity.value==='walk')updateActivity('idle')
         }
         if(direction&&activity.value==='walk'){
           const left=Math.max(bounds.left,attached?attached.left:bounds.left),right=Math.min(bounds.right-body.width,attached?attached.right-body.width:bounds.right-body.width)
@@ -305,9 +349,9 @@ async function frame(){
       }
     }
     if(Date.now()>actionUntil&&activity.value!=='idle')updateActivity(activity.value==='rest'?'wake':'idle',activity.value==='rest'?1200:3000)
-    if(Date.now()>nextMicro&&activity.value==='idle'&&!pressed&&!menu.value&&!busy.value&&!still.value){updateActivity(Math.random()<.65?'blink':'look',500);nextMicro=Date.now()+4500+Math.random()*8000}
-    if(Date.now()>nextActivity&&!pressed&&!menu.value&&!food.value&&!airborne.value&&!(hovered.value&&state.value.preferences.hoverPause)){
-      const next=chooseActivity(state.value,Math.random(),busy.value||fullscreen.value||still.value||context.value==='video'||dock.value!=='none')
+    if(Date.now()>nextMicro&&!wantsMusic&&!musicScene.value.showing&&activity.value==='idle'&&!pressed&&!menu.value&&!busy.value&&!still.value){updateActivity(Math.random()<.65?'blink':'look',500);nextMicro=Date.now()+4500+Math.random()*8000}
+    if(Date.now()>nextActivity&&!wantsMusic&&!musicScene.value.showing&&!pressed&&!menu.value&&!food.value&&!airborne.value&&!(hovered.value&&state.value.preferences.hoverPause)){
+      const next=chooseActivity(state.value,Math.random(),busy.value||hiddenForFullscreen.value||still.value||context.value==='video'||dock.value!=='none')
       updateActivity(next,next==='rest'?45000:next==='walk'?5000:next==='sweep'?6500:3000)
       const rhythm=state.value.preferences.rhythm==='calm'?2:state.value.preferences.rhythm==='lively'?.65:1
       nextActivity=Date.now()+(25000+Math.random()*30000)*rhythm
@@ -315,7 +359,7 @@ async function frame(){
     if(Date.now()>nextLine&&!busy.value&&!pressed&&!menu.value&&!dockHidden.value&&!fullscreen.value){talk(state.value.hunger>75?'小鱼可以留一点给我吗？':localLine(state.value.preferences.personality,context.value,Math.random()));nextLine=Date.now()+300000+Math.random()*600000}
   }catch{cancelDrag();attached=undefined;updateActivity('idle');nextActivity=Date.now()+60000;error.value='移动已暂停，仍可打开 Codex。'}finally{inFrame=false}
 }
-async function tick(){await frame();if(!disposed)tickTimer=window.setTimeout(()=>{void tick()},frameDelay(!visible.value||hiddenForFullscreen.value||dockHidden.value,dragging.value||airborne.value||activity.value==='walk'||!!attached,activity.value!=='idle'||busy.value))}
+async function tick(){await frame();if(!disposed)tickTimer=window.setTimeout(()=>{void tick()},frameDelay(!visible.value||hiddenForFullscreen.value||dockHidden.value,dragging.value||airborne.value||activity.value==='walk'||!!attached||musicScene.value.showing,activity.value!=='idle'||busy.value))}
 async function pollTick(){await poll();if(!disposed)pollTimer=window.setTimeout(()=>{void pollTick()},visible.value?1000:2500)}
 function motionChanged(e:MediaQueryListEvent){reduce.value=e.matches;void preferencesChanged({})}
 onMounted(async()=>{
@@ -332,7 +376,7 @@ onMounted(async()=>{
       if(state.value.x!==null&&state.value.y!==null)await win.setPosition(new PhysicalPosition(state.value.x,state.value.y))
       const savedDock=state.value.dock;await snap();state.value.dock=savedDock;unlisten=await listen('companion-panel',()=>{void toggleMenu(true)})
     }
-    initialized=true;await poll();if(native&&state.value.dock!=='none'&&state.value.preferences.edgeDock&&!safeMode.value)await setDock(state.value.dock);if(previewGreeting.value){updateActivity('greet',600000);await toggleMenu(true)}void tick();void pollTick();runPreviewPlan()
+    initialized=true;await poll();if(native&&state.value.dock!=='none'&&state.value.preferences.edgeDock&&!safeMode.value)await setDock(state.value.dock);if(previewGreeting.value&&!previewPlan.some(p=>p==='music'||p==='motion')){updateActivity('greet',600000);await toggleMenu(true)}void tick();void pollTick();void musicTick();runPreviewPlan()
     if(native&&previewGreeting.value&&!previewSuite.value)window.setTimeout(()=>{
       const videos=Array.from(document.querySelectorAll('video')),v=videos.find(v=>v.style.visibility==='visible')??videos.find(v=>v.hasAttribute('src'))??videos[0]
       if(!v)return
@@ -343,7 +387,7 @@ onMounted(async()=>{
     saveTimer=window.setInterval(()=>{void save()},30000);hitTimer=window.setInterval(()=>{void updateHitTest()},100)
   }catch(e){error.value=`初始化失败：${String(e)}`}
 })
-onBeforeUnmount(()=>{disposed=true;cancelDrag();[tickTimer,pollTimer,saveTimer,hitTimer].forEach(t=>window.clearTimeout(t));window.clearTimeout(clearMessageTimer);window.clearTimeout(codexTimer);window.clearTimeout(previewTimer);motionQuery?.removeEventListener('change',motionChanged);unlisten?.()})
+onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',{enabled:false}).catch(()=>{});cancelDrag();[tickTimer,pollTimer,saveTimer,hitTimer,musicTimer].forEach(t=>window.clearTimeout(t));window.clearTimeout(clearMessageTimer);window.clearTimeout(codexTimer);window.clearTimeout(previewTimer);motionQuery?.removeEventListener('change',motionChanged);unlisten?.()})
 </script>
 
 <template>
@@ -351,21 +395,22 @@ onBeforeUnmount(()=>{disposed=true;cancelDrag();[tickTimer,pollTimer,saveTimer,h
     <div class="pet-stage" :style="stageStyle">
       <div v-if="message" class="speech" role="status"><span>● 企鹅</span><p>{{message}}</p></div>
       <button v-else-if="safeMode||busy||codexStatus==='ended'||codexStatus==='interrupted'" class="codex-marker" @click="safeMode?openTools():openCodex"><i :class="codexStatus"></i>{{safeMode?'安全模式 · 查看诊断':presentation.label}}</button>
-      <div class="pet" :class="[activity,{dragging:dragging&&moved,held:dragging&&!moved,airborne}]" @pointerdown="pointerDown" @pointerup="release" @pointercancel="release()" @lostpointercapture="release()">
-        <div ref="img" class="pet-visual"><CompanionSprite :src="artwork.src" :alt="artwork.alt" :video="video" :request="media?.revision" :loop="media?.clip.loop??true" :paused="still||!visible||dockHidden||hiddenForFullscreen" :probe="previewGreeting" @verified="verifyPreview" @playing="videoPlaying" @ended="videoEnded" @failed="videoFailed" @image-failed="imageFailed"/></div>
+      <div class="pet" :class="[activity,{music:musicScene.showing,dragging:dragging&&moved,held:dragging&&!moved,airborne}]" @pointerdown="pointerDown" @pointerup="release" @pointercancel="release()" @lostpointercapture="release()">
+        <div ref="img" class="pet-visual" :style="{opacity:musicScene.opacity}"><CompanionDJ v-if="musicScene.showing" :clock="musicClock" :paused="still||!visible||dockHidden||hiddenForFullscreen" :video-enabled="state.preferences.videoAnimations&&!djFailed" :probe="previewGreeting" @verified="verifyPreview" @failed="djFailed=true"/><CompanionSprite v-else :src="artwork.src" :alt="artwork.alt" :video="video" :request="media?.revision" :loop="media?.clip.loop??true" :paused="still||!visible||dockHidden||hiddenForFullscreen" :probe="previewGreeting" @verified="verifyPreview" @playing="videoPlaying" @ended="videoEnded" @failed="videoFailed" @image-failed="imageFailed"/></div>
       </div>
       <div v-if="hovered&&!dockHidden&&!menu&&!pressed&&!state.preferences.passthrough" class="pet-tools"><button @click.stop="openCodex" title="在现有 Codex 中聊天">Codex ↗</button><button @click.stop="toggleMenu(true)" aria-label="打开快速控制">···</button></div>
       <div v-if="food" class="food-picker"><strong>给企鹅一点小鱼</strong><p>饥饿 {{Math.round(state.hunger)}} · 体力 {{Math.round(state.energy)}}</p><button @click="interact('feed');food=false">喂小鱼</button><button @click="food=false">下次再喂</button></div>
     </div>
     <div v-if="menu" class="panel-host" :style="{left:`${panel.x}px`,top:`${panel.y}px`}" @contextmenu.stop.prevent>
       <CompanionDiagnostics v-if="tools" :native="native" @close="closeTools" @safe="setSafety"/>
-      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
+      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
     </div>
     <p v-if="error" class="notice" role="alert" @click="error=''">{{error}}</p>
   </main>
 </template>
 
 <style>
+.pet.music .pet-visual{animation:none!important}
 :root{font-family:'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;color:#173c56}*{box-sizing:border-box}body{margin:0;background:transparent;overflow:hidden}.companion{position:relative;width:100vw;height:100vh;user-select:none}.pet-stage{position:absolute;width:280px;height:290px;transform-origin:0 0}.pet{position:absolute;left:15px;top:40px;width:250px;height:250px;touch-action:none;cursor:grab}.pet .pet-visual{width:250px;height:250px;object-fit:contain;pointer-events:none;transform-origin:50% 90%}.pet.idle .pet-visual,.pet.rest .pet-visual{animation:breathe 5s ease-in-out infinite}.pet.held .pet-visual{transform:scale(.97,1.02)}.pet.land .pet-visual{animation:landing .4s ease-out}.pet.dragging{cursor:grabbing}.pet.dragging .pet-visual{transform:rotate(-3deg)}.pet.dizzy .pet-visual{animation:sway .8s ease-in-out infinite}.still .pet .pet-visual{animation:none!important;transform:none!important}
 button{font:inherit;cursor:pointer}.speech{position:absolute;top:0;left:16px;right:16px;background:#f3fafff7;border-radius:15px;padding:9px 13px;z-index:3;box-shadow:0 3px 12px #03132122;pointer-events:auto}.speech:after{content:'';position:absolute;bottom:-7px;left:48%;border-left:8px solid transparent;border-right:8px solid transparent;border-top:8px solid #f3faff}.speech span{color:#36a5d1;font-size:10px;font-weight:700}.speech p{margin:4px 0 0;font-size:12px;font-weight:600;line-height:1.5}
 .codex-marker{position:absolute;top:10px;left:50%;transform:translateX(-50%);white-space:nowrap;border:1px solid #bdd9e9;border-radius:14px;background:#edf8fff2;color:#194460;font-size:10px;padding:5px 10px;z-index:2}.codex-marker i{display:inline-block;width:6px;height:6px;background:#36a5d1;border-radius:50%;margin-right:5px}.codex-marker i.waiting{background:#dc9d39}.codex-marker i.ended{background:#4aaf8e}.pet-tools{position:absolute;bottom:1px;left:70px;display:flex;gap:6px;z-index:3}.pet-tools button{border:1px solid #8fb4c9;border-radius:12px;background:#eef9ffed;color:#194460;font-size:10px;padding:4px 10px}.panel-host{position:absolute;z-index:8}.notice{position:absolute;bottom:8px;left:8px;max-width:260px;max-height:125px;overflow:auto;margin:0;padding:11px;background:#fff4ddf7;color:#72521c;border:1px solid #d9bd83;border-radius:12px;z-index:20;font-size:11px;cursor:pointer;line-height:1.5}.food-picker{position:absolute;left:15px;right:15px;top:50px;padding:15px;border-radius:15px;background:#0c2c43f7;color:#e7f5ff;z-index:4;box-shadow:0 4px 20px #03132144}.food-picker p{font-size:11px;color:#b1d3e7}.food-picker button{border:0;border-radius:9px;background:#55b9df;color:#062a42;padding:8px 12px;margin-right:6px}.food-picker button:last-child{background:#214b64;color:#e7f5ff}.suppressed{visibility:hidden}
