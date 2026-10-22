@@ -241,3 +241,34 @@ fn asset_score(asset: &GithubAsset) -> Option<i32> {
     #[allow(unreachable_code)]
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn published_assistant_recognizes_companion_release() {
+        // Keep the old algorithm intact: already shipped binaries use it.
+        assert_eq!(compare_versions("0.2.3", "companion-v0.5.9"), Ordering::Less);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn published_assistant_selects_new_setup_over_checksum() {
+        let name = "PenguinPal-Companion-0.5.9-windows-x64-setup.exe";
+        let assets = [
+            GithubAsset {
+                name: format!("{name}.sha256"),
+                browser_download_url: "checksum".into(),
+            },
+            GithubAsset {
+                name: name.into(),
+                browser_download_url: "installer".into(),
+            },
+        ];
+        assert_eq!(
+            select_download_asset(&assets).unwrap().browser_download_url,
+            "installer"
+        );
+    }
+}

@@ -10,7 +10,8 @@
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": false,
         "startMenuFolder": "PenguinPal",
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "installer/companion-hooks.nsh"
       }
     }
   }
