@@ -1,0 +1,17 @@
+{
+  "productName": "PenguinPal 企鹅桌宠",
+  "bundle": {
+    "targets": ["nsis"],
+    "resources": [],
+    "shortDescription": "PenguinPal 桌面企鹅与 Codex 任务状态伴侣",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "startMenuFolder": "PenguinPal",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}
