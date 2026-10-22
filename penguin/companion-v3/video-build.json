@@ -1,0 +1,165 @@
+{
+  "fps": 30,
+  "method": "RIFE 4.6 dual black/white matte, VP9 alpha",
+  "runtimeInterpolation": false,
+  "tool": {
+    "release": "20221029",
+    "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/tag/20221029",
+    "exeSha256": "4b970319db2814c82b15fceed8193151560a676a9eb63f20d4877be77b98f44f",
+    "modelSha256": "f334ed2260149ce0188a6dcf049844e8b0cdd912e01cbcfb63553157d2508958"
+  },
+  "clips": [
+    {
+      "id": "happy",
+      "video": "happy.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": false
+    },
+    {
+      "id": "pat",
+      "video": "pat.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": false
+    },
+    {
+      "id": "poke",
+      "video": "poke.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": false
+    },
+    {
+      "id": "tail",
+      "video": "tail.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": false
+    },
+    {
+      "id": "eat",
+      "video": "eat.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": true
+    },
+    {
+      "id": "rest",
+      "video": "rest.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": true
+    },
+    {
+      "id": "wake",
+      "video": "wake.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": false
+    },
+    {
+      "id": "sweep",
+      "video": "sweep.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": true
+    },
+    {
+      "id": "think",
+      "video": "think.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": true
+    },
+    {
+      "id": "look",
+      "video": "look.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": false
+    },
+    {
+      "id": "blink",
+      "video": "blink.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": false
+    },
+    {
+      "id": "talk",
+      "video": "talk.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": true
+    },
+    {
+      "id": "annoyed",
+      "video": "annoyed.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": false
+    },
+    {
+      "id": "idle",
+      "video": "idle.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": true
+    },
+    {
+      "id": "land",
+      "video": "land.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": false
+    },
+    {
+      "id": "dizzy",
+      "video": "dizzy.webm",
+      "sourceFps": 6,
+      "sourceFrames": 8,
+      "outputFrames": 40,
+      "loop": true
+    },
+    {
+      "id": "walk-left",
+      "video": "walk-left-gait.webm",
+      "sourceFps": 5,
+      "sourceFrames": 4,
+      "outputFrames": 24,
+      "loop": true
+    },
+    {
+      "id": "walk-right",
+      "video": "walk-right-gait.webm",
+      "sourceFps": 5,
+      "sourceFrames": 4,
+      "outputFrames": 24,
+      "loop": true
+    },
+    {
+      "id": "greet",
+      "video": "greeting.webm",
+      "sourceFps": 7,
+      "sourceFrames": 8,
+      "outputFrames": 34,
+      "loop": false
+    }
+  ]
+}

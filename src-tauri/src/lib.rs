@@ -25,7 +25,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{process::Command, sync::Mutex, time::Duration};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
 /// Memory 维护线程停止标志
@@ -62,7 +62,7 @@ use crate::{
     audio::{types as audio_types, TranscriberService},
     codex_runtime::{apply_private_env, initialize_codex_config, load_codex_config, private_auth_path, resolve_for_app},
     control::types::{ControlPendingRequest, ControlRiskLevel, ToolInvokeResponse},
-    control::{router as control_router, types::ControlServiceStatus, ControlServiceState},
+    control::{router as control_router, ControlServiceState},
     history::ReplyHistoryEntry,
     security::{audit, oauth, policy},
     shell_agent::{ShellAgentExecutor, BehaviorState},
@@ -533,6 +533,7 @@ struct HealthCheckReport {
     generated_at: u64,
     overall_status: String,
     items: Vec<HealthCheckItem>,
+    safe_summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1076,13 +1077,44 @@ async fn auto_update_codex(app: &AppHandle) -> Result<(), String> {
             }
         }
     }
-}#[tauri::command]
-fn get_control_service_status(app: AppHandle) -> Result<ControlServiceStatus, String> {
-    control_router::service_status(&app).map_err(|error| error.to_string())
+}
+
+fn require_main_webview(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err("此本地控制命令仅允许由主桌宠窗口调用。".to_string())
+    }
 }
 
 #[tauri::command]
-async fn confirm_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
+fn invoke_control_tool(
+    app: AppHandle,
+    window: WebviewWindow,
+    tool: String,
+    args: serde_json::Value,
+) -> Result<control::types::ToolInvokeResponse, String> {
+    require_main_webview(&window)?;
+    control_router::invoke(&app, control::types::ToolInvokeRequest { tool, args })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_control_pending(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<Vec<control::types::ControlPendingRequest>, String> {
+    require_main_webview(&window)?;
+    control_router::list_pending(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn confirm_control_pending(
+    app: AppHandle,
+    window: WebviewWindow,
+    pending_id: String,
+) -> Result<control::types::ToolInvokeResponse, String> {
+    require_main_webview(&window)?;
     if let Some(pending) = try_take_mcp_pending(&app, &pending_id)? {
         return confirm_mcp_pending(&app, pending).await;
     }
@@ -1090,7 +1122,12 @@ async fn confirm_control_pending(app: AppHandle, pending_id: String) -> Result<c
 }
 
 #[tauri::command]
-async fn cancel_control_pending(app: AppHandle, pending_id: String) -> Result<control::types::ToolInvokeResponse, String> {
+async fn cancel_control_pending(
+    app: AppHandle,
+    window: WebviewWindow,
+    pending_id: String,
+) -> Result<control::types::ToolInvokeResponse, String> {
+    require_main_webview(&window)?;
     agent_router::cancel_control_pending(&app, &pending_id).await
 }
 
@@ -3759,6 +3796,33 @@ fn health_item(
     }
 }
 
+fn command_is_available(command: &str) -> bool {
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+    let path = std::path::Path::new(command);
+    if path.components().count() > 1 || path.is_absolute() {
+        return path.is_file();
+    }
+
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .any(|directory| {
+            #[cfg(windows)]
+            let candidates = [
+                directory.join(command),
+                directory.join(format!("{command}.exe")),
+                directory.join(format!("{command}.cmd")),
+                directory.join(format!("{command}.bat")),
+            ];
+            #[cfg(not(windows))]
+            let candidates = [directory.join(command)];
+            candidates.iter().any(|candidate| candidate.is_file())
+        })
+}
+
 fn roadmap_status_from_runtime(runtime: &RuntimeState) -> AgentRoadmapStatus {
     let config = &runtime.agent_roadmap;
     AgentRoadmapStatus {
@@ -4868,6 +4932,43 @@ fn build_health_check_report(
     items.push(health_item("browser_automation", "浏览器自动化", if roadmap.browser_automation.enabled { "ok" } else { "warning" }, "watch", roadmap.browser_automation.summary));
     items.push(health_item("local_voice_loop", "本地语音闭环", if roadmap.local_voice_loop.enabled { "ok" } else { "warning" }, "watch", roadmap.local_voice_loop.summary));
 
+    match app.path().app_local_data_dir() {
+        Ok(directory) => {
+            let writable = std::fs::create_dir_all(&directory).is_ok()
+                && directory.metadata().map(|metadata| metadata.is_dir()).unwrap_or(false);
+            items.push(health_item(
+                "app_data",
+                "应用数据目录",
+                if writable { "ok" } else { "error" },
+                if writable { "info" } else { "urgent" },
+                if writable { "应用本地数据目录可用。" } else { "应用本地数据目录不可写。" },
+            ));
+        }
+        Err(error) => items.push(health_item("app_data", "应用数据目录", "error", "urgent", error.to_string())),
+    }
+
+    let enabled_mcp_servers: Vec<_> = runtime
+        .agent_roadmap
+        .plugin_tools
+        .mcp_servers
+        .iter()
+        .filter(|server| server.enabled)
+        .collect();
+    let missing_mcp_commands = enabled_mcp_servers
+        .iter()
+        .filter(|server| !command_is_available(&server.command))
+        .count();
+    items.push(health_item(
+        "mcp_configuration",
+        "MCP Server 配置",
+        if missing_mcp_commands == 0 { "ok" } else { "error" },
+        if missing_mcp_commands == 0 { "info" } else { "urgent" },
+        format!(
+            "已启用 {} 个 Server，其中 {} 个启动命令当前不可用。",
+            enabled_mcp_servers.len(), missing_mcp_commands
+        ),
+    ));
+
     if let Ok(app_data) = app.path().app_data_dir() {
         let memory_service = crate::memory::MemoryService::new(&app_data);
         match memory_service.management_snapshot() {
@@ -4890,10 +4991,18 @@ fn build_health_check_report(
         "ok"
     }.to_string();
 
+    let ok_count = items.iter().filter(|item| item.status == "ok").count();
+    let warning_count = items.iter().filter(|item| item.status == "warning").count();
+    let error_count = items.iter().filter(|item| item.status == "error").count();
+    let safe_summary = format!(
+        "PenguinPal Doctor\n状态: {overall_status}\n正常: {ok_count}\n提醒: {warning_count}\n错误: {error_count}\n控制服务认证: enabled\n敏感凭据与本地路径: omitted"
+    );
+
     HealthCheckReport {
         generated_at: now_millis(),
         overall_status,
         items,
+        safe_summary,
     }
 }
 
@@ -5048,31 +5157,6 @@ pub fn run() {
                 eprintln!("[Codex] 已关闭启动时自动更新。");
             }
 
-            let control_service_status = match control::http::start(app.handle().clone()) {
-                Ok(address) => {
-                    eprintln!("PenguinPal local control service listening on {address}");
-                    ("ok", format!("控制服务已启动：{address}"), 1u8)
-                }
-                Err(error) => {
-                    eprintln!("PenguinPal local control service failed to start: {error}");
-                    ("error", format!("控制服务启动失败：{error}"), 1u8)
-                }
-            };
-
-            let runtime_state: State<'_, Mutex<RuntimeState>> = app.state();
-            if let Ok(mut runtime) = runtime_state.lock() {
-                audit::push_entry(
-                    &mut runtime.audit_trail,
-                    audit::record(
-                        "control_service_startup",
-                        control_service_status.0,
-                        control_service_status.1,
-                        control_service_status.2,
-                    ),
-                );
-                let _ = save(&app.handle(), &runtime);
-            }
-
             let tray_icon = tray::create_tray(app)?;
             app.manage(tray_icon);
 
@@ -5157,7 +5241,8 @@ pub fn run() {
             open_app_update_download,
             preview_clean_uninstall,
             confirm_clean_uninstall,
-            get_control_service_status,
+            invoke_control_tool,
+            list_control_pending,
             confirm_control_pending,
             cancel_control_pending,
             start_codex_cli_login,

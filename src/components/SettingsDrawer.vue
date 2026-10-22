@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import ControlPanel from './ControlPanel.vue'
-import { diagnoseMcpGateway, setupDockerDesktop } from '../lib/assistant'
+import {
+  diagnoseMcpGateway,
+  sanitizeHealthCheckSafeSummary,
+  setupDockerDesktop
+} from '../lib/assistant'
 import { presetModelCatalog } from '../lib/modelCatalog'
 import type {
   ArchiveRecallPreview,
@@ -190,6 +194,8 @@ const mcpTestResult = ref<McpGatewayDiagnosis | null>(null)
 const mcpTestError = ref('')
 const dockerSetupBusy = ref(false)
 const dockerSetupMessage = ref('')
+const healthSummaryCopyState = ref<'idle' | 'copied' | 'error'>('idle')
+let healthSummaryCopyTimer: number | null = null
 
 const modifierOrder = ['CommandOrControl', 'Alt', 'Shift']
 
@@ -240,6 +246,54 @@ const browserAllowedDomainsText = computed({
     localDraft.value.agentRoadmap.browserAutomation.allowedDomains = normalizeResearchList(value)
   }
 })
+
+const safeHealthSummary = computed(() =>
+  sanitizeHealthCheckSafeSummary(props.healthReport.safeSummary)
+)
+
+const healthSummaryCopyFeedback = computed(() => {
+  if (healthSummaryCopyState.value === 'copied') {
+    return '安全摘要已复制。'
+  }
+  if (healthSummaryCopyState.value === 'error') {
+    return '复制失败，请手动选择摘要文本复制。'
+  }
+  return ''
+})
+
+const resetHealthSummaryCopyFeedback = () => {
+  if (healthSummaryCopyTimer !== null && typeof window !== 'undefined') {
+    window.clearTimeout(healthSummaryCopyTimer)
+  }
+  healthSummaryCopyTimer = null
+  healthSummaryCopyState.value = 'idle'
+}
+
+const setHealthSummaryCopyFeedback = (state: 'copied' | 'error') => {
+  resetHealthSummaryCopyFeedback()
+  healthSummaryCopyState.value = state
+  if (typeof window !== 'undefined') {
+    healthSummaryCopyTimer = window.setTimeout(() => {
+      healthSummaryCopyTimer = null
+      healthSummaryCopyState.value = 'idle'
+    }, 4000)
+  }
+}
+
+const copyHealthSummary = async () => {
+  const summary = safeHealthSummary.value
+  if (!summary || typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+    setHealthSummaryCopyFeedback('error')
+    return
+  }
+
+  try {
+    await navigator.clipboard.writeText(summary)
+    setHealthSummaryCopyFeedback('copied')
+  } catch {
+    setHealthSummaryCopyFeedback('error')
+  }
+}
 
 const modifierTokens = (event: KeyboardEvent) => {
   const tokens: string[] = []
@@ -511,6 +565,11 @@ watch(
   { immediate: true }
 )
 
+watch(
+  () => props.healthReport.generatedAt,
+  () => resetHealthSummaryCopyFeedback()
+)
+
 const applyPreset = (presetId: string) => {
   applyingPreset.value = true
   selectedPreset.value = presetId
@@ -637,6 +696,7 @@ const conflictActionLabel = (group: MemoryConflictGroup) =>
 
 onBeforeUnmount(() => {
   stopShortcutCapture()
+  resetHealthSummaryCopyFeedback()
 })
 </script>
 
@@ -1810,7 +1870,32 @@ onBeforeUnmount(() => {
           </article>
         </div>
 
-        <div v-else class="memory-empty">
+        <article v-if="safeHealthSummary" class="health-summary-panel">
+          <div class="health-summary-header">
+            <div>
+              <strong>可安全分享的诊断摘要</strong>
+              <p>摘要不包含 Token、API Key 或本机绝对路径，复制前还会执行一次本地脱敏。</p>
+            </div>
+            <button
+              type="button"
+              class="ghost-button"
+              @click="copyHealthSummary"
+            >
+              {{ healthSummaryCopyState === 'copied' ? '已复制' : '复制安全摘要' }}
+            </button>
+          </div>
+          <pre class="health-summary-output" tabindex="0">{{ safeHealthSummary }}</pre>
+          <p
+            v-if="healthSummaryCopyFeedback"
+            class="copy-feedback health-summary-feedback"
+            :data-tone="healthSummaryCopyState"
+            :role="healthSummaryCopyState === 'error' ? 'alert' : 'status'"
+          >
+            {{ healthSummaryCopyFeedback }}
+          </p>
+        </article>
+
+        <div v-if="!healthReport.items.length" class="memory-empty">
           还没有运行诊断。点击按钮后，这里会显示每个本地模块的健康状态。
         </div>
       </section>
@@ -2462,6 +2547,53 @@ textarea {
   line-height: 1.5;
   color: #476775;
   font-size: 12px;
+}
+
+.health-summary-panel {
+  padding: 14px;
+  border: 1px solid rgba(11, 106, 138, 0.14);
+  border-radius: 18px;
+  background: rgba(236, 249, 250, 0.82);
+  display: grid;
+  gap: 10px;
+}
+
+.health-summary-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.health-summary-header p {
+  margin: 5px 0 0;
+  color: #476775;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.health-summary-output {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(12, 31, 45, 0.92);
+  color: #eaf8fc;
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  user-select: text;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.health-summary-feedback {
+  margin: 0;
+}
+
+.health-summary-feedback[data-tone='error'] {
+  color: #a33838;
 }
 
 .history-shell {

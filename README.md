@@ -1,8 +1,12 @@
 # PenguinPal
 
-PenguinPal 是一个基于 Tauri 2 + Vue 3 + Rust 的 Windows 桌宠 Agent。它以轻量企鹅桌宠作为入口，把聊天、多模型接入、本地语音、长期记忆、受控桌面操作、Codex 私有运行时和本地投研简报放在同一个桌面助手里。
+PenguinPal 基于 Tauri 2 + Vue 3 + Rust。默认以 **Codex 附属桌宠** 启动：点击企鹅打开现有 Codex 窗口，沿用那里的登录、聊天、语音和长期记忆；企鹅负责本地互动、散步、拖放物理和任务状态提示。
 
-当前版本：`0.2.3`
+新模式的使用、联动安装、数据边界、验证命令和旧模式回退方法见 [Codex 附属桌宠指南](docs/codex-companion.md)。
+
+下面保留独立助手模式的原有功能和开发文档；该模式需要显式开启 `legacy-assistant`，其中的私有 Codex、语音和电脑控制服务不在默认模式启动。
+
+当前版本：`0.5.8`。接入豆包原片的被轻戳、摇尾巴、吃小鱼、休息、扫地、说话和小脾气七个动作。统一脚线和比例，循环首尾补间，并增加进入/退出片段；普通切换完成当前周期后回到公共姿势，拖拽和下落立即响应。视频及PNG逐帧回退均为24fps，不重新绘制角色。
 
 ## 技术栈
 
@@ -12,7 +16,7 @@ PenguinPal 是一个基于 Tauri 2 + Vue 3 + Rust 的 Windows 桌宠 Agent。它
 - 动画：Lottie + 企鹅 PNG 资源
 - 语音识别：Web Speech / 本地 Whisper (`whisper-rs`)
 - 音频采集：cpal
-- 桌面控制：Windows API / UI Automation / 本地 HTTP 控制层
+- 旧助手内部桌面工具：Windows API / UI Automation
 
 ## 当前功能
 
@@ -85,24 +89,11 @@ PenguinPal 是一个基于 Tauri 2 + Vue 3 + Rust 的 Windows 桌宠 Agent。它
 %APPDATA%/com.penguinpal.app/whisper-models/
 ```
 
-### 本地控制电脑
+### 旧助手内部桌面工具
 
-PenguinPal 内置本地控制层，默认监听：
+仅在显式启用的旧助手中使用。对外 HTTP 控制服务和外部 Agent 反应租约已移除，不再监听本机控制端口。内部工具仍通过主窗口 IPC 和权限确认调用。
 
-```text
-127.0.0.1:48765..48775
-```
-
-基础路由：
-
-- `GET /healthz`
-- `GET /v1/tools`
-- `GET /v1/pending`
-- `POST /v1/tools/invoke`
-- `POST /v1/pending/:id/confirm`
-- `POST /v1/pending/:id/cancel`
-
-已接入的控制能力：
+内部工具能力：
 
 - 列出窗口、聚焦窗口
 - 打开白名单应用：记事本、计算器、资源管理器、画图、系统设置
@@ -312,6 +303,9 @@ penguin-pal/
 - 桌面动作必须通过白名单动作网关
 - 高风险动作必须人工确认，并写入审计日志
 - 本地控制层按权限等级区分只读、低风险写、高风险写
+- 已移除旧助手对外 HTTP 控制接口及外部 Agent 反应租约
+- 旧助手 Doctor 诊断覆盖 MCP 和应用数据目录，并提供脱敏摘要
+- Tauri WebView 启用显式 CSP，默认禁止外部脚本、框架和对象内容
 - Shell Agent 权限独立控制，默认不授予任意命令能力
 - Codex CLI 即使使用内置私有运行时，也不能绕过 PenguinPal 的动作网关
 
@@ -330,7 +324,8 @@ penguin-pal/
 
 ## 相关文档
 
-- [本地控制层接口说明](docs/local-control-api.md)
+- [Windows 安装与启动](docs/windows-companion-install.md)
+- [桌宠反应协议](docs/pet-reactions.md)
 - [桌宠内置 Codex 运行时](docs/embedded-codex-runtime.md)
 - [Windows 烟测基线](docs/windows-smoke-baseline.md)
 - [角色形象再生成说明](docs/character-regeneration.md)

@@ -167,6 +167,7 @@ export const loadPetAlphaMask = (descriptor: PetArtworkDescriptor): Promise<PetA
 
   const pending = new Promise<PetAlphaMask>((resolve, reject) => {
     const image = new Image()
+    image.crossOrigin = 'anonymous'
     image.decoding = 'async'
     image.onload = () => {
       const canvas = document.createElement('canvas')
@@ -192,6 +193,8 @@ export const loadPetAlphaMask = (descriptor: PetArtworkDescriptor): Promise<PetA
   })
 
   alphaMaskCache.set(descriptor.src, pending)
+  // Imported packs may contain thousands of frames; keep alpha masks bounded.
+  while (alphaMaskCache.size > 64) alphaMaskCache.delete(alphaMaskCache.keys().next().value!)
   return pending
 }
 

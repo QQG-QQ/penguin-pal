@@ -24,6 +24,16 @@ import {
   type PetWindowFrame
 } from './lib/petDocking'
 import { buildWorkAreaRect, clampWindowPositionToWorkArea } from './lib/petLayout'
+import {
+  modeForReaction,
+  normalizePetReaction,
+  presentationForReaction,
+  reactionForAgentTaskStatus,
+  reactionForLegacyMode,
+  sanitizePetReactionEvent,
+  shouldReplacePetReactionEvent,
+  type PetReactionInput
+} from './lib/petReactions'
 import { parseSlashCommand, slashHelpText } from './lib/slashCommands'
 import {
   cancelDesktopActionApproval,
@@ -44,7 +54,6 @@ import {
   getAgentRoadmapStatus,
   getAssistantSnapshot,
   getArchiveRecallPreview,
-  getControlServiceStatus,
   getInputHistory,
   getMemoryManagementSnapshot,
   getResearchBriefSnapshot,
@@ -60,6 +69,7 @@ import {
   isBubbleWindowView,
   isResearchWindowView,
   listenForAssistantSnapshot,
+  listenForPetReaction,
   listenForBubbleInteractionState,
   listenForBubbleDismissRequest,
   listenForBubbleLayoutMetrics,
@@ -124,6 +134,8 @@ import type {
   PetLayoutMetrics,
   PetDockState,
   PetMode,
+  PetReaction,
+  PetReactionEvent,
   ProviderConfigInput,
   ProviderKind,
   PluginToolScanResult,
@@ -403,6 +415,7 @@ const emptyResearchBrief = (): ResearchBriefSnapshot => ({
 const emptyHealthCheckReport = (): HealthCheckReport => ({
   generatedAt: 0,
   overallStatus: 'warning',
+  safeSummary: '',
   items: []
 })
 
@@ -569,7 +582,13 @@ const agentTaskProgress = ref<AgentTaskProgress | null>(null)
 const approvalPhrase = ref('')
 const approvalChecks = ref<Record<string, boolean>>({})
 const listening = ref(false)
-const visualMode = ref<PetMode | null>(null)
+const activeReaction = ref<PetReaction | null>(null)
+const visualMode = computed<PetMode | null>({
+  get: () => activeReaction.value === null ? null : modeForReaction(activeReaction.value),
+  set: (mode) => {
+    activeReaction.value = mode === null ? null : reactionForLegacyMode(mode)
+  }
+})
 const microphoneAvailable = ref(false)
 const textInputFocused = ref(false)
 const composerVisible = ref(false)
@@ -585,11 +604,16 @@ let submitVoiceAfterStop = false
 let bubbleTimer: number | null = null
 let bubbleResumeTimer: number | null = null
 let bubbleDismissRemainingMs: number | null = null
+let bubbleDismissOverride: number | null | undefined
 let bubbleDismissDeadline = 0
 let speechSession = 0
+let petReactionSequence = 0
+let petReactionTimer: number | null = null
+let lastPetReactionEventAt = 0
 let mediaDevicesCleanup: (() => void) | null = null
 let microphonePermissionRequested = false
 let snapshotListenerCleanup: (() => void) | null = null
+let petReactionListenerCleanup: (() => void) | null = null
 let sectionListenerCleanup: (() => void) | null = null
 let bubbleStateListenerCleanup: (() => void) | null = null
 let bubbleInteractionListenerCleanup: (() => void) | null = null
@@ -759,6 +783,8 @@ const shouldAutoListen = computed(
     !busy.value &&
     !textInputFocused.value &&
     !pendingApproval.value &&
+    !controlPendingRequest.value &&
+    !pendingShellConfirmation.value &&
     !pendingCommandConfirmation.value &&
     !speechPlaybackActive &&
     !messageDraft.value.trim()
@@ -825,6 +851,7 @@ const resetBubbleDismissState = () => {
   clearBubbleTimer()
   clearBubbleResumeTimer()
   bubbleDismissRemainingMs = null
+  bubbleDismissOverride = undefined
   bubbleDismissDeadline = 0
   bubbleInteractionActive.value = false
 }
@@ -1077,7 +1104,7 @@ const applyBubbleLayoutMetrics = (metrics: BubbleLayoutMetrics) => {
   }
 
   bubbleLayoutMetrics.value = metrics
-  const decision = computeBubbleDismissDecision(metrics)
+  const decision = computeBubbleDismissDecision(metrics, bubbleDismissOverride)
   bubbleMessageTier.value = decision.tier
   bubbleDismissRemainingMs = decision.autoHideDuration
   logBubbleDecision(metrics, decision)
@@ -1681,15 +1708,35 @@ const scheduleAutoListening = (delay = 260) => {
   }, delay)
 }
 
+const setPetReaction = (reaction: PetReactionInput | null) => {
+  if (petReactionTimer !== null) {
+    window.clearTimeout(petReactionTimer)
+    petReactionTimer = null
+  }
+  petReactionSequence += 1
+  activeReaction.value = reaction === null ? null : normalizePetReaction(reaction)
+}
+
+const waitingReaction = (): PetReaction | null => {
+  if (pendingApproval.value || controlPendingRequest.value || pendingShellConfirmation.value) {
+    return 'waitingApproval'
+  }
+  return pendingCommandConfirmation.value ? 'notification' : null
+}
+
 const resetVisualModeSoon = (delay = 700) => {
   window.setTimeout(() => {
     if (!listening.value && !busy.value && !bubbleText.value) {
-      visualMode.value = null
+      setPetReaction(waitingReaction())
     }
   }, delay)
 }
 
-const showBubble = (content: string, mode: PetMode = 'speaking', duration?: number | null) => {
+const showBubble = (
+  content: string,
+  reaction: PetReactionInput = 'speaking',
+  duration?: number | null
+) => {
   clearPetDockTimer()
   if (dockState.value !== 'normal') {
     void restoreDockedPet(false)
@@ -1703,20 +1750,33 @@ const showBubble = (content: string, mode: PetMode = 'speaking', duration?: numb
   bubbleLayoutMetrics.value = null
   bubbleMessageTier.value = null
   lastBubbleDebugKey = ''
-  if (duration !== undefined) {
-    bubbleDismissRemainingMs = duration
+  const normalizedReaction = normalizePetReaction(reaction)
+  const defaultDuration = presentationForReaction(normalizedReaction).defaultDurationMs
+  const effectiveDuration = duration === undefined
+    ? (normalizedReaction === 'waitingApproval' ? null : defaultDuration)
+    : duration
+  const pinned = duration === null || (
+    duration === undefined && normalizedReaction === 'waitingApproval'
+  )
+  bubbleDismissOverride = duration === undefined
+    ? (normalizedReaction === 'waitingApproval'
+        ? null
+        : defaultDuration === null ? undefined : defaultDuration)
+    : duration
+  if (effectiveDuration !== undefined && effectiveDuration !== null && effectiveDuration > 0) {
+    bubbleDismissRemainingMs = effectiveDuration
   }
   bubbleText.value = content
-  visualMode.value = mode
+  setPetReaction(reaction)
 
-  if (duration === null) {
+  if (pinned) {
     bubbleMessageTier.value = 'pinned'
   }
 }
 
-const speakReply = (content: string) => {
+const speakReply = (content: string, reaction: PetReactionInput = 'speaking') => {
   if (!snapshot.value.provider.voiceReply || !voiceReplySupported.value) {
-    showBubble(content, 'speaking')
+    showBubble(content, reaction)
     return
   }
 
@@ -1745,14 +1805,14 @@ const speakReply = (content: string) => {
       return
     }
     bubbleText.value = content
-    visualMode.value = 'speaking'
+    setPetReaction(reaction)
   }
   utterance.onend = () => {
     if (session !== speechSession) {
       return
     }
     speechPlaybackActive = false
-    visualMode.value = 'idle'
+    setPetReaction(waitingReaction() ?? 'idle')
     resumeBubbleDismiss(160)
   }
   utterance.onerror = () => {
@@ -1760,19 +1820,19 @@ const speakReply = (content: string) => {
       return
     }
     speechPlaybackActive = false
-    showBubble(content, 'speaking')
+    showBubble(content, reaction)
   }
 
   window.speechSynthesis.speak(utterance)
 }
 
-const announce = (content: string, mode: PetMode = 'speaking') => {
-  if (mode === 'speaking') {
-    speakReply(content)
+const announce = (content: string, reaction: PetReactionInput = 'speaking') => {
+  if (modeForReaction(reaction) === 'speaking') {
+    speakReply(content, reaction)
     return
   }
 
-  showBubble(content, mode)
+  showBubble(content, reaction)
 }
 
 const clearPendingApproval = () => {
@@ -2105,7 +2165,7 @@ const applyModelCatalogEntry = async (modelId: string) => {
 
 const executePendingCommand = async (pending: PendingCommandConfirmation) => {
   busy.value = true
-  visualMode.value = 'guarded'
+  setPetReaction('working')
 
   try {
     if (pending.kind === 'modelSet') {
@@ -2383,21 +2443,6 @@ const ensureControlCommandAvailable = () => {
   return true
 }
 
-const ensureControlServiceReady = async () => {
-  try {
-    const status = await getControlServiceStatus()
-    if (!status.running || !status.baseUrl) {
-      announce(status.message || '本地控制服务未启动。', 'guarded')
-      return false
-    }
-
-    return true
-  } catch (error) {
-    announce(error instanceof Error ? error.message : '本地控制服务状态检查失败。', 'guarded')
-    return false
-  }
-}
-
 const invokeSlashControlTool = async (
   tool: string,
   args: Record<string, unknown>,
@@ -2409,12 +2454,8 @@ const invokeSlashControlTool = async (
     return true
   }
 
-  if (!(await ensureControlServiceReady())) {
-    return true
-  }
-
   busy.value = true
-  visualMode.value = 'guarded'
+  setPetReaction('working')
 
   try {
     const response = await invokeControlTool(tool, args)
@@ -2424,16 +2465,16 @@ const invokeSlashControlTool = async (
       setControlPendingRequest(response.pendingRequest)
       announce(
         `${response.pendingRequest.prompt} 请在 30 秒内输入 yes / no，或使用 /confirm /cancel。`,
-        'guarded'
+        'waitingApproval'
       )
       return true
     }
 
     clearControlPendingRequest()
-    announce(summarizeControlOutcome(tool, response, options?.label), 'guarded')
+    announce(summarizeControlOutcome(tool, response, options?.label), 'success')
     return true
   } catch (error) {
-    announce(error instanceof Error ? error.message : '本地控制命令执行失败。', 'guarded')
+    announce(error instanceof Error ? error.message : '本地控制命令执行失败。', 'error')
     return true
   } finally {
     busy.value = false
@@ -2442,18 +2483,14 @@ const invokeSlashControlTool = async (
 }
 
 const confirmActiveControlPending = async () => {
-  if (!(await ensureControlServiceReady())) {
-    return
-  }
-
   const pending = await ensureActiveControlPending()
   if (!pending || busy.value) {
-    announce('当前没有可确认的本地控制请求。', 'guarded')
+    announce('当前没有可确认的本地控制请求。', 'notification')
     return
   }
 
   busy.value = true
-  visualMode.value = 'guarded'
+  setPetReaction('working')
 
   try {
     const response = await confirmControlPending(pending.id)
@@ -2466,9 +2503,12 @@ const confirmActiveControlPending = async () => {
       await refreshControlPendingRequests()
     }
 
-    announce(summarizeControlOutcome(pending.tool, response), 'guarded')
+    announce(
+      summarizeControlOutcome(pending.tool, response),
+      response.status === 'pending_confirmation' ? 'waitingApproval' : 'success'
+    )
   } catch (error) {
-    announce(error instanceof Error ? error.message : '确认本地控制请求失败。', 'guarded')
+    announce(error instanceof Error ? error.message : '确认本地控制请求失败。', 'error')
   } finally {
     busy.value = false
     resetVisualModeSoon(900)
@@ -2476,27 +2516,23 @@ const confirmActiveControlPending = async () => {
 }
 
 const cancelActiveControlPending = async () => {
-  if (!(await ensureControlServiceReady())) {
-    return
-  }
-
   const pending = await ensureActiveControlPending()
   if (!pending || busy.value) {
-    announce('当前没有可取消的本地控制请求。', 'guarded')
+    announce('当前没有可取消的本地控制请求。', 'notification')
     return
   }
 
   busy.value = true
-  visualMode.value = 'guarded'
+  setPetReaction('notification')
 
   try {
     const response = await cancelControlPending(pending.id)
     setAgentTaskProgress(extractAgentTaskProgress(response))
     clearControlPendingRequest()
     await refreshControlPendingRequests()
-    announce(summarizeControlOutcome('cancel_pending', response), 'guarded')
+    announce(summarizeControlOutcome('cancel_pending', response), 'notification')
   } catch (error) {
-    announce(error instanceof Error ? error.message : '取消本地控制请求失败。', 'guarded')
+    announce(error instanceof Error ? error.message : '取消本地控制请求失败。', 'error')
   } finally {
     busy.value = false
     resetVisualModeSoon(900)
@@ -2712,15 +2748,15 @@ const triggerAction = async (action: DesktopAction) => {
   }
 
   busy.value = true
-  visualMode.value = 'guarded'
+  setPetReaction('working')
 
   try {
     const result = await requestDesktopAction(action.id)
     await syncSnapshot(result.snapshot)
     setPendingApproval(result.approvalRequest)
-    announce(result.message, result.approvalRequest ? 'guarded' : 'speaking')
+    announce(result.message, result.approvalRequest ? 'waitingApproval' : 'success')
   } catch (error) {
-    announce(error instanceof Error ? error.message : '动作执行失败', 'guarded')
+    announce(error instanceof Error ? error.message : '动作执行失败', 'error')
   } finally {
     busy.value = false
     resetVisualModeSoon(900)
@@ -2858,10 +2894,6 @@ const handleSlashCommand = async (content: string) => {
       case 'clipboardRead':
         return invokeSlashControlTool('read_clipboard', {}, { label: '剪贴板文本' })
       case 'controlPendingList': {
-        if (!(await ensureControlServiceReady())) {
-          return true
-        }
-
         const pendingList = await refreshControlPendingRequests()
         announce(summarizeControlPendingList(pendingList), 'guarded')
         return true
@@ -2996,7 +3028,7 @@ const sendMessage = async (value = messageDraft.value) => {
   }
 
   busy.value = true
-  visualMode.value = 'thinking'
+  setPetReaction('thinking')
 
   try {
     const response = await sendChatMessage(content)
@@ -3018,10 +3050,12 @@ const sendMessage = async (value = messageDraft.value) => {
     }
     announce(
       response.reply.content,
-      response.agent && response.agent.route !== 'chat' ? 'guarded' : 'speaking'
+      response.agent && response.agent.route !== 'chat'
+        ? reactionForAgentTaskStatus(response.agent.task?.status ?? 'completed')
+        : 'speaking'
     )
   } catch (error) {
-    announce(error instanceof Error ? error.message : '消息发送失败', 'guarded')
+    announce(error instanceof Error ? error.message : '消息发送失败', 'error')
   } finally {
     busy.value = false
     resetVisualModeSoon(900)
@@ -3050,7 +3084,7 @@ const stopLocalWhisperListening = async ({
 
   clearWhisperCaptureTimer()
   listening.value = false
-  visualMode.value = 'thinking'
+  setPetReaction('thinking')
   await pushWhisperStatus({
     ...whisperStatus.value,
     recordingState: 'processing'
@@ -3097,6 +3131,13 @@ const stopLocalWhisperListening = async ({
 }
 
 const startLocalWhisperListening = async (autoMode = false) => {
+  if (waitingReaction() === 'waitingApproval') {
+    if (!autoMode) {
+      announce('请先处理当前待确认请求，再开始语音输入。', 'waitingApproval')
+    }
+    return
+  }
+
   if (whisperVoiceInputMode.value === 'disabled') {
     if (!autoMode) {
       announce('当前设置里已经关闭语音输入，请先在设置中改成常驻监听或按键说话。', 'guarded')
@@ -3130,7 +3171,7 @@ const startLocalWhisperListening = async (autoMode = false) => {
       recordingState: nextState
     })
     listening.value = true
-    visualMode.value = 'listening'
+    setPetReaction('listening')
 
     if (whisperVoiceInputMode.value === 'continuous') {
       whisperCaptureTimer = window.setTimeout(() => {
@@ -3211,6 +3252,13 @@ const startListening = async (autoMode = false) => {
     return
   }
 
+  if (waitingReaction() === 'waitingApproval') {
+    if (!autoMode) {
+      announce('请先处理当前待确认请求，再开始语音输入。', 'waitingApproval')
+    }
+    return
+  }
+
   if (autoMode && !shouldAutoListen.value) {
     return
   }
@@ -3237,7 +3285,7 @@ const startListening = async (autoMode = false) => {
     recognitionBuffer = ''
     submitVoiceAfterStop = autoMode
     listening.value = true
-    visualMode.value = 'listening'
+    setPetReaction('listening')
     if (voiceReplySupported.value) {
       window.speechSynthesis.cancel()
     }
@@ -3259,7 +3307,7 @@ const confirmPendingAction = async () => {
   }
 
   busy.value = true
-  visualMode.value = 'guarded'
+  setPetReaction('working')
 
   try {
     const acknowledgedChecks = pendingApproval.value.checks
@@ -3274,7 +3322,7 @@ const confirmPendingAction = async () => {
     clearPendingApproval()
     announce(result.message)
   } catch (error) {
-    announce(error instanceof Error ? error.message : '动作确认失败', 'guarded')
+    announce(error instanceof Error ? error.message : '动作确认失败', 'error')
   } finally {
     busy.value = false
     resetVisualModeSoon(900)
@@ -3289,9 +3337,9 @@ const cancelPendingAction = async () => {
   try {
     const nextSnapshot = await cancelDesktopActionApproval(pendingApproval.value.id)
     await syncSnapshot(nextSnapshot)
-    announce('本次动作授权已取消。', 'guarded')
+    announce('本次动作授权已取消。', 'notification')
   } catch (error) {
-    announce(error instanceof Error ? error.message : '取消动作授权失败', 'guarded')
+    announce(error instanceof Error ? error.message : '取消动作授权失败', 'error')
   } finally {
     clearPendingApproval()
   }
@@ -3306,7 +3354,7 @@ const openCleanUninstallDialog = async () => {
     const plan = await beginCleanUninstall()
     cleanUninstallDialog.value = { message: plan.message }
   } catch (error) {
-    announce(resolveErrorMessage(error, '打开彻底卸载确认失败'), 'guarded')
+    announce(resolveErrorMessage(error, '打开彻底卸载确认失败'), 'error')
   }
 }
 
@@ -3320,13 +3368,13 @@ const confirmCleanUninstall = async () => {
   }
 
   busy.value = true
-  visualMode.value = 'guarded'
+  setPetReaction('working')
   try {
     const plan = await executeCleanUninstall()
     cleanUninstallDialog.value = null
-    announce(plan.message, 'guarded')
+    announce(plan.message, 'success')
   } catch (error) {
-    announce(resolveErrorMessage(error, '彻底卸载失败'), 'guarded')
+    announce(resolveErrorMessage(error, '彻底卸载失败'), 'error')
   } finally {
     busy.value = false
     resetVisualModeSoon(900)
@@ -3793,6 +3841,45 @@ const setupPetWindowListeners = async () => {
   })
 }
 
+const applyPetReactionEvent = (value: PetReactionEvent) => {
+  const event = sanitizePetReactionEvent(value)
+  if (!event || event.createdAt < lastPetReactionEventAt) {
+    return
+  }
+
+  const reaction = normalizePetReaction(event.reaction)
+  if (reaction !== 'waitingApproval' && waitingReaction() === 'waitingApproval') {
+    return
+  }
+  if (!shouldReplacePetReactionEvent(activeReaction.value, event)) {
+    return
+  }
+  lastPetReactionEventAt = event.createdAt
+
+  const duration = event.durationMs
+  const message = event.message ?? ''
+  if (message) {
+    showBubble(message, reaction, duration)
+  } else {
+    setPetReaction(reaction)
+  }
+
+  if (!message && typeof duration === 'number') {
+    const sequence = petReactionSequence
+    petReactionTimer = window.setTimeout(() => {
+      petReactionTimer = null
+      if (
+        petReactionSequence === sequence &&
+        activeReaction.value === reaction &&
+        !busy.value &&
+        !listening.value
+      ) {
+        setPetReaction(waitingReaction())
+      }
+    }, duration)
+  }
+}
+
 const setupCrossWindowListeners = async () => {
   if (isBubbleView.value) {
     bubbleStateListenerCleanup = await listenForBubbleWindowState((nextState) => {
@@ -3801,12 +3888,16 @@ const setupCrossWindowListeners = async () => {
     return
   }
 
-  snapshotListenerCleanup = await listenForAssistantSnapshot((nextSnapshot) => {
-    applySnapshot(nextSnapshot)
-    if (nextSnapshot.research.enabled || researchBrief.value.enabled || isResearchView.value) {
-      void refreshResearchBrief({ silent: true })
-    }
-  })
+  if (isNonPetWindowView.value) {
+    snapshotListenerCleanup = await listenForAssistantSnapshot((nextSnapshot) => {
+      applySnapshot(nextSnapshot)
+      if (nextSnapshot.research.enabled || researchBrief.value.enabled || isResearchView.value) {
+        void refreshResearchBrief({ silent: true })
+      }
+    })
+  } else {
+    petReactionListenerCleanup = await listenForPetReaction(applyPetReactionEvent)
+  }
 
   bubbleInteractionListenerCleanup = await listenForBubbleInteractionState((active) => {
     handleBubbleInteractionState(active)
@@ -3972,8 +4063,13 @@ onBeforeUnmount(() => {
   clearShellConfirmationTimer()
   clearPendingCommandTimer()
   clearAgentTaskTimer()
+  if (petReactionTimer !== null) {
+    window.clearTimeout(petReactionTimer)
+    petReactionTimer = null
+  }
   mediaDevicesCleanup?.()
   snapshotListenerCleanup?.()
+  petReactionListenerCleanup?.()
   sectionListenerCleanup?.()
   bubbleStateListenerCleanup?.()
   bubbleInteractionListenerCleanup?.()

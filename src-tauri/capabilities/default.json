@@ -6,11 +6,13 @@
   "windows": [
     "main",
     "settings",
-    "bubble"
+    "bubble",
+    "research"
   ],
   "permissions": [
     "core:default",
     "core:window:allow-set-size",
+    "core:window:allow-set-always-on-top",
     "core:window:allow-set-position",
     "core:window:allow-show",
     "core:window:allow-hide",

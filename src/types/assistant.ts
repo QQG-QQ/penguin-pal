@@ -1,4 +1,22 @@
 export type PetMode = 'idle' | 'listening' | 'thinking' | 'speaking' | 'guarded'
+export type PetReaction =
+  | 'idle'
+  | 'listening'
+  | 'thinking'
+  | 'working'
+  | 'speaking'
+  | 'waitingApproval'
+  | 'success'
+  | 'error'
+  | 'notification'
+export type PetReactionSource = 'user' | 'assistant' | 'agent' | 'voice' | 'control' | 'system' | 'plugin'
+export interface PetReactionEvent {
+  reaction: PetReaction
+  source: PetReactionSource
+  message?: string
+  createdAt: number
+  durationMs?: number | null
+}
 export type PetDockState = 'normal' | 'dockedLeft' | 'dockedRight' | 'dockedTop'
 export type AssistantWindowView = 'pet' | 'settings' | 'bubble' | 'research'
 export type PetMood = 'cheerful' | 'calm' | 'curious' | 'needy' | 'tired'
@@ -529,14 +547,8 @@ export interface HealthCheckItem {
 export interface HealthCheckReport {
   generatedAt: number
   overallStatus: 'ok' | 'warning' | 'error' | string
+  safeSummary: string
   items: HealthCheckItem[]
-}
-
-export interface ControlServiceStatus {
-  running: boolean
-  baseUrl: string | null
-  toolCount: number
-  message: string
 }
 
 export interface ControlErrorPayload {

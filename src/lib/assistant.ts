@@ -17,7 +17,6 @@ import type {
   CodexCliStatus,
   CodexUpdateStatus,
   ControlPendingRequest,
-  ControlServiceStatus,
   ControlToolInvokeResponse,
   DocumentImportResult,
   DocumentMemoryRecord,
@@ -34,6 +33,7 @@ import type {
   ModelInfo,
   OAuthFlowResult,
   OAuthState,
+  PetReactionEvent,
   PetStatus,
   ProviderConfigInput,
   ProviderKind,
@@ -49,6 +49,7 @@ import type {
   WhisperPushToTalkEvent,
   WhisperStatus
 } from '../types/assistant'
+import { sanitizePetReactionEvent } from './petReactions'
 
 const providerModels: Record<ProviderKind, string> = {
   mock: 'penguin-guardian',
@@ -556,10 +557,10 @@ const BUBBLE_DISMISS_EVENT = 'penguinpal://bubble-dismiss'
 const TODAY_REPLY_HISTORY_EVENT = 'penguinpal://today-reply-history'
 const WHISPER_STATUS_EVENT = 'penguinpal://whisper-status'
 const WHISPER_PUSH_TO_TALK_EVENT = 'penguinpal://whisper-push-to-talk'
+const PET_REACTION_EVENT = 'penguinpal://pet-reaction'
 
 let browserSettingsWindow: Window | null = null
 let browserResearchWindow: Window | null = null
-let cachedControlBaseUrl: string | null = null
 
 const normalizeSettingsSection = (value: string | null | undefined): SettingsSection =>
   value === 'actions' ? 'actions' : 'settings'
@@ -621,6 +622,31 @@ export const listenForAssistantSnapshot = async (
   }
 
   return listen<AssistantSnapshot>(SNAPSHOT_UPDATED_EVENT, (event) => {
+    handler(event.payload)
+  })
+}
+
+export const publishPetReaction = async (reaction: PetReactionEvent): Promise<void> => {
+  const payload = sanitizePetReactionEvent(reaction)
+  if (!payload) {
+    throw new Error('桌宠反应事件无效或已过期。')
+  }
+
+  if (!isTauriRuntime()) {
+    return
+  }
+
+  await emit(PET_REACTION_EVENT, payload)
+}
+
+export const listenForPetReaction = async (
+  handler: (reaction: PetReactionEvent) => void
+): Promise<UnlistenFn | null> => {
+  if (!isTauriRuntime()) {
+    return null
+  }
+
+  return listen<PetReactionEvent>(PET_REACTION_EVENT, (event) => {
     handler(event.payload)
   })
 }
@@ -846,13 +872,6 @@ const safeInvoke = async <T>(
   return invoke<T>(command, args)
 }
 
-const fallbackControlServiceStatus = (): ControlServiceStatus => ({
-  running: false,
-  baseUrl: null,
-  toolCount: 0,
-  message: '当前不是桌宠运行时，本地控制层不可用。'
-})
-
 const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
   stats: {
     profileCount: 0,
@@ -873,6 +892,11 @@ const emptyMemoryManagementSnapshot = (): MemoryManagementSnapshot => ({
 const emptyHealthCheckReport = (): HealthCheckReport => ({
   generatedAt: Date.now(),
   overallStatus: 'warning',
+  safeSummary: [
+    'PenguinPal 系统诊断',
+    '总体状态：warning',
+    '说明：当前不是 Tauri 桌面运行时，无法执行本地健康检查。'
+  ].join('\n'),
   items: [
     {
       id: 'runtime',
@@ -883,6 +907,46 @@ const emptyHealthCheckReport = (): HealthCheckReport => ({
     }
   ]
 })
+
+const HEALTH_SUMMARY_MAX_LENGTH = 12_000
+const HEALTH_SUMMARY_SECRET_ASSIGNMENT =
+  /((?:"|')?(?:api[\s_-]*key|access[\s_-]*token|refresh[\s_-]*token|control[\s_-]*token|client[\s_-]*secret|authorization|credential|password|secret|token|cookie|令牌|密钥|密码|口令|凭据)(?:"|')?\s*(?:=|:|：)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;，；\r\n]+)/gi
+const HEALTH_SUMMARY_BEARER = /\bbearer\s+[^\s,;，；\r\n]+/gi
+const HEALTH_SUMMARY_KNOWN_SECRET =
+  /\b(?:sk|rk|sess)-[a-z0-9_-]{16,}\b|\b(?:ghp|gho|ghu|ghs|github_pat)_[a-z0-9_]{16,}\b/gi
+const HEALTH_SUMMARY_JWT = /\beyJ[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+\b/gi
+const HEALTH_SUMMARY_HIGH_ENTROPY_VALUE = /\b[a-z0-9_-]{32,}\b/gi
+const HEALTH_SUMMARY_FILE_URL = /\bfile:\/\/\/?[^\r\n]*/gi
+const HEALTH_SUMMARY_WINDOWS_PATH = /\b[a-z]:[\\/][^\r\n]*/gi
+const HEALTH_SUMMARY_UNC_PATH = /\\\\[^\\/\r\n]+[\\/][^\r\n]*/g
+const HEALTH_SUMMARY_POSIX_PATH =
+  /(^|[\s("'=:：])\/(?!\/)(?:[^/\s\r\n]+\/)+[^\r\n]*/gm
+
+/**
+ * Applies a final, deliberately conservative privacy filter before a health
+ * summary is displayed or copied. The backend remains the source of the safe
+ * summary; this helper never rebuilds it from diagnostic details.
+ */
+export const sanitizeHealthCheckSafeSummary = (value: unknown): string => {
+  if (typeof value !== 'string') {
+    return ''
+  }
+
+  return value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .slice(0, HEALTH_SUMMARY_MAX_LENGTH)
+    .replace(HEALTH_SUMMARY_SECRET_ASSIGNMENT, '$1[已隐藏敏感值]')
+    .replace(HEALTH_SUMMARY_BEARER, 'Bearer [已隐藏敏感值]')
+    .replace(HEALTH_SUMMARY_KNOWN_SECRET, '[已隐藏敏感值]')
+    .replace(HEALTH_SUMMARY_JWT, '[已隐藏敏感值]')
+    .replace(HEALTH_SUMMARY_HIGH_ENTROPY_VALUE, '[已隐藏敏感值]')
+    .replace(HEALTH_SUMMARY_FILE_URL, '[已隐藏本地路径]')
+    .replace(HEALTH_SUMMARY_WINDOWS_PATH, '[已隐藏本地路径]')
+    .replace(HEALTH_SUMMARY_UNC_PATH, '[已隐藏本地路径]')
+    .replace(HEALTH_SUMMARY_POSIX_PATH, '$1[已隐藏本地路径]')
+    .trim()
+}
 
 const emptyAgentRoadmapStatus = (): AgentRoadmapStatus => ({
   generatedAt: Date.now(),
@@ -911,84 +975,6 @@ const emptyAgentRoadmapStatus = (): AgentRoadmapStatus => ({
     detail: []
   }
 })
-
-const normalizeControlResponseMessage = (payload: unknown) => {
-  if (!payload || typeof payload !== 'object') {
-    return '本地控制服务调用失败。'
-  }
-
-  const record = payload as Record<string, unknown>
-  const errorRecord =
-    record.error && typeof record.error === 'object'
-      ? (record.error as Record<string, unknown>)
-      : null
-
-  const candidates = [
-    errorRecord?.message,
-    record.message,
-    errorRecord?.detail
-  ]
-
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim()) {
-      return candidate
-    }
-  }
-
-  return '本地控制服务调用失败。'
-}
-
-const getControlBaseUrl = async () => {
-  if (cachedControlBaseUrl) {
-    return cachedControlBaseUrl
-  }
-
-  const status = await getControlServiceStatus()
-  if (!status.running || !status.baseUrl) {
-    throw new Error(status.message || '本地控制服务未启动。')
-  }
-
-  cachedControlBaseUrl = status.baseUrl
-  return cachedControlBaseUrl
-}
-
-const controlFetchJson = async <T>(path: string, init?: RequestInit): Promise<T> => {
-  if (typeof window === 'undefined' || typeof window.fetch !== 'function') {
-    throw new Error('当前环境不支持本地控制请求。')
-  }
-
-  const baseUrl = await getControlBaseUrl()
-  let response: Response
-  try {
-    response = await window.fetch(`${baseUrl}${path}`, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        ...(init?.headers ?? {})
-      }
-    })
-  } catch (error) {
-    cachedControlBaseUrl = null
-    throw normalizeRuntimeError(error)
-  }
-
-  const raw = await response.text()
-  const payload = raw ? (JSON.parse(raw) as unknown) : null
-  if (!response.ok) {
-    throw new Error(normalizeControlResponseMessage(payload))
-  }
-
-  if (
-    payload &&
-    typeof payload === 'object' &&
-    'status' in payload &&
-    (payload as Record<string, unknown>).status === 'error'
-  ) {
-    throw new Error(normalizeControlResponseMessage(payload))
-  }
-
-  return payload as T
-}
 
 const snapshotWithRuntimeFlags = (snapshot: AssistantSnapshot): AssistantSnapshot => {
   const visionChannel = {
@@ -1775,7 +1761,11 @@ export const importFullBackupFromFile = async (): Promise<FullBackupImportResult
 
 export const runHealthCheck = async (): Promise<HealthCheckReport> => {
   try {
-    return await safeInvoke<HealthCheckReport>('run_health_check')
+    const report = await safeInvoke<HealthCheckReport>('run_health_check')
+    return {
+      ...report,
+      safeSummary: sanitizeHealthCheckSafeSummary(report.safeSummary)
+    }
   } catch (error) {
     rethrowIfDesktopRuntime(error)
     return emptyHealthCheckReport()
@@ -1909,38 +1899,25 @@ export const getCodexCliStatus = async (): Promise<CodexCliStatus> => {
   }
 }
 
-export const getControlServiceStatus = async (): Promise<ControlServiceStatus> => {
-  try {
-    const status = await safeInvoke<ControlServiceStatus>('get_control_service_status')
-    cachedControlBaseUrl = status.running ? status.baseUrl : null
-    return status
-  } catch (error) {
-    rethrowIfDesktopRuntime(error)
-    cachedControlBaseUrl = null
-    return fallbackControlServiceStatus()
-  }
-}
-
 export const invokeControlTool = async (
   tool: string,
   args: Record<string, unknown>
 ): Promise<ControlToolInvokeResponse> => {
-  if (!isTauriRuntime()) {
-    throw new Error(fallbackControlServiceStatus().message)
+  try {
+    return await safeInvoke<ControlToolInvokeResponse>('invoke_control_tool', { tool, args })
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
+    throw new Error('当前不是桌宠运行时，内部桌面工具不可用。')
   }
-
-  return controlFetchJson<ControlToolInvokeResponse>('/v1/tools/invoke', {
-    method: 'POST',
-    body: JSON.stringify({ tool, args })
-  })
 }
 
 export const listControlPending = async (): Promise<ControlPendingRequest[]> => {
-  if (!isTauriRuntime()) {
+  try {
+    return await safeInvoke<ControlPendingRequest[]>('list_control_pending')
+  } catch (error) {
+    rethrowIfDesktopRuntime(error)
     return []
   }
-
-  return controlFetchJson<ControlPendingRequest[]>('/v1/pending')
 }
 
 export const confirmControlPending = async (
@@ -1950,7 +1927,7 @@ export const confirmControlPending = async (
     return await safeInvoke<ControlToolInvokeResponse>('confirm_control_pending', { pendingId })
   } catch (error) {
     rethrowIfDesktopRuntime(error)
-    throw new Error(fallbackControlServiceStatus().message)
+    throw new Error('当前不是桌宠运行时，内部桌面工具不可用。')
   }
 }
 
@@ -1961,7 +1938,7 @@ export const cancelControlPending = async (
     return await safeInvoke<ControlToolInvokeResponse>('cancel_control_pending', { pendingId })
   } catch (error) {
     rethrowIfDesktopRuntime(error)
-    throw new Error(fallbackControlServiceStatus().message)
+    throw new Error('当前不是桌宠运行时，内部桌面工具不可用。')
   }
 }
 

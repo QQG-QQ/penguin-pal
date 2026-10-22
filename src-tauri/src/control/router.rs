@@ -18,7 +18,7 @@ use super::{
     registry,
     shell,
     system_registry,
-    types::{ControlPendingRequest, ControlServiceStatus, ToolInvokeRequest, ToolInvokeResponse},
+    types::{ControlPendingRequest, ToolInvokeRequest, ToolInvokeResponse},
     windows,
     ControlServiceState,
 };
@@ -676,20 +676,6 @@ fn audit_tool(
         audit::record(&format!("control:{tool}"), status, detail, risk_level),
     );
     save(app, &runtime).map_err(ControlError::internal)
-}
-
-pub fn service_status(app: &AppHandle) -> ControlResult<ControlServiceStatus> {
-    let control_state: tauri::State<'_, ControlServiceState> = app.state();
-    let base_url = control_state.bind_address().map_err(ControlError::internal)?;
-    Ok(ControlServiceStatus {
-        running: base_url.is_some(),
-        base_url: base_url.clone(),
-        tool_count: registry::tool_definitions().len(),
-        message: match base_url {
-            Some(address) => format!("控制服务已启动：{address}"),
-            None => "控制服务尚未启动。".to_string(),
-        },
-    })
 }
 
 pub fn list_tools() -> Vec<super::types::ControlToolDefinition> {

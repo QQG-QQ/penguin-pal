@@ -1,0 +1,97 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PenguinPal Assistant",
+  "version": "0.3.0",
+  "identifier": "com.penguinpal.app",
+  "build": {
+    "beforeDevCommand": "npm run dev:tauri",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "PenguinPal",
+        "width": 248,
+        "height": 252,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
+      },
+      {
+        "label": "bubble",
+        "title": "PenguinPal Bubble",
+        "url": "/?view=bubble",
+        "width": 320,
+        "height": 96,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "focus": false,
+        "visible": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
+      },
+      {
+        "label": "settings",
+        "title": "PenguinPal 设置",
+        "url": "/?view=settings&section=settings",
+        "width": 820,
+        "height": 760,
+        "minWidth": 680,
+        "minHeight": 620,
+        "resizable": true,
+        "decorations": true,
+        "closable": true,
+        "transparent": false,
+        "center": true,
+        "focus": false,
+        "visible": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false
+      },
+      {
+        "label": "research",
+        "title": "PenguinPal 投研简报",
+        "url": "/?view=research",
+        "width": 860,
+        "height": 820,
+        "minWidth": 700,
+        "minHeight": 620,
+        "resizable": true,
+        "decorations": true,
+        "closable": true,
+        "transparent": false,
+        "center": true,
+        "focus": false,
+        "visible": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; connect-src 'self' ipc: http://ipc.localhost; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' http://localhost:1420; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": [
+      "resources/"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

@@ -1,0 +1,336 @@
+[
+  {
+    "id": "happy",
+    "slot": "happy",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": false,
+    "poster": "happy-0.png",
+    "frames": [
+      "happy-0.png",
+      "happy-1.png",
+      "happy-2.png",
+      "happy-3.png",
+      "happy-4.png",
+      "happy-5.png",
+      "happy-6.png",
+      "happy-7.png"
+    ],
+    "video": "happy.webm"
+  },
+  {
+    "id": "pat",
+    "slot": "pat",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": false,
+    "poster": "pat-0.png",
+    "frames": [
+      "pat-0.png",
+      "pat-1.png",
+      "pat-2.png",
+      "pat-3.png",
+      "pat-4.png",
+      "pat-5.png",
+      "pat-6.png",
+      "pat-7.png"
+    ],
+    "video": "pat.webm"
+  },
+  {
+    "id": "poke",
+    "slot": "poke",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": false,
+    "poster": "poke-0.png",
+    "frames": [
+      "poke-0.png",
+      "poke-1.png",
+      "poke-2.png",
+      "poke-3.png",
+      "poke-4.png",
+      "poke-5.png",
+      "poke-6.png",
+      "poke-7.png"
+    ],
+    "video": "poke.webm"
+  },
+  {
+    "id": "tail",
+    "slot": "tail",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": false,
+    "poster": "tail-0.png",
+    "frames": [
+      "tail-0.png",
+      "tail-1.png",
+      "tail-2.png",
+      "tail-3.png",
+      "tail-4.png",
+      "tail-5.png",
+      "tail-6.png",
+      "tail-7.png"
+    ],
+    "video": "tail.webm"
+  },
+  {
+    "id": "eat",
+    "slot": "eat",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": true,
+    "poster": "eat-0.png",
+    "frames": [
+      "eat-0.png",
+      "eat-1.png",
+      "eat-2.png",
+      "eat-3.png",
+      "eat-4.png",
+      "eat-5.png",
+      "eat-6.png",
+      "eat-7.png"
+    ],
+    "video": "eat.webm"
+  },
+  {
+    "id": "rest",
+    "slot": "rest",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": true,
+    "poster": "rest-0.png",
+    "frames": [
+      "rest-0.png",
+      "rest-1.png",
+      "rest-2.png",
+      "rest-3.png",
+      "rest-4.png",
+      "rest-5.png",
+      "rest-6.png",
+      "rest-7.png"
+    ],
+    "video": "rest.webm"
+  },
+  {
+    "id": "wake",
+    "slot": "wake",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": false,
+    "poster": "wake-0.png",
+    "frames": [
+      "wake-0.png",
+      "wake-1.png",
+      "wake-2.png",
+      "wake-3.png",
+      "wake-4.png",
+      "wake-5.png",
+      "wake-6.png",
+      "wake-7.png"
+    ],
+    "video": "wake.webm"
+  },
+  {
+    "id": "sweep",
+    "slot": "sweep",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": true,
+    "poster": "sweep-0.png",
+    "frames": [
+      "sweep-0.png",
+      "sweep-1.png",
+      "sweep-2.png",
+      "sweep-3.png",
+      "sweep-4.png",
+      "sweep-5.png",
+      "sweep-6.png",
+      "sweep-7.png"
+    ],
+    "video": "sweep.webm"
+  },
+  {
+    "id": "think",
+    "slot": "think",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": true,
+    "poster": "think-0.png",
+    "frames": [
+      "think-0.png",
+      "think-1.png",
+      "think-2.png",
+      "think-3.png",
+      "think-4.png",
+      "think-5.png",
+      "think-6.png",
+      "think-7.png"
+    ],
+    "video": "think.webm"
+  },
+  {
+    "id": "look",
+    "slot": "look",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": false,
+    "poster": "look-0.png",
+    "frames": [
+      "look-0.png",
+      "look-1.png",
+      "look-2.png",
+      "look-3.png",
+      "look-4.png",
+      "look-5.png",
+      "look-6.png",
+      "look-7.png"
+    ],
+    "video": "look.webm"
+  },
+  {
+    "id": "blink",
+    "slot": "blink",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": false,
+    "poster": "blink-0.png",
+    "frames": [
+      "blink-0.png",
+      "blink-1.png",
+      "blink-2.png",
+      "blink-3.png",
+      "blink-4.png",
+      "blink-5.png",
+      "blink-6.png",
+      "blink-7.png"
+    ],
+    "video": "blink.webm"
+  },
+  {
+    "id": "talk",
+    "slot": "talk",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": true,
+    "poster": "talk-0.png",
+    "frames": [
+      "talk-0.png",
+      "talk-1.png",
+      "talk-2.png",
+      "talk-3.png",
+      "talk-4.png",
+      "talk-5.png",
+      "talk-6.png",
+      "talk-7.png"
+    ],
+    "video": "talk.webm"
+  },
+  {
+    "id": "annoyed",
+    "slot": "annoyed",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": false,
+    "poster": "annoyed-0.png",
+    "frames": [
+      "annoyed-0.png",
+      "annoyed-1.png",
+      "annoyed-2.png",
+      "annoyed-3.png",
+      "annoyed-4.png",
+      "annoyed-5.png",
+      "annoyed-6.png",
+      "annoyed-7.png"
+    ],
+    "video": "annoyed.webm"
+  },
+  {
+    "id": "idle",
+    "slot": "idle",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": true,
+    "poster": "idle-0.png",
+    "frames": [
+      "idle-0.png",
+      "idle-1.png",
+      "idle-2.png",
+      "idle-3.png",
+      "idle-4.png",
+      "idle-5.png",
+      "idle-6.png",
+      "idle-7.png"
+    ],
+    "video": "idle.webm"
+  },
+  {
+    "id": "land",
+    "slot": "land",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": false,
+    "poster": "land-0.png",
+    "frames": [
+      "land-0.png",
+      "land-1.png",
+      "land-2.png",
+      "land-3.png",
+      "land-4.png",
+      "land-5.png",
+      "land-6.png",
+      "land-7.png"
+    ],
+    "video": "land.webm"
+  },
+  {
+    "id": "dizzy",
+    "slot": "dizzy",
+    "weight": 1,
+    "frameMs": 167,
+    "loop": true,
+    "poster": "dizzy-0.png",
+    "frames": [
+      "dizzy-0.png",
+      "dizzy-1.png",
+      "dizzy-2.png",
+      "dizzy-3.png",
+      "dizzy-4.png",
+      "dizzy-5.png",
+      "dizzy-6.png",
+      "dizzy-7.png"
+    ],
+    "video": "dizzy.webm"
+  },
+  {
+    "id": "walk-left",
+    "slot": "walk-left",
+    "weight": 1,
+    "frameMs": 200,
+    "loop": true,
+    "poster": "walk-left-gait-0.png",
+    "frames": [
+      "walk-left-gait-0.png",
+      "walk-left-gait-1.png",
+      "walk-left-gait-2.png",
+      "walk-left-gait-3.png"
+    ],
+    "video": "walk-left-gait.webm"
+  },
+  {
+    "id": "walk-right",
+    "slot": "walk-right",
+    "weight": 1,
+    "frameMs": 200,
+    "loop": true,
+    "poster": "walk-right-gait-0.png",
+    "frames": [
+      "walk-right-gait-0.png",
+      "walk-right-gait-1.png",
+      "walk-right-gait-2.png",
+      "walk-right-gait-3.png"
+    ],
+    "video": "walk-right-gait.webm"
+  }
+]

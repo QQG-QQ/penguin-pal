@@ -92,15 +92,6 @@ pub struct ToolInvokeResponse {
     pub error: Option<ControlErrorPayload>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ControlServiceStatus {
-    pub running: bool,
-    pub base_url: Option<String>,
-    pub tool_count: usize,
-    pub message: String,
-}
-
 pub fn empty_json_object() -> Value {
     Value::Object(serde_json::Map::new())
 }
