@@ -50,9 +50,11 @@ def initial(seed, now):
 
 
 def validate(doc):
-    if not isinstance(doc, dict) or set(doc) - {"social"} != {"schema", "petId", "revision", "updatedAt", "pet", "memories", "conversations", "moodHistory", "lastFeedAt", "lastPatAt"} or doc["schema"] != 1:
+    if not isinstance(doc, dict) or set(doc) - {"social", "brain"} != {"schema", "petId", "revision", "updatedAt", "pet", "memories", "conversations", "moodHistory", "lastFeedAt", "lastPatAt"} or doc["schema"] != 1:
         raise ValueError("unsupported data format")
     ident(doc["petId"])
+    if "brain" in doc:
+        validate_brain(doc["brain"])
     for key in ["revision", "updatedAt", "lastFeedAt", "lastPatAt"]:
         number(doc[key], 0, 1e16)
     pet = doc["pet"]
@@ -108,6 +110,8 @@ def validate(doc):
 
 
 def sanitize_document(doc):
+    if "brain" in doc:
+        sanitize_brain(doc["brain"])
     doc["pet"]["moodReason"] = clean(doc["pet"]["moodReason"], 400)
     for item in doc["memories"]:
         item["text"] = "" if item["deleted"] else clean(item["text"], 2000)
@@ -124,7 +128,10 @@ def advance(doc, now):
     pet["energy"] = min(100, pet["energy"] + hours * 2)
     pet["hunger"] = min(100, pet["hunger"] + hours * 2)
     pet["affection"] = max(0, pet["affection"] - hours / 4)
-    pet["mood"] = 70 + (pet["mood"] - 70) * math.pow(0.5, hours / 12)
+    cfg = doc.get("brain", brain_default())["config"]
+    pet["mood"] = min(100, max(cfg["moodFloor"], cfg["baseline"] + (pet["mood"] - cfg["baseline"]) * math.pow(0.5, hours / cfg["moodHalfHours"])))
+    if "brain" in doc:
+        advance_brain(doc["brain"], now)
     doc["updatedAt"] = max(now, doc["updatedAt"])
 
 
@@ -135,6 +142,8 @@ def apply(doc, op, now):
     data, pet = op["data"], doc["pet"]
     if op["kind"] == "social":
         apply_social(doc, data, op["id"], now)
+    elif op["kind"] == "brain":
+        apply_brain(doc, data, op["id"], now)
     elif op["kind"] == "care":
         action = data.get("action")
         if action not in {"pat", "poke", "tail", "feed", "rest"}:
@@ -157,11 +166,16 @@ def apply(doc, op, now):
         old = next((x for x in doc["memories"] if x["id"] == key), None)
         if old and old["deleted"]:
             return
+        at = min(now, number(data.get("at", now), 0, 1e16))
+        if old and not data["deleted"] and old["at"] > at:
+            return
         if old:
             doc["memories"].remove(old)
         if len(doc["memories"]) >= 2000:
             raise ValueError("memory limit reached")
-        doc["memories"].append({"id": key, "text": "" if data["deleted"] else text, "deleted": data["deleted"], "at": now})
+        doc["memories"].append({"id": key, "text": "" if data["deleted"] else text, "deleted": data["deleted"], "at": at})
+        if data["deleted"] and "brain" in doc:
+            doc["brain"]["memories"].pop(key, None)
     elif op["kind"] == "conversation":
         item = {"id": ident(data.get("id")), "session": ident(data.get("session")), "role": data.get("role"),
                 "text": clean(data.get("text")), "at": min(now, number(data.get("at"), 0, 1e16))}
@@ -178,12 +192,19 @@ def apply(doc, op, now):
     elif op["kind"] == "restore":
         imported = sanitize_document(validate(data.get("document")))
         for item in imported["memories"]:
-            apply(doc, {"id": op["id"], "kind": "memory", "data": {k: item[k] for k in ["id", "text", "deleted"]}}, now)
+            apply(doc, {"id": op["id"], "kind": "memory", "data": {k: item[k] for k in ["id", "text", "at", "deleted"]}}, now)
         for item in imported["conversations"]:
             apply(doc, {"id": op["id"], "kind": "conversation", "data": item}, now)
         # Explicit restore keeps the existing shared identity; collections merge.
         doc["pet"] = imported["pet"].copy()
         doc["moodHistory"] = imported["moodHistory"][-200:]
+        previous = doc.get("brain", brain_default())
+        brain = json.loads(json.dumps(imported.get("brain", brain_default())))
+        for field in ["nextCheckAt", "misses", "decisions"]:
+            brain[field] = previous[field]
+        brain["manual"] = False
+        brain["memories"] = {k: v for k, v in brain["memories"].items() if any(m["id"] == k and not m["deleted"] for m in doc["memories"])}
+        doc["brain"] = brain
     else:
         raise ValueError("unknown operation")
 
@@ -193,10 +214,11 @@ def social_default():
             "unanswered": 0, "lastTopic": "", "reservation": "", "reservedUntil": 0, "day": 0, "sentToday": 0}
 
 
-def can_send(social, now):
+def can_send(social, now, config=None):
+    config = config or brain_default()["config"]
     return (social["proactive"] and
-            (social["day"] != now // 86400000 or social["sentToday"] < 4) and
-            (social["lastOutreachAt"] == 0 or now - social["lastOutreachAt"] >= 45 * 60000) and
+            (social["day"] != now // 86400000 or social["sentToday"] < config["dailyLimit"]) and
+            (social["lastOutreachAt"] == 0 or now - social["lastOutreachAt"] >= config["cooldownMinutes"] * 60000) and
             social["reservedUntil"] <= now)
 
 
@@ -257,34 +279,42 @@ def apply_social(doc, data, key, now):
             attribute, text, quote = clean(memory.get("key"), 60), clean(memory.get("text"), 400), clean(memory.get("quote"), 160)
             if not attribute.strip() or not text.strip() or len(quote) < 2 or quote not in source:
                 raise ValueError("missing memory evidence")
-            memory_id = hashlib.sha256(("learned:" + kind + ":" + attribute).encode()).hexdigest()
+            memory_id = hashlib.sha256(("learned:" + kind + ":" + attribute + (":" + source_id if kind == "recent" else "")).encode()).hexdigest()
+            memory_id = next((k for k, m in sorted(doc.get("brain", {}).get("memories", {}).items()) if m["kind"] == kind and m["key"] == attribute and (kind != "recent" or any(item["id"] == k and item["text"].split("\n")[0] == "【"+labels[kind]+"】"+text for item in doc["memories"]))), memory_id)
             old = next((m for m in doc["memories"] if m["id"] == memory_id), None)
-            if old and (old["deleted"] or old["at"] > source_at):
+            latest = doc.get("brain", {}).get("memories", {}).get(memory_id, {}).get("reinforcedAt", 0)
+            if old and (old["deleted"] or max(old["at"], latest) > source_at):
                 continue
+            if not remember_brain(doc, memory_id, memory, old, source_at, now, historical):
+                continue
+            repeated = old and old["text"].split("\n")[0] == "【" + labels[kind] + "】" + text
             text = "【" + labels[kind] + "】" + text + "\n依据：「" + quote + "」\n来源：" + source_id + " / " + session + " / " + str(source_at)
             if old:
                 doc["memories"].remove(old)
             if len(doc["memories"]) >= 2000:
                 raise ValueError("memory limit reached")
-            doc["memories"].append({"id": memory_id, "text": text, "deleted": False, "at": source_at})
+            doc["memories"].append(old if repeated else {"id": memory_id, "text": text, "deleted": False, "at": source_at})
         delta = number(data.get("delta"), -3, 3)
         if not isinstance(delta, int):
             raise ValueError("invalid mood delta")
-        if delta and not historical:
+        if (delta or any(data.get("dims", {}).values())) and not historical:
             reason, quote = clean(data.get("reason"), 160), clean(data.get("quote"), 160)
             if not reason.strip() or len(quote) < 2 or quote not in source:
                 raise ValueError("missing mood evidence")
-            apply(doc, {"id": key, "kind": "mood", "data": {"delta": delta, "reason": reason + "；依据：「" + quote + "」"}}, now)
+            mood_brain(doc, data, key, now, "user")
         social["analyzed"] = (social["analyzed"] + [source_id])[-500:]
     elif kind == "reserve":
         token = ident(data.get("token"))
-        if can_send(social, now):
+        brain = doc.setdefault("brain", brain_default())
+        manual = data.get("manual", False) is True
+        if (manual and social["reservedUntil"] <= now) or can_send(social, now, brain["config"]):
             social["reservation"], social["reservedUntil"] = token, now + 180000
+            brain["manual"] = manual
     elif kind == "release":
         if data.get("token") == social["reservation"]:
             social["reservation"], social["reservedUntil"] = "", 0
     elif kind == "commit":
-        if not social["proactive"] or not social["reservation"] or data.get("token") != social["reservation"] or social["reservedUntil"] <= now:
+        if (not social["proactive"] and not doc.get("brain", {}).get("manual", False)) or not social["reservation"] or data.get("token") != social["reservation"] or social["reservedUntil"] <= now:
             return
         text, topic = clean(data.get("text"), 1200), clean(data.get("topic"), 100)
         if not text.strip() or not topic.strip():
@@ -296,9 +326,242 @@ def apply_social(doc, data, key, now):
             social["sentToday"] += 1
             social["unanswered"] = min(1000, social["unanswered"] + 1)
             social["lastOutreachAt"], social["lastTopic"] = now, topic
+            if "selfMood" in data:
+                feeling = data["selfMood"].copy(); feeling["quote"] = ""
+                mood_brain(doc, feeling, key, now, "speak-up")
         social["reservation"], social["reservedUntil"] = "", 0
     else:
         raise ValueError("invalid social operation")
+
+
+EMOTIONS = ["happy", "calm", "sweet", "heartache", "worry", "sad", "jealous"]
+
+
+def brain_default():
+    return {"config": {"intervalMinutes": 30, "cooldownMinutes": 45, "dailyLimit": 4,
+        "probability": 60.0, "missBonus": 10.0, "bonusCap": 40.0, "quietStart": 22, "quietEnd": 8,
+        "dryRun": False, "motive": "围绕共同记忆或近期事情，自然说一两句话，只开一个话题。",
+        "recentMinutes": 20, "distantMinutes": 360, "memoryHalfDays": 30.0, "maxRecall": 8,
+        "recallChars": 1600, "factsMax": 3, "dailyMemories": 30, "evidence": 0.25,
+        "freshnessWeight": 0.3, "importanceWeight": 0.2, "emotionWeight": 0.1,
+        "userName": "你", "petName": "企鹅", "pronoun": "ta", "moodEnabled": True,
+        "injectMode": "event", "confidence": 60.0, "baseline": 70.0, "moodFloor": 0.0,
+        "moodHalfHours": 12.0, "emotionHalfMinutes": 90.0, "romance": False, "model": "",
+        "animations": True, "badge": True}, "memories": {}, "emotions": {k: 0.0 for k in EMOTIONS},
+        "emotionAt": 0, "event": None, "consumed": "", "consumedIds": [], "injection": "", "injectedAt": 0,
+        "timeline": [], "decisions": [], "nextCheckAt": 0, "misses": 0, "manual": False}
+
+
+def meta_default():
+    return dict(kind="recent", key="", importance=0.5, emotion=0.0, tags=[], reinforcedAt=0,
+                strength=1.0, createdAt=0, historical=False, versions=[])
+
+
+def validate_brain(brain):
+    default = brain_default()
+    if not isinstance(brain, dict) or set(brain) != set(default):
+        raise ValueError("invalid companion extension")
+    cfg = brain["config"]
+    if not isinstance(cfg, dict) or set(cfg) != set(default["config"]):
+        raise ValueError("invalid companion configuration")
+    integer_ranges = {"intervalMinutes": (1, 1440), "cooldownMinutes": (0, 1440), "dailyLimit": (1, 100),
+        "quietStart": (0, 23), "quietEnd": (0, 23), "recentMinutes": (0, 1440), "distantMinutes": (0, 10080),
+        "maxRecall": (1, 24), "recallChars": (200, 12000), "factsMax": (0, 24), "dailyMemories": (1, 1000)}
+    for key, limits in integer_ranges.items():
+        number(cfg[key], *limits)
+        if not isinstance(cfg[key], int):
+            raise ValueError("expected integer configuration")
+    for key in ["probability", "missBonus", "bonusCap", "confidence"]:
+        number(cfg[key])
+    for key in ["evidence", "freshnessWeight", "importanceWeight", "emotionWeight"]:
+        number(cfg[key], 0, 1)
+    for key, limits in {"memoryHalfDays": (1, 3650), "baseline": (30, 100), "moodFloor": (0, cfg["baseline"]),
+                        "moodHalfHours": (1, 168), "emotionHalfMinutes": (1, 1440)}.items():
+        number(cfg[key], *limits)
+    for key in ["dryRun", "moodEnabled", "romance", "animations", "badge"]:
+        if not isinstance(cfg[key], bool):
+            raise ValueError("invalid switch")
+    for key in ["userName", "petName", "pronoun"]:
+        if not clean(cfg[key], 40).strip():
+            raise ValueError("empty companion name")
+    clean(cfg["motive"], 400); clean(cfg["model"], 100)
+    if cfg["injectMode"] not in {"off", "state", "event"}:
+        raise ValueError("invalid injection mode")
+    if set(brain["emotions"]) != set(EMOTIONS):
+        raise ValueError("invalid emotion dimensions")
+    for value in brain["emotions"].values():
+        number(value)
+    for key in ["emotionAt", "injectedAt", "nextCheckAt"]:
+        number(brain[key], 0, 1e16)
+    number(brain["misses"], 0, 1000); clean(brain["injection"], 600)
+    if brain["consumed"]:
+        ident(brain["consumed"])
+    if not isinstance(brain["consumedIds"], list) or len(brain["consumedIds"]) > 200:
+        raise ValueError("invalid consumed events")
+    for event_id in brain["consumedIds"]:
+        ident(event_id)
+    if not isinstance(brain["manual"], bool) or not isinstance(brain["memories"], dict) or len(brain["memories"]) > 2000:
+        raise ValueError("invalid brain state")
+    for key, meta in brain["memories"].items():
+        ident(key)
+        if set(meta) != set(meta_default()) or meta["kind"] not in {"preference", "agreement", "recent"}:
+            raise ValueError("invalid memory metadata")
+        clean(meta["key"], 60)
+        for field in ["importance", "emotion", "strength"]:
+            number(meta[field], 0, 1)
+        for field in ["reinforcedAt", "createdAt"]:
+            number(meta[field], 0, 1e16)
+        if not isinstance(meta["historical"], bool) or not isinstance(meta["tags"], list) or len(meta["tags"]) > 12 or not isinstance(meta["versions"], list) or len(meta["versions"]) > 8:
+            raise ValueError("invalid memory metadata collections")
+        for tag in meta["tags"]:
+            clean(tag, 40)
+        for version in meta["versions"]:
+            if set(version) != {"text", "at"}:
+                raise ValueError("invalid memory version")
+            clean(version["text"], 2000); number(version["at"], 0, 1e16)
+    if not isinstance(brain["timeline"], list) or len(brain["timeline"]) > 200 or not isinstance(brain["decisions"], list) or len(brain["decisions"]) > 60:
+        raise ValueError("invalid companion timeline")
+    for event in brain["timeline"] + ([brain["event"]] if brain["event"] is not None else []):
+        if set(event) != {"id", "at", "source", "reason", "confidence", "delta", "dims"} or event["source"] not in {"user", "speak-up", "manual", "decay"}:
+            raise ValueError("invalid mood event")
+        ident(event["id"]); number(event["at"], 0, 1e16); clean(event["reason"], 400)
+        number(event["confidence"]); number(event["delta"], -10, 10)
+        if not isinstance(event["dims"], dict) or set(event["dims"]) - set(EMOTIONS):
+            raise ValueError("invalid mood dimensions")
+        for value in event["dims"].values():
+            number(value)
+    for item in brain["decisions"]:
+        if set(item) != {"at", "reason", "chance", "roll", "nextAt"}:
+            raise ValueError("invalid decision record")
+        number(item["at"], 0, 1e16); number(item["nextAt"], 0, 1e16)
+        number(item["chance"]); number(item["roll"]); clean(item["reason"], 200)
+    return brain
+
+
+def sanitize_brain(brain):
+    for key in ["userName", "petName", "pronoun", "motive", "model"]:
+        brain["config"][key] = clean(brain["config"][key], 400)
+    for meta in brain["memories"].values():
+        meta["key"] = clean(meta["key"], 60)
+        meta["tags"] = [clean(t, 40) for t in meta["tags"]]
+        for version in meta["versions"]:
+            version["text"] = clean(version["text"], 2000)
+    for event in brain["timeline"] + ([brain["event"]] if brain["event"] else []):
+        event["reason"] = clean(event["reason"], 400)
+    brain["injection"] = clean(brain["injection"], 600)
+    for item in brain["decisions"]:
+        item["reason"] = clean(item["reason"], 200)
+
+
+def advance_brain(brain, now):
+    if not brain["emotionAt"]:
+        return
+    if brain["emotionAt"]:
+        minutes = max(0, now - brain["emotionAt"]) / 60000
+        brain["emotions"] = {k: v * 0.5 ** (minutes / brain["config"]["emotionHalfMinutes"]) for k, v in brain["emotions"].items()}
+    brain["emotionAt"] = max(now, brain["emotionAt"])
+
+
+def remember_brain(doc, key, memory, old, source_at, now, historical):
+    brain = doc.setdefault("brain", brain_default())
+    if not historical and key not in brain["memories"] and sum(not m["historical"] and m["createdAt"] // 86400000 == now // 86400000 for m in brain["memories"].values()) >= brain["config"]["dailyMemories"]:
+        return False
+    meta = brain["memories"].setdefault(key, meta_default())
+    if old:
+        label = {"preference": "喜好", "agreement": "约定", "recent": "近况"}[memory["kind"]]
+        if old["text"].split("\n")[0] == "【" + label + "】" + memory["text"]:
+            current = meta["strength"] * 0.5 ** (max(0, source_at-(meta["reinforcedAt"] or old["at"]))/86400000/(brain["config"]["memoryHalfDays"]*(1+2*meta["importance"])))
+            meta["strength"] = current + 0.2*(1-current)
+        else:
+            meta["versions"] = (meta["versions"] + [dict(text=old["text"], at=old["at"])])[-8:]
+            meta["strength"] = 1.0
+    meta.update(kind=memory["kind"], key=clean(memory["key"], 60), importance=memory.get("importance", 0.5),
+                emotion=memory.get("emotion", 0.0), tags=memory.get("tags", []), reinforcedAt=source_at)
+    if meta["createdAt"] == 0:
+        meta.update(createdAt=now, historical=historical)
+    validate_brain(brain); sanitize_brain(brain)
+    return True
+
+
+def mood_brain(doc, data, key, now, source):
+    brain = doc.setdefault("brain", brain_default())
+    cfg = brain["config"]
+    if not cfg["moodEnabled"]:
+        return
+    advance_brain(brain, now)
+    brain["emotionAt"] = now
+    delta, confidence = number(data["delta"], -3, 3), number(data.get("confidence", 70))
+    if not isinstance(data.get("dims", {}), dict) or set(data.get("dims", {})) - set(EMOTIONS):
+        raise ValueError("invalid emotion dimensions")
+    changed = delta != 0
+    for name in EMOTIONS:
+        value = number(data.get("dims", {}).get(name, 0), -6, 6)
+        if not cfg["romance"] and name in {"sweet", "jealous"}:
+            continue
+        changed = changed or value != 0
+        brain["emotions"][name] = min(100, max(0, brain["emotions"][name] + value))
+    if not changed:
+        return
+    reason, quote = clean(data.get("reason", ""), 160), clean(data.get("quote", ""), 160)
+    reason += "；依据：「" + quote + "」" if quote else ""
+    pet = doc["pet"]
+    pet.update(mood=min(100, max(cfg["moodFloor"], pet["mood"] + delta)), moodReason=reason, moodAt=now)
+    event = dict(id=key, at=now, source=source, reason=reason, confidence=confidence, delta=delta, dims=brain["emotions"].copy())
+    brain["event"] = event
+    brain["timeline"] = (brain["timeline"] + [event])[-200:]
+    doc["moodHistory"] = (doc["moodHistory"] + [dict(id=key, value=pet["mood"], reason=reason, at=now)])[-200:]
+    validate_brain(brain)
+
+
+def apply_brain(doc, data, key, now):
+    brain = doc.setdefault("brain", brain_default())
+    kind = data.get("type")
+    if kind == "settings":
+        patch = data.get("config")
+        if not isinstance(patch, dict) or set(patch)-set(brain["config"]):
+            raise ValueError("unknown companion setting")
+        brain["config"].update(patch); brain["nextCheckAt"] = 0
+        if not brain["config"]["romance"]:
+            for name in ["sweet", "jealous"]:
+                brain["emotions"][name] = 0
+    elif kind == "consume":
+        if any(e["id"] == data.get("eventId") for e in brain["timeline"]) and data.get("eventId") not in brain["consumedIds"]:
+            brain.update(consumed=data["eventId"], injection=clean(data.get("text", ""), 600), injectedAt=now)
+            brain["consumedIds"] = (brain["consumedIds"] + [data["eventId"]])[-200:]
+    elif kind == "mergeMeta":
+        memory_id = ident(data.get("id"))
+        if memory_id not in brain["memories"] and any(m["id"] == memory_id and m["text"] == data.get("expected") and not m["deleted"] for m in doc["memories"]):
+            brain["memories"][memory_id] = json.loads(json.dumps(data["meta"]))
+    elif kind == "decision":
+        if now < brain["nextCheckAt"]:
+            return
+        chance, roll = number(data.get("chance", 0)), number(data.get("roll", 0))
+        brain["nextCheckAt"] = now + brain["config"]["intervalMinutes"] * 60000
+        brain["misses"] = 0 if roll < chance else min(1000, brain["misses"]+1)
+        brain["decisions"] = (brain["decisions"] + [dict(at=now, reason=clean(data.get("reason", ""), 200), chance=chance, roll=roll, nextAt=brain["nextCheckAt"])])[-60:]
+    elif kind == "log":
+        brain["decisions"] = (brain["decisions"] + [dict(at=now, reason=clean(data.get("reason", ""), 200), chance=0, roll=0, nextAt=0)])[-60:]
+    elif kind == "resetMood":
+        doc["pet"].update(mood=brain["config"]["baseline"], moodReason="已重置到平稳心情", moodAt=now)
+        doc["moodHistory"] = []
+        brain.update(emotions={k: 0 for k in EMOTIONS}, emotionAt=now, event=None, timeline=[], consumed="", consumedIds=[], injection="")
+    elif kind in {"editMemory", "undoMemory"}:
+        memory_id = ident(data.get("id"))
+        item = next((m for m in doc["memories"] if m["id"] == memory_id and not m["deleted"]), None)
+        if not item or data.get("expected") != item["text"]:
+            raise ValueError("memory changed; refresh before editing")
+        meta = brain["memories"].setdefault(memory_id, meta_default())
+        if kind == "undoMemory":
+            if not meta["versions"]:
+                raise ValueError("no previous version")
+            item.update(meta["versions"].pop())
+        else:
+            for field in ["importance", "emotion", "tags", "key", "kind"]:
+                if field in data:
+                    meta[field] = data[field]
+    else:
+        raise ValueError("unknown companion operation")
+    validate_brain(brain); sanitize_brain(brain)
 
 
 def sync(root, request, now=None):
@@ -333,7 +596,10 @@ def sync(root, request, now=None):
                 if old[0] != digest:
                     raise ValueError("operation identity conflict")
                 continue
-            if not (op.get("kind") == "social" and op["data"].get("type") in {"reserve", "commit"} and (holder != device or lease <= now)):
+            if op.get("kind") == "social" and op["data"].get("type") == "reserve" and op["data"].get("manual") is True:
+                holder, lease = device, now + 45000
+            restricted = (op.get("kind") == "social" and op["data"].get("type") in {"reserve", "commit"}) or (op.get("kind") == "brain" and op["data"].get("type") == "decision")
+            if not (restricted and (holder != device or lease <= now)):
                 apply(doc, op, now)
             interacted = interacted or op.get("kind") == "care" or (op.get("kind") == "social" and op["data"].get("type") == "user")
             doc["revision"] += 1

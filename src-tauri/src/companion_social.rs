@@ -46,11 +46,16 @@ impl Social {
             && self.unanswered <= 1000
             && self.sent_today <= 1000
     }
+    #[cfg(test)]
     pub fn can_send(&self, at: u64) -> bool {
+        self.can_send_with(at, &crate::companion_brain::Config::default())
+    }
+    pub fn can_send_with(&self, at: u64, config: &crate::companion_brain::Config) -> bool {
         self.proactive
-            && (self.day != at / 86400000 || self.sent_today < 4)
+            && (self.day != at / 86400000 || self.sent_today < config.daily_limit)
             && (self.last_outreach_at == 0
-                || at.saturating_sub(self.last_outreach_at) >= 45 * 60000)
+                || at.saturating_sub(self.last_outreach_at)
+                    >= config.cooldown_minutes as u64 * 60000)
             && self.reserved_until <= at
     }
 }
@@ -175,22 +180,89 @@ pub fn apply(doc: &mut Value, data: &Value, op_id: &str, at: u64) -> Result<(), 
                 {
                     return Err("记忆没有用户原话依据。".into());
                 }
-                let id = digest(format!("learned:{kind}:{key}").as_bytes());
-                let list = doc["memories"].as_array_mut().unwrap();
-                if list.iter().any(|m| {
+                let candidate = digest(
+                    if kind == "recent" {
+                        format!("learned:{kind}:{key}:{source}")
+                    } else {
+                        format!("learned:{kind}:{key}")
+                    }
+                    .as_bytes(),
+                );
+                let brain = crate::companion_brain::load(doc)?;
+                let id = brain
+                    .memories
+                    .iter()
+                    .find(|(id, meta)| {
+                        meta.kind == kind
+                            && meta.key == key
+                            && (kind != "recent"
+                                || doc["memories"].as_array().unwrap().iter().any(|m| {
+                                    m["id"] == **id
+                                        && m["text"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .lines()
+                                            .next()
+                                            .is_some_and(|line| {
+                                                line == format!("【{label}】{body}")
+                                            })
+                                }))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or(candidate);
+                let old = doc["memories"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["id"] == id)
+                    .cloned();
+                if old.as_ref().is_some_and(|m| {
                     m["id"] == id
-                        && (m["deleted"] == true || m["at"].as_u64().unwrap_or(0) > source_at)
+                        && (m["deleted"] == true
+                            || m["at"].as_u64().unwrap_or(0).max(
+                                brain
+                                    .memories
+                                    .get(&id)
+                                    .map(|m| m.reinforced_at)
+                                    .unwrap_or(0),
+                            ) > source_at)
                 }) {
                     continue;
                 }
+                if !crate::companion_brain::remember(
+                    doc,
+                    &id,
+                    memory,
+                    old.as_ref(),
+                    source_at,
+                    at,
+                    historical,
+                )? {
+                    continue;
+                }
+                let list = doc["memories"].as_array_mut().unwrap();
                 list.retain(|m| m["id"] != id);
-                list.push(json!({"id":id,"text":format!("【{label}】{body}\n依据：「{quote}」\n来源：{source} / {session} / {source_at}"),"at":source_at,"deleted":false}));
+                if let Some(old) = old.filter(|m| {
+                    m["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .is_some_and(|line| line == format!("【{label}】{body}"))
+                }) {
+                    list.push(old);
+                } else {
+                    list.push(json!({"id":id,"text":format!("【{label}】{body}\n依据：「{quote}」\n来源：{source} / {session} / {source_at}"),"at":source_at,"deleted":false}));
+                }
             }
             let delta = data["delta"]
                 .as_i64()
                 .filter(|v| (-3..=3).contains(v))
                 .ok_or("心情变化无效。")?;
-            if delta != 0 && !historical {
+            let dims_changed = data["dims"]
+                .as_object()
+                .is_some_and(|d| d.values().any(|v| v.as_f64().is_some_and(|n| n != 0.0)));
+            if (delta != 0 || dims_changed) && !historical {
                 let reason = text(data, "reason", 160)?;
                 let quote = text(data, "quote", 160)?;
                 if reason.trim().is_empty()
@@ -199,17 +271,7 @@ pub fn apply(doc: &mut Value, data: &Value, op_id: &str, at: u64) -> Result<(), 
                 {
                     return Err("心情没有用户原话依据。".into());
                 }
-                let mood =
-                    (doc["pet"]["mood"].as_f64().unwrap_or(70.0) + delta as f64).clamp(0.0, 100.0);
-                let reason = format!("{reason}；依据：「{quote}」");
-                doc["pet"]["mood"] = json!(mood);
-                doc["pet"]["moodReason"] = json!(reason);
-                doc["pet"]["moodAt"] = json!(at);
-                let list = doc["moodHistory"].as_array_mut().unwrap();
-                list.push(json!({"id":op_id,"value":mood,"reason":reason,"at":at}));
-                if list.len() > 200 {
-                    list.remove(0);
-                }
+                crate::companion_brain::mood(doc, data, op_id, at, "user")?;
             }
             social.analyzed.push(source);
             if social.analyzed.len() > 500 {
@@ -221,9 +283,14 @@ pub fn apply(doc: &mut Value, data: &Value, op_id: &str, at: u64) -> Result<(), 
             if !valid_id(&token) {
                 return Err("搭话标识无效。".into());
             }
-            if social.can_send(at) {
+            let brain = crate::companion_brain::load(doc)?;
+            let manual = data["manual"].as_bool().unwrap_or(false);
+            if (manual && social.reserved_until <= at) || social.can_send_with(at, &brain.config) {
                 social.reservation = token;
                 social.reserved_until = at + 180000;
+                doc["brain"] =
+                    serde_json::to_value(crate::companion_brain::Brain { manual, ..brain })
+                        .unwrap();
             }
         }
         "release" => {
@@ -233,7 +300,8 @@ pub fn apply(doc: &mut Value, data: &Value, op_id: &str, at: u64) -> Result<(), 
             }
         }
         "commit" => {
-            if !social.proactive
+            let brain = crate::companion_brain::load(doc)?;
+            if (!social.proactive && !brain.manual)
                 || data["token"] != social.reservation
                 || social.reservation.is_empty()
                 || social.reserved_until <= at
@@ -260,6 +328,11 @@ pub fn apply(doc: &mut Value, data: &Value, op_id: &str, at: u64) -> Result<(), 
             social.unanswered = social.unanswered.saturating_add(1).min(1000);
             social.last_outreach_at = at;
             social.last_topic = topic;
+            if let Some(feeling) = data.get("selfMood") {
+                let mut feeling = feeling.clone();
+                feeling["quote"] = json!("");
+                crate::companion_brain::mood(doc, &feeling, op_id, at, "speak-up")?;
+            }
             social.reservation.clear();
             social.reserved_until = 0;
         }
@@ -361,6 +434,36 @@ mod tests {
         social.sent_today = 4;
         assert!(!social.can_send(1000 + 45 * 60000));
         assert!(social.can_send(86400000));
+    }
+    #[test]
+    fn reconfirmed_fact_rejects_older_changes_and_keeps_suffix_change_version() {
+        let mut doc = document();
+        for (n, body, source_at) in [
+            (1, "喜欢清淡小鱼", 100),
+            (2, "喜欢清淡小鱼", 300),
+            (3, "以前喜欢烤小鱼", 200),
+        ] {
+            let source = format!("fact-{n}");
+            apply(&mut doc, &json!({"type":"history","sourceId":source,
+                "source":{"id":source,"session":"archive","role":"user","text":body,"at":source_at},
+                "memories":[{"kind":"preference","key":"food.flavor","text":body,"quote":body}],"delta":0}),
+                &format!("learn-{n}"), 1000).unwrap();
+        }
+        assert_eq!(doc["memories"][0]["at"], 100);
+        let original = doc["memories"][0].clone();
+        assert!(original["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("【喜好】喜欢清淡小鱼\n"));
+        apply(&mut doc, &json!({"type":"history","sourceId":"suffix",
+            "source":{"id":"suffix","session":"archive","role":"user","text":"小鱼","at":400},
+            "memories":[{"kind":"preference","key":"food.flavor","text":"小鱼","quote":"小鱼"}],"delta":0}),
+            "suffix-learn", 1000).unwrap();
+        let id = doc["memories"][0]["id"].as_str().unwrap();
+        assert_eq!(
+            doc["brain"]["memories"][id]["versions"][0]["text"],
+            original["text"]
+        );
     }
     #[test]
     fn historical_evidence_survives_eviction_uses_source_time_and_never_replays_mood() {

@@ -104,6 +104,11 @@ struct Document {
         skip_serializing_if = "crate::companion_social::Social::is_default"
     )]
     social: crate::companion_social::Social,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::companion_brain::Brain::is_default"
+    )]
+    brain: crate::companion_brain::Brain,
 }
 impl Document {
     fn validate(&self) -> Result<(), String> {
@@ -124,6 +129,7 @@ impl Document {
             || self.conversations.len() > 500
             || self.mood_history.len() > 200
             || !self.social.valid()
+            || !self.brain.valid()
         {
             return Err("数据版本或宠物状态无效；未覆盖已有数据。".into());
         }
@@ -164,6 +170,7 @@ impl Document {
         Ok(())
     }
     fn sanitize(&mut self) {
+        self.brain.sanitize();
         self.pet.mood_reason = scrub(&self.pet.mood_reason, 400);
         for m in &mut self.memories {
             m.text = if m.deleted {
@@ -231,7 +238,10 @@ struct Running(Arc<AtomicBool>);
 fn acquire_sync(running: &Arc<AtomicBool>, timeout: Duration) -> Result<Running, String> {
     let started = Instant::now();
     loop {
-        if running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        if running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
             return Ok(Running(running.clone()));
         }
         if started.elapsed() >= timeout {
@@ -337,6 +347,7 @@ impl Service {
                     last_feed_at: 0,
                     last_pat_at: 0,
                     social: Default::default(),
+                    brain: Default::default(),
                 },
             }
         };
@@ -447,7 +458,7 @@ impl Service {
                 source.sanitize();
                 op.data = json!({"document":source});
             }
-            "social" => sanitize_value(&mut op.data),
+            "social" | "brain" => sanitize_value(&mut op.data),
             _ => (),
         }
         let imported_identity = if kind == "restore" && next.server.is_none() {
@@ -627,6 +638,15 @@ impl Service {
                     data: serde_json::to_value(m).unwrap(),
                 });
             }
+            if let Some(meta) = next.document.brain.memories.get(&m.id) {
+                if !remote.brain.memories.contains_key(&m.id) {
+                    next.pending.push(Operation {
+                        id: id(),
+                        kind: "brain".into(),
+                        data: json!({"type":"mergeMeta","id":m.id,"expected":m.text,"meta":meta}),
+                    });
+                }
+            }
         }
         for m in &next.document.conversations {
             if !remote.conversations.iter().any(|x| x.id == m.id) {
@@ -657,6 +677,11 @@ fn apply(doc: &mut Document, op: &Operation) -> Result<(), String> {
     let at = now();
     let p = &mut doc.pet;
     match op.kind.as_str() {
+        "brain" => {
+            let mut value = serde_json::to_value(&*doc).map_err(|_| "陪伴数据无法编码。")?;
+            crate::companion_brain::apply(&mut value, &op.data, &op.id, at)?;
+            *doc = serde_json::from_value(value).map_err(|_| "陪伴数据无效。")?;
+        }
         "social" => {
             let mut value = serde_json::to_value(&*doc).map_err(|_| "陪伴数据无法编码。")?;
             crate::companion_social::apply(&mut value, &op.data, &op.id, at)?;
@@ -689,7 +714,13 @@ fn apply(doc: &mut Document, op: &Operation) -> Result<(), String> {
             } else {
                 scrub(&m.text, 2000)
             };
-            m.at = at;
+            m.at = m.at.min(at);
+            if !m.deleted && doc.memories.iter().any(|x| x.id == m.id && x.at > m.at) {
+                return Ok(());
+            }
+            if m.deleted {
+                doc.brain.memories.remove(&m.id);
+            }
             doc.memories.retain(|x| x.id != m.id);
             doc.memories.push(m);
         }
@@ -751,6 +782,19 @@ fn apply(doc: &mut Document, op: &Operation) -> Result<(), String> {
             }
             doc.pet = source.pet;
             doc.mood_history = source.mood_history;
+            let current_scheduler = (
+                doc.brain.next_check_at,
+                doc.brain.misses,
+                doc.brain.decisions.clone(),
+            );
+            doc.brain = source.brain;
+            doc.brain.next_check_at = current_scheduler.0;
+            doc.brain.misses = current_scheduler.1;
+            doc.brain.decisions = current_scheduler.2;
+            doc.brain.manual = false;
+            doc.brain
+                .memories
+                .retain(|id, _| doc.memories.iter().any(|m| m.id == *id && !m.deleted));
             // Restoring a backup must not rewind shared send cooldowns or unanswered counts.
         }
         _ => return Err("未知的数据操作。".into()),
@@ -774,7 +818,13 @@ fn sanitize_value(value: &mut Value) {
 fn recover_mood(doc: &mut Document) {
     let at = now();
     let hours = at.saturating_sub(doc.updated_at).min(86400000) as f64 / 3600000.0;
-    doc.pet.mood = 70.0 + (doc.pet.mood - 70.0) * 0.5_f64.powf(hours / 12.0);
+    let cfg = &doc.brain.config;
+    doc.pet.mood = (cfg.baseline
+        + (doc.pet.mood - cfg.baseline) * 0.5_f64.powf(hours / cfg.mood_half_hours))
+    .clamp(cfg.mood_floor, 100.0);
+    if !doc.brain.is_default() {
+        doc.brain.advance(at);
+    }
     doc.updated_at = at;
 }
 impl Service {
@@ -991,6 +1041,74 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rust_and_server_agree_on_shared_memory_mood_and_manual_outreach() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(root.path(), json!({})).unwrap();
+        let initial = service.status().unwrap()["document"].clone();
+        let at = 1800000000000u64;
+        let operations = vec![
+            json!({"id":"settings","kind":"brain","data":{"type":"settings","config":{"probability":100,"romance":false}}}),
+            json!({"id":"user","kind":"social","data":{"type":"user","text":"我喜欢清淡小鱼，谢谢你陪我"}}),
+            json!({"id":"learn","kind":"social","data":{"type":"analysis","sourceId":"user","memories":[{"kind":"preference","key":"饮食","text":"喜欢清淡小鱼","quote":"我喜欢清淡小鱼","tags":["小鱼","清淡"],"importance":0.9,"emotion":0.2}],"delta":2,"confidence":85,"dims":{"happy":4,"jealous":6},"reason":"被感谢","quote":"谢谢你陪我"}}),
+            json!({"id":"consume","kind":"brain","data":{"type":"consume","eventId":"learn","text":"被感谢"}}),
+            json!({"id":"reserve","kind":"social","data":{"type":"reserve","token":"manual","manual":true}}),
+            json!({"id":"commit","kind":"social","data":{"type":"commit","token":"manual","text":"今天的小鱼想清蒸吗？","topic":"小鱼","selfMood":{"delta":1,"dims":{"calm":2},"confidence":80,"reason":"主动关心"}}}),
+            json!({"id":"decision","kind":"brain","data":{"type":"decision","chance":60,"roll":80,"reason":"随机未命中"}}),
+        ];
+        let mut actual = initial.clone();
+        for op in &operations {
+            if op["kind"] == "brain" {
+                crate::companion_brain::apply(
+                    &mut actual,
+                    &op["data"],
+                    op["id"].as_str().unwrap(),
+                    at,
+                )
+                .unwrap();
+            } else {
+                crate::companion_social::apply(
+                    &mut actual,
+                    &op["data"],
+                    op["id"].as_str().unwrap(),
+                    at,
+                )
+                .unwrap();
+            }
+        }
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/brain-protocol-fixture.py");
+        let mut child = Command::new("python")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Python protocol test runtime");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                &serde_json::to_vec(&json!({"document":initial,"operations":operations,"now":at}))
+                    .unwrap(),
+            )
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Document = serde_json::from_slice(&output.stdout).unwrap();
+        let actual: Document = serde_json::from_value(actual).unwrap();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
     #[test]
     fn chat_sync_waits_for_background_exchange_and_bounds_failure() {
         let running = Arc::new(AtomicBool::new(true));

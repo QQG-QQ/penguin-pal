@@ -31,7 +31,6 @@ pub struct ChatService {
     gate: Arc<Mutex<Gate>>,
     started: Instant,
     last_learn: Arc<Mutex<Option<Instant>>>,
-    last_try: Arc<Mutex<Option<Instant>>>,
 }
 impl ChatService {
     pub fn new() -> Self {
@@ -40,7 +39,6 @@ impl ChatService {
             gate: Arc::new(Mutex::new(Gate::default())),
             started: Instant::now(),
             last_learn: Arc::new(Mutex::new(None)),
-            last_try: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -114,12 +112,26 @@ fn bridge(service: &Service, mut request: Value) -> Result<Value, String> {
             &helper,
             include_bytes!("../resources/companion/conversation-events.mjs").as_slice(),
         ),
+        (
+            &root.join("memory-engine.mjs"),
+            include_bytes!("../resources/companion/memory-engine.mjs").as_slice(),
+        ),
+        (
+            &root.join("memory-words.txt"),
+            include_bytes!("../resources/companion/memory-words.txt").as_slice(),
+        ),
+        (
+            &root.join("memory-words-LICENSE.txt"),
+            include_bytes!("../resources/companion/memory-words-LICENSE.txt").as_slice(),
+        ),
     ] {
         if fs::read(path).ok().as_deref() != Some(source) {
             fs::write(path, source).map_err(|_| "无法更新气泡运行程序。")?;
         }
     }
-    request["command"] = json!(codex()?);
+    if request["action"] != "recall" {
+        request["command"] = json!(codex()?);
+    }
     request["cwd"] = json!(root);
     let node = executable("node.exe").ok_or("气泡聊天需要 PATH 中的 Node.js。")?;
     let mut command = Command::new(node);
@@ -194,6 +206,9 @@ fn learn(
             .find(|s| s["id"] == item["sourceId"])
             .ok_or("学习来源无效。")?;
         let mut item = item.clone();
+        if !historical && !social(&service.status()?)?.enabled {
+            item["memories"] = json!([]);
+        }
         item["type"] = json!(if historical { "history" } else { "analysis" });
         if historical {
             item["source"] = source.clone();
@@ -248,24 +263,222 @@ fn sync_if_server(service: &Service, view: &Value) -> Result<(), String> {
     }
     Ok(())
 }
-fn allowed(hour: u32, idle: u32, gate: &Gate) -> bool {
-    (8..22).contains(&hour)
-        && (90..1800).contains(&idle)
-        && !gate.busy
-        && !gate.quiet
-        && !gate.fullscreen
-        && gate.visible
+fn remember_output(service: &Service, output: &Value, consume: bool) -> Result<(), String> {
+    if !output["recallReport"].is_null() {
+        service.history_note(
+            "recallReport",
+            &serde_json::to_string(&output["recallReport"]).map_err(|_| "召回解释无效。")?,
+        )?;
+    }
+    if consume
+        && output["usedMoodEventId"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    {
+        service.record(
+            "brain",
+            json!({"type":"consume","eventId":output["usedMoodEventId"],"text":output["moodText"]}),
+        )?;
+    }
+    Ok(())
 }
-fn environment_ok(chat: &ChatService) -> bool {
-    chat.gate.lock().is_ok_and(|g| {
-        allowed(
-            chrono::Local::now().hour(),
-            companion_platform::desktop(false, false).idle_seconds,
-            &g,
-        )
-    })
+fn policy_reason(
+    g: &Gate,
+    cfg: &crate::companion_brain::Config,
+    manual: bool,
+    hour: u32,
+    idle: u32,
+) -> Option<&'static str> {
+    if g.busy {
+        return Some("你正在忙，暂不打扰");
+    }
+    if g.fullscreen {
+        return Some("正在全屏，暂不打扰");
+    }
+    if !g.visible {
+        return Some("桌宠暂未显示");
+    }
+    if manual {
+        return None;
+    }
+    if g.quiet {
+        return Some("安静模式、拖动或面板打开中");
+    }
+    let quiet = if cfg.quiet_start == cfg.quiet_end {
+        false
+    } else if cfg.quiet_start < cfg.quiet_end {
+        (cfg.quiet_start..cfg.quiet_end).contains(&hour)
+    } else {
+        hour >= cfg.quiet_start || hour < cfg.quiet_end
+    };
+    if quiet {
+        return Some("当前是安静时段");
+    }
+    if idle < 90 {
+        return Some("正在使用电脑，等待空闲90秒");
+    }
+    if idle >= 1800 {
+        return Some("离开较久，等你回来再聊");
+    }
+    None
 }
-
+fn environment_reason(
+    chat: &ChatService,
+    cfg: &crate::companion_brain::Config,
+    manual: bool,
+) -> Option<&'static str> {
+    let Ok(g) = chat.gate.lock() else {
+        return Some("环境状态暂不可用");
+    };
+    policy_reason(
+        &g,
+        cfg,
+        manual,
+        chrono::Local::now().hour(),
+        companion_platform::desktop(false, false).idle_seconds,
+    )
+}
+fn outreach(service: &Service, chat: &ChatService, manual: bool) -> Result<Value, String> {
+    let mut view = service.status()?;
+    let initial = crate::companion_brain::load(&view["document"])?;
+    let status = |reason: &str| -> Result<Value, String> {
+        service.history_note("outreachStatus", reason)?;
+        result(service, None)
+    };
+    if !manual && !social(&view)?.proactive {
+        return status("主动搭话已关闭；仍可手动真发一次");
+    }
+    if !manual && chat.started.elapsed() < Duration::from_secs(120) {
+        return status("启动后先等待两分钟");
+    }
+    if let Some(reason) = environment_reason(chat, &initial.config, manual) {
+        return status(reason);
+    }
+    if view["mode"] == "server" {
+        service.sync_chat()?;
+        view = service.status()?;
+        if !manual && view["active"] != true {
+            return status("另一台设备负责主动陪伴");
+        }
+    }
+    if view["pending"] != 0 {
+        return status("等待积压数据同步确认");
+    }
+    let at = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let brain = crate::companion_brain::load(&view["document"])?;
+    let state = social(&view)?;
+    let cfg = &brain.config;
+    if !manual {
+        if state.day == at / 86400000 && state.sent_today >= cfg.daily_limit {
+            return status("今天的自动搭话次数已用完");
+        }
+        if state.last_outreach_at > 0
+            && at.saturating_sub(state.last_outreach_at) < cfg.cooldown_minutes as u64 * 60000
+        {
+            return status("搭话冷却中；可在记录中查看上次时间");
+        }
+        if state.reserved_until > at {
+            return status("已有一轮搭话正在准备");
+        }
+        if brain.next_check_at > at {
+            return status("等待下一次随机机会");
+        }
+        let elapsed = at.saturating_sub(state.last_response_at.max(state.last_outreach_at));
+        let factor = if state.last_response_at.max(state.last_outreach_at) == 0 {
+            1.0
+        } else if elapsed < cfg.recent_minutes as u64 * 60000 {
+            0.15
+        } else if elapsed > cfg.distant_minutes as u64 * 60000 {
+            1.5
+        } else {
+            1.0
+        };
+        let chance = (cfg.probability * factor
+            + (brain.misses as f64 * cfg.miss_bonus).min(cfg.bonus_cap))
+        .min(100.0);
+        let random = uuid::Uuid::new_v4();
+        let bytes = random.as_bytes();
+        let roll = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+            / (u32::MAX as f64 + 1.0)
+            * 100.0;
+        let reason = if roll >= chance {
+            "随机未命中，下次机会按设置增加概率"
+        } else if cfg.dry_run {
+            "试运行命中：只记记录，不调用模型、不发气泡"
+        } else {
+            "随机命中，正在准备话题"
+        };
+        service.record(
+            "brain",
+            json!({"type":"decision","chance":chance,"roll":roll,"reason":reason}),
+        )?;
+        sync_if_server(service, &view)?;
+        if roll >= chance || cfg.dry_run {
+            return status(reason);
+        }
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    service.record(
+        "social",
+        json!({"type":"reserve","token":token,"manual":manual}),
+    )?;
+    sync_if_server(service, &view)?;
+    view = service.status()?;
+    if view["pending"] != 0 || view["document"]["social"]["reservation"] != token {
+        return status("共享预约未取得，本轮未生成");
+    }
+    let generated = bridge(
+        service,
+        json!({"action":"opener","document":view["document"],"sources":[],"prompt":cfg.motive}),
+    );
+    let output = match generated {
+        Ok(v) => v,
+        Err(e) => {
+            service.record("social", json!({"type":"release","token":token}))?;
+            let _ = sync_if_server(service, &view);
+            return Err(e);
+        }
+    };
+    sync_if_server(service, &view)?;
+    view = service.status()?;
+    let current = crate::companion_brain::load(&view["document"])?;
+    if view["pending"] != 0
+        || environment_reason(chat, &current.config, manual).is_some()
+        || (!manual && current.config.dry_run)
+        || view["document"]["social"]["reservation"] != token
+        || (view["mode"] == "server" && view["active"] != true)
+    {
+        service.record("social", json!({"type":"release","token":token}))?;
+        let _ = sync_if_server(service, &view);
+        return status("环境或共享状态已变化，本轮气泡已取消");
+    }
+    let previous = view["document"]["social"]["lastOutreachAt"]
+        .as_u64()
+        .unwrap_or(0);
+    service.record("social",json!({"type":"commit","token":token,"text":output["reply"],"topic":output["topic"],"selfMood":output["selfMood"]}))?;
+    sync_if_server(service, &view)?;
+    view = service.status()?;
+    if view["pending"] == 0
+        && view["document"]["social"]["lastOutreachAt"]
+            .as_u64()
+            .unwrap_or(0)
+            > previous
+        && view["document"]["social"]["lastTopic"] == output["topic"]
+    {
+        remember_output(service, &output, true)?;
+        service.record(
+            "brain",
+            json!({"type":"log","reason":if manual{"手动搭话已发出"}else{"主动气泡已发出"}}),
+        )?;
+        let _ = sync_if_server(service, &view);
+        service.history_note("outreachError", "")?;
+        service.history_note("outreachStatus", "本轮气泡已发出")?;
+        if environment_reason(chat, &current.config, manual).is_none() {
+            return result(service, output["reply"].as_str());
+        }
+    }
+    status("本轮未显示新气泡；可能话题重复或预约已取消")
+}
 #[tauri::command]
 pub async fn companion_chat(
     window: WebviewWindow,
@@ -311,7 +524,7 @@ pub async fn companion_chat(
         Some(Running(chat.running.clone()))
     };
     let report_service = service.clone();
-    let report_error = action == "tick";
+    let report_error = action == "tick" || action == "outreach";
     let outcome = tauri::async_runtime::spawn_blocking(move||{
         // Persist a user's response immediately, even while an opener is being generated.
         // This cancels its reservation before waiting for the single inference slot.
@@ -345,9 +558,29 @@ pub async fn companion_chat(
                 view=service.status()?;
                 let source=user_source.ok_or("用户消息未保存。")?;
                 let output=bridge(&service,json!({"action":"reply","document":view["document"],"prompt":scrub(prompt,3000),"sources":[source.clone()]}))?;
-                if social(&service.status()?)?.enabled{learn(&service,&output,&[source],false)?;}
+                learn(&service,&output,&[source],false)?;
                 let reply=output["reply"].as_str().filter(|s|!s.trim().is_empty()).ok_or("回复为空。")?;
-                service.record("social",json!({"type":"reply","text":reply}))?;let _=sync_if_server(&service,&view);return result(&service,Some(reply));
+                service.record("social",json!({"type":"reply","text":reply}))?;remember_output(&service,&output,true)?;let _=sync_if_server(&service,&view);return result(&service,Some(reply));
+            }
+            "brain"=>{service.record("brain",data)?;let _=sync_if_server(&service,&view);}
+            "outreach"=>return outreach(&service,&chat,true),
+            "recall"|"rehearse"=>{
+                let brain=crate::companion_brain::load(&view["document"])?;
+                let recalled=bridge(&service,json!({"action":"recall","document":view["document"],"prompt":data["text"].as_str().unwrap_or(""),"proactive":action=="rehearse"}))?;
+                let mut response=result(&service,None)?;
+                response["preview"]=json!({"recall":recalled,"motive":brain.config.motive,"reason":environment_reason(&chat,&brain.config,false).unwrap_or("环境允许；实际发送仍需满足共享预约、冷却和概率")});return Ok(response);
+            }
+            "previewMemories"=>{
+                let mut sources:Vec<Value>=serde_json::from_value(data["sources"].clone()).map_err(|_|"资料格式无效。")?;
+                if sources.is_empty()||sources.len()>8||sources.iter().any(|m|m["text"].as_str().is_none_or(|s|s.chars().count()>6000)||m["role"]!="user"){return Err("每批请选择1至8段资料，每段最多6000字。".into())}
+                for source in &mut sources {source["text"]=json!(scrub(source["text"].as_str().unwrap_or(""),6000));}
+                let generated=bridge(&service,json!({"action":"analysis","document":view["document"],"sources":sources}))?;
+                return Ok(json!({"sources":sources,"analyses":generated["analyses"]}));
+            }
+            "importMemories"=>{
+                let sources:Vec<Value>=serde_json::from_value(data["sources"].clone()).map_err(|_|"资料格式无效。")?;
+                if sources.is_empty()||sources.len()>8{return Err("一次最多导入八段资料。".into())}
+                learn(&service,&data,&sources,true)?;let _=sync_if_server(&service,&view);
             }
             "history"=>return service.history_search(&data),
             "learn"=>{
@@ -369,25 +602,8 @@ pub async fn companion_chat(
                         // Persist a visible error and back off inference failures for five minutes.
                         *chat.last_learn.lock().map_err(|_|"陪伴状态忙。")?=Some(Instant::now()+Duration::from_secs(240));
                     }
-                    view=service.status()?;
                 }
-                if chat.started.elapsed()<Duration::from_secs(120)||!environment_ok(&chat){return result(&service,None);}
-                if view["mode"]=="server"{service.sync_chat()?;view=service.status()?;if view["active"]!=true{return result(&service,None);}}
-                let now=chrono::Utc::now().timestamp_millis().max(0) as u64;
-                if !social(&view)?.can_send(now)||!environment_ok(&chat)||chat.last_try.lock().map_err(|_|"陪伴状态忙。")?.is_some_and(|t|t.elapsed()<Duration::from_secs(600)){return result(&service,None);}
-                *chat.last_try.lock().map_err(|_|"陪伴状态忙。")?=Some(Instant::now());
-                let token=uuid::Uuid::new_v4().to_string();service.record("social",json!({"type":"reserve","token":token}))?;
-                sync_if_server(&service,&view)?;view=service.status()?;
-                if view["pending"]!=0||view["document"]["social"]["reservation"]!=token{return result(&service,None);}
-                let generated=bridge(&service,json!({"action":"opener","document":view["document"],"sources":[],"prompt":"围绕一条共同记忆或近期事情自然说一两句话，只开一个话题。"}));
-                let output=match generated{Ok(value)=>value,Err(error)=>{service.record("social",json!({"type":"release","token":token}))?;let _=sync_if_server(&service,&view);return Err(error);}};
-                service.history_note("outreachError", "")?;
-                sync_if_server(&service,&view)?;view=service.status()?;
-                if view["pending"]!=0||!environment_ok(&chat)||view["document"]["social"]["reservation"]!=token||(view["mode"]=="server"&&view["active"]!=true){service.record("social",json!({"type":"release","token":token}))?;let _=sync_if_server(&service,&view);return result(&service,None);}
-                let previous=view["document"]["social"]["lastOutreachAt"].as_u64().unwrap_or(0);
-                service.record("social",json!({"type":"commit","token":token,"text":output["reply"],"topic":output["topic"]}))?;
-                sync_if_server(&service,&view)?;view=service.status()?;
-                if environment_ok(&chat)&&view["pending"]==0&&view["document"]["social"]["lastOutreachAt"].as_u64().unwrap_or(0)>previous&&view["document"]["social"]["lastTopic"]==output["topic"]{return result(&service,output["reply"].as_str());}
+                return outreach(&service,&chat,false);
             }
             _=>return Err("不支持的气泡操作。".into()),
         }
@@ -404,6 +620,85 @@ pub async fn companion_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn allowed(hour: u32, idle: u32, gate: &Gate) -> bool {
+        policy_reason(
+            gate,
+            &crate::companion_brain::Config::default(),
+            false,
+            hour,
+            idle,
+        )
+        .is_none()
+    }
+    #[test]
+    fn configurable_quiet_hours_and_manual_action_use_actual_policy() {
+        let gate = Gate {
+            visible: true,
+            quiet: true,
+            ..Default::default()
+        };
+        let mut cfg = crate::companion_brain::Config::default();
+        assert!(policy_reason(&gate, &cfg, true, 2, 0).is_none());
+        assert!(policy_reason(
+            &Gate {
+                busy: true,
+                ..gate.clone()
+            },
+            &cfg,
+            true,
+            2,
+            0
+        )
+        .is_some());
+        assert!(policy_reason(
+            &Gate {
+                fullscreen: true,
+                ..gate.clone()
+            },
+            &cfg,
+            true,
+            2,
+            0
+        )
+        .is_some());
+        cfg.quiet_start = 10;
+        cfg.quiet_end = 12;
+        let gate = Gate {
+            quiet: false,
+            ..gate
+        };
+        assert_eq!(
+            policy_reason(&gate, &cfg, false, 10, 120),
+            Some("当前是安静时段")
+        );
+        assert!(policy_reason(&gate, &cfg, false, 12, 120).is_none());
+        cfg.quiet_start = 0;
+        cfg.quiet_end = 0;
+        assert!(policy_reason(&gate, &cfg, false, 2, 120).is_none());
+    }
+    #[test]
+    fn realtime_mood_and_automatic_memory_can_be_controlled_independently() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(root.path(), json!({})).unwrap();
+        service
+            .record(
+                "social",
+                json!({"type":"settings","enabled":false,"proactive":false}),
+            )
+            .unwrap();
+        service
+            .record(
+                "social",
+                json!({"type":"user","text":"我喜欢小鱼，谢谢你陪我"}),
+            )
+            .unwrap();
+        let source = service.status().unwrap()["document"]["conversations"][0].clone();
+        let analysis = json!({"sourceId":source["id"],"memories":[{"kind":"preference","key":"food","text":"喜欢小鱼","quote":"我喜欢小鱼"}],"delta":2,"dims":{"happy":2},"confidence":80,"reason":"被感谢","quote":"谢谢你陪我"});
+        learn(&service, &json!({"analyses":[analysis]}), &[source], false).unwrap();
+        let view = service.status().unwrap();
+        assert!(view["document"]["memories"].as_array().unwrap().is_empty());
+        assert_eq!(view["document"]["pet"]["mood"], 72.0);
+    }
     #[test]
     fn idle_policy_covers_work_night_away_and_quiet() {
         let gate = Gate {

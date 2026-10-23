@@ -2,9 +2,9 @@
 import { computed,onBeforeUnmount,onMounted,ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import CompanionSync from './CompanionSync.vue'
-import type {SyncView} from '../lib/companionSync'
+import type {ChatView,SyncView} from '../lib/companionSync'
 const props=defineProps<{native:boolean}>()
-const emit=defineEmits<{close:[];safe:[boolean];sync:[SyncView,boolean]}>()
+const emit=defineEmits<{close:[];safe:[boolean];sync:[SyncView,boolean];chat:[ChatView]}>()
 interface Health {version:string;safeMode:boolean;crashStreak:number;restoredBackup:boolean;nodeAvailable:boolean;configuredHooks:number;scriptCurrent:boolean;bridge:{status:string;activeSessions:number;lastReceived:number};rejectedEvents:number;dataDirectory:string;legacyFileCount:number;metrics:{workingSetBytes:number|null;privateBytes:number|null;cpuMillis:number|null};logs:{at:number;event:string}[]}
 interface LegacyFile{id:string;name:string;kind:string;bytes:number}
 interface UpdateInfo{status:string;currentVersion:string;latestVersion:string|null;assetName:string|null;downloadable:boolean;message:string}
@@ -55,7 +55,7 @@ onBeforeUnmount(()=>{disposed=true;preview.value='';window.clearInterval(timer)}
       <div class="actions"><button :disabled="busy||!selected.length||!native" @click="exportSelected">导出所选（{{selected.length}}）</button><button :disabled="busy||!native" @click="support('openExports')">打开导出目录</button></div>
       <pre v-if="preview" class="preview">{{preview}}</pre>
     </div>
-    <CompanionSync v-else-if="tab==='sync'&&native" :native="native" @changed="(value,apply)=>emit('sync',value,apply)"/>
+    <CompanionSync v-else-if="tab==='sync'&&native" :native="native" @changed="(value,apply)=>emit('sync',value,apply)" @chat="emit('chat',$event)"/>
     <div v-else-if="tab==='updates'">
       <p class="note">只检查 PenguinPal Companion 正式发布包，不更新私有 Codex。手动联网检查，下载后必须通过 SHA-256；不会自动运行安装程序。</p>
       <div class="actions"><button :disabled="busy||!native" @click="checkUpdate">检查 Companion 更新</button><button :disabled="busy||!native" @click="support('openReleases')">打开发布页</button></div>

@@ -48,11 +48,11 @@ test('learning rejects fabricated sources, unsupported facts and mood without ev
   }
   assert.throws(()=>validateResult({...output,analyses:[output.analyses[0],output.analyses[0]]},[source]))
 })
-test('recall prioritizes relevant preferences and expires recent events while keeping tombstones out',()=>{
+test('recall prioritizes relevant preferences without filling unrelated slots or reviving tombstones',()=>{
   const at=20*86400000
   const memories=[{text:'【喜好】清淡小鱼',at:1},{text:'【近况】过期事情',at:1},{text:'已遗忘',at,deleted:true},...Array.from({length:20},(_,n)=>({text:'普通记录'+n,at}))]
   const result=contextFor({memories},'小鱼',at)
-  assert.match(result.memories[0].text,/小鱼/);assert.ok(!JSON.stringify(result).includes('已遗忘'));assert.ok(!JSON.stringify(result).includes('过期事情'));assert.equal(result.memories.length,12)
+  assert.match(result.memories[0].text,/小鱼/);assert.ok(!JSON.stringify(result).includes('已遗忘'));assert.ok(!JSON.stringify(result).includes('过期事情'));assert.equal(result.memories.length,1)
 })
 test('tool attempts, early notification failures and connection errors stop generation',async()=>{
   await assert.rejects(run({action:'reply',sources:[source]},{factory:()=>mock(output,{tool:true,early:true})}),/调用工具/)

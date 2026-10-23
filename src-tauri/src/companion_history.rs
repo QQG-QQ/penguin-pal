@@ -157,7 +157,7 @@ impl History {
         Ok(json!({"messages":messages}))
     }
     pub fn note(&self, key: &str, value: &str) -> Result<(), String> {
-        self.0.lock().map_err(|_| DB_ERROR)?.execute("INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,scrub(value,200)]).map_err(|_| DB_ERROR)?;
+        self.0.lock().map_err(|_| DB_ERROR)?.execute("INSERT INTO meta VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,scrub(value,if key=="recallReport" {40000}else{200})]).map_err(|_| DB_ERROR)?;
         Ok(())
     }
     pub fn status(&self) -> Result<Value, String> {

@@ -5,6 +5,8 @@ include!("lib.rs");
 #[cfg(not(feature = "legacy-assistant"))]
 mod companion;
 #[cfg(not(feature = "legacy-assistant"))]
+mod companion_brain;
+#[cfg(not(feature = "legacy-assistant"))]
 mod companion_data;
 #[cfg(not(feature = "legacy-assistant"))]
 mod companion_media;

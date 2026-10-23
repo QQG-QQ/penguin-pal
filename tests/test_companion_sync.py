@@ -230,5 +230,127 @@ class SyncScenarios(unittest.TestCase):
         self.assertEqual(self.sync()["document"]["memories"], [])
 
 
+class BrainScenarios(unittest.TestCase):
+    setUp = SyncScenarios.setUp
+    tearDown = SyncScenarios.tearDown
+    sync = SyncScenarios.sync
+    def test_configuration_and_emotions_follow_another_device_and_survive_restore(self):
+        self.sync(operations=[op("config", "brain", type="settings", config={"probability": 100, "moodHalfHours": 4})])
+        self.sync(operations=[op("user", "social", type="user", text="谢谢你陪我")])
+        data = dict(type="analysis", sourceId="user", memories=[], delta=2, dims={"happy": 4, "jealous": 6},
+                    confidence=85, reason="被感谢", quote="谢谢你陪我")
+        doc = self.sync(operations=[op("analysis", "social", **data)])["document"]
+        other = self.sync("B")["document"]
+        self.assertEqual(doc, other)
+        self.assertEqual(other["brain"]["emotions"]["happy"], 4)
+        self.assertEqual(other["brain"]["emotions"]["jealous"], 0)
+        self.assertEqual(other["brain"]["event"]["source"], "user")
+        self.sync("B", [op("consumed", "brain", type="consume", eventId="analysis", text="被感谢")])
+        self.assertEqual(self.sync()["document"]["brain"]["consumed"], "analysis")
+        later = self.sync(now=NOW+90*60000)["document"]
+        self.assertAlmostEqual(later["brain"]["emotions"]["happy"], 2)
+
+    def test_memory_versions_undo_and_tombstones_erase_version_content(self):
+        def learn(n, text):
+            self.sync(operations=[op("u"+str(n), "social", type="user", text=text)])
+            return self.sync(operations=[op("a"+str(n), "social", type="analysis", sourceId="u"+str(n),
+                memories=[dict(kind="preference", key="饮食", text=text, quote=text, importance=.9, emotion=.2, tags=["小鱼"])], delta=0)])["document"]
+        first = learn(1, "我喜欢清淡小鱼")
+        second = learn(2, "我现在喜欢烤小鱼")
+        key = second["memories"][0]["id"]
+        self.assertEqual(len(second["brain"]["memories"][key]["versions"]), 1)
+        undone = self.sync("B", [op("undo", "brain", type="undoMemory", id=key, expected=second["memories"][0]["text"])])["document"]
+        self.assertEqual(undone["memories"][0]["text"], first["memories"][0]["text"])
+        self.sync(operations=[op("forget-new", "memory", id=key, deleted=True, text="")])
+        forgotten = self.sync("B", [op("restore-before-delete", "restore", document=second)])["document"]
+        self.assertTrue(forgotten["memories"][0]["deleted"])
+        self.assertNotIn(key, forgotten["brain"]["memories"])
+
+    def test_recent_events_do_not_overwrite_one_another_and_history_ignores_daily_cap(self):
+        self.sync(operations=[op("cap", "brain", type="settings", config={"dailyMemories": 1})])
+        for n in range(3):
+            source = dict(id=f"old{n}", role="user", session="archive", text=f"今天一起看海{n}", at=NOW-n*86400000)
+            self.sync(operations=[op(f"h{n}", "social", type="history", sourceId=source["id"], source=source,
+                memories=[dict(kind="recent", key="看海", text=source["text"], quote=source["text"])], delta=3, confidence=90, dims={"happy": 5})])
+        doc = self.sync("B")["document"]
+        self.assertEqual(len(doc["memories"]), 3)
+        self.assertEqual(doc["pet"]["mood"], 70)
+        self.assertEqual(doc["brain"]["timeline"], [])
+
+    def test_invalid_config_or_stale_edit_rolls_back_whole_batch(self):
+        before = self.sync()["document"]
+        with self.assertRaises(ValueError):
+            self.sync(operations=[op("good-setting", "brain", type="settings", config={"probability": 99}),
+                                  op("bad-setting", "brain", type="settings", config={"intervalMinutes": 0})])
+        self.assertEqual(self.sync()["document"], before)
+        self.sync(operations=[op("m-new", "memory", id="memory", text="喜欢看海", deleted=False)])
+        with self.assertRaises(ValueError):
+            self.sync("B", [op("stale", "brain", type="editMemory", id="memory", expected="旧内容", importance=1)])
+
+    def test_manual_send_can_take_over_but_still_reserves_and_can_be_cancelled(self):
+        self.sync()
+        reserve = self.sync("B", [op("manual-reserve", "social", type="reserve", token="manual", manual=True)])
+        self.assertTrue(reserve["active"])
+        committed = self.sync("B", [op("manual-commit", "social", type="commit", token="manual", text="一起看看海吗", topic="海",
+            selfMood=dict(delta=1, dims={"calm": 2}, reason="主动关心", confidence=80))])["document"]
+        self.assertEqual(len(committed["conversations"]), 1)
+        self.assertEqual(committed["brain"]["event"]["source"], "speak-up")
+        self.sync("B", [op("manual-reserve2", "social", type="reserve", token="manual2", manual=True)])
+        self.sync("A", [op("cancel-user", "social", type="user", text="先等等")])
+        cancelled = self.sync("B", [op("manual-commit2", "social", type="commit", token="manual2", text="不应出现", topic="取消")])["document"]
+        self.assertEqual(len(cancelled["conversations"]), 2)
+
+    def test_shared_random_clock_and_misses_are_idempotent_across_devices(self):
+        self.sync(operations=[op("random-config", "brain", type="settings", config={"intervalMinutes": 1})])
+        decision = op("decision1", "brain", type="decision", chance=20, roll=80, reason="随机未命中")
+        first = self.sync(operations=[decision])["document"]
+        self.assertEqual(first["brain"]["misses"], 1)
+        self.assertEqual(first, self.sync(operations=[decision])["document"])
+        self.sync("B", [op("user-takeover", "social", type="user", text="我回来了")])
+        early = self.sync("B", [op("too-early", "brain", type="decision", chance=20, roll=80, reason="还没到")])["document"]
+        self.assertEqual(early["brain"]["misses"], 1)
+        self.sync("B", now=NOW+60000)
+        after = self.sync("B", [op("decision2", "brain", type="decision", chance=40, roll=10, reason="命中")], now=NOW+60000)["document"]
+        self.assertEqual(after["brain"]["misses"], 0)
+        self.assertEqual(len(after["brain"]["decisions"]), 2)
+
+    def test_late_event_acknowledgment_does_not_unconsume_newer_events(self):
+        for n in [1, 2]:
+            self.sync(operations=[op(f"user-{n}", "social", type="user", text="谢谢你陪我")])
+            self.sync(operations=[op(f"mood-{n}", "social", type="analysis", sourceId=f"user-{n}", memories=[],
+                delta=1, confidence=90, dims={"happy": 1}, reason="被感谢", quote="谢谢你陪我")])
+        self.sync(operations=[op("ack-new", "brain", type="consume", eventId="mood-2", text="新的感受")])
+        other = self.sync("B", [op("ack-old", "brain", type="consume", eventId="mood-1", text="较早感受")])["document"]
+        self.assertEqual(set(other["brain"]["consumedIds"]), {"mood-1", "mood-2"})
+        self.assertEqual(other["brain"]["event"]["id"], "mood-2")
+
+    def test_reconfirmed_fact_rejects_older_changes_and_suffix_changes_keep_versions(self):
+        def learn(n, text, at):
+            source = dict(id=f"fact-source-{n}", role="user", session="archive", text=text, at=at)
+            return self.sync(operations=[op(f"fact-learn-{n}", "social", type="history", sourceId=source["id"], source=source,
+                memories=[dict(kind="preference", key="food.flavor", text=text, quote=text)], delta=0)])["document"]
+        first = learn(1, "喜欢清淡小鱼", NOW-30*86400000)
+        confirmed = learn(2, "喜欢清淡小鱼", NOW-86400000)
+        stale = learn(3, "以前喜欢烤小鱼", NOW-2*86400000)
+        self.assertEqual(stale["memories"], confirmed["memories"])
+        self.assertEqual(stale["brain"]["memories"], confirmed["brain"]["memories"])
+        changed = learn(4, "小鱼", NOW)
+        key = changed["memories"][0]["id"]
+        self.assertEqual(changed["brain"]["memories"][key]["versions"], [dict(text=first["memories"][0]["text"], at=first["memories"][0]["at"])])
+
+    def test_repeated_event_keeps_original_date_and_strengthens_recall(self):
+        old_at = NOW-30*86400000
+        for n, at in [(1, old_at), (2, NOW)]:
+            source = dict(id=f"event-source-{n}", role="user", session="archive", text="我们去海边散步", at=at)
+            self.sync(operations=[op(f"event-learn-{n}", "social", type="history", sourceId=source["id"], source=source,
+                memories=[dict(kind="recent", key="海边散步事件", text="一起去海边散步", quote="去海边散步", importance=0)], delta=0)])
+        doc = self.sync("B")["document"]
+        self.assertEqual(len(doc["memories"]), 1)
+        item = doc["memories"][0]
+        self.assertEqual(item["at"], old_at)
+        self.assertEqual(doc["brain"]["memories"][item["id"]]["reinforcedAt"], NOW)
+        self.assertAlmostEqual(doc["brain"]["memories"][item["id"]]["strength"], .6)
+
+
 if __name__ == "__main__":
     unittest.main()
