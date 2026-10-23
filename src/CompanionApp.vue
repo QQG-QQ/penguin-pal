@@ -57,9 +57,9 @@ const context = ref('quiet'), fullscreen = ref(false), hovered = ref(false), dra
 const img = ref<HTMLElement | null>(null), mask = ref<PetAlphaMask | null>(null), pose = ref('idle')
 const stage = ref({x:0,y:0}), panel = ref({x:296,y:8})
 const reduce = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches)
-const still = computed(() => (reduce.value&&!previewGreeting.value) || state.value.preferences.reducedMotion || safeMode.value)
-// Manual throws use the app's explicit controls; system reduction still gates decorative motion.
-const physicsEnabled = computed(() => state.value.preferences.gravity && !state.value.preferences.reducedMotion && !safeMode.value)
+// Pet motion follows its own controls, independently of Windows interface animations.
+const still = computed(() => state.value.preferences.reducedMotion || safeMode.value)
+const physicsEnabled = computed(() => state.value.preferences.gravity && !still.value)
 const busy = computed(() => ['working','waiting','toolError'].includes(codexStatus.value))
 const presentation = computed(() => codexPresentation(codexStatus.value))
 const packs=ref<MediaPack[]>([]), importing=ref(false), media=ref<ReturnType<MotionSequencer['sample']>>()
@@ -392,7 +392,7 @@ async function frame(){
 }
 async function tick(){await frame();if(!disposed)tickTimer=window.setTimeout(()=>{void tick()},frameDelay(!visible.value||hiddenForFullscreen.value||dockHidden.value,dragging.value||airborne.value||activity.value==='walk'||!!attached||musicScene.value.showing,activity.value!=='idle'||busy.value))}
 async function pollTick(){await poll();if(!disposed)pollTimer=window.setTimeout(()=>{void pollTick()},visible.value?1000:2500)}
-function motionChanged(e:MediaQueryListEvent){reduce.value=e.matches;void preferencesChanged({})}
+function motionChanged(e:MediaQueryListEvent){reduce.value=e.matches}
 onMounted(async()=>{
   motionQuery=window.matchMedia('(prefers-reduced-motion: reduce)');motionQuery.addEventListener('change',motionChanged)
   try{
@@ -449,5 +449,5 @@ onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',
 :root{font-family:'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;color:#173c56}*{box-sizing:border-box}body{margin:0;background:transparent;overflow:hidden}.companion{position:relative;width:100vw;height:100vh;user-select:none}.pet-stage{position:absolute;width:280px;height:290px;transform-origin:0 0}.pet{position:absolute;left:15px;top:40px;width:250px;height:250px;touch-action:none;cursor:grab}.pet .pet-visual{width:250px;height:250px;object-fit:contain;pointer-events:none;transform-origin:50% 90%}.pet.idle .pet-visual,.pet.rest .pet-visual{animation:breathe 5s ease-in-out infinite}.pet.held .pet-visual{transform:scale(.97,1.02)}.pet.land .pet-visual{animation:landing .4s ease-out}.pet.dragging{cursor:grabbing}.pet.dragging .pet-visual{transform:rotate(-3deg)}.pet.dizzy .pet-visual{animation:sway .8s ease-in-out infinite}.still .pet .pet-visual{animation:none!important;transform:none!important}
 button{font:inherit;cursor:pointer}.speech{position:absolute;top:0;left:16px;right:16px;background:#f3fafff7;border-radius:15px;padding:9px 13px;z-index:3;box-shadow:0 3px 12px #03132122;pointer-events:auto}.speech:after{content:'';position:absolute;bottom:-7px;left:48%;border-left:8px solid transparent;border-right:8px solid transparent;border-top:8px solid #f3faff}.speech span{color:#36a5d1;font-size:10px;font-weight:700}.speech p{margin:4px 0 0;font-size:12px;font-weight:600;line-height:1.5}
 .codex-marker{position:absolute;top:10px;left:50%;transform:translateX(-50%);white-space:nowrap;border:1px solid #bdd9e9;border-radius:14px;background:#edf8fff2;color:#194460;font-size:10px;padding:5px 10px;z-index:2}.codex-marker i{display:inline-block;width:6px;height:6px;background:#36a5d1;border-radius:50%;margin-right:5px}.codex-marker i.waiting{background:#dc9d39}.codex-marker i.ended{background:#4aaf8e}.pet-tools{position:absolute;bottom:1px;left:40px;display:flex;gap:6px;z-index:3}.pet-tools button{border:1px solid #8fb4c9;border-radius:12px;background:#eef9ffed;color:#194460;font-size:10px;padding:4px 10px}.panel-host{position:absolute;z-index:8}.notice{position:absolute;bottom:8px;left:8px;max-width:260px;max-height:125px;overflow:auto;margin:0;padding:11px;background:#fff4ddf7;color:#72521c;border:1px solid #d9bd83;border-radius:12px;z-index:20;font-size:11px;cursor:pointer;line-height:1.5}.food-picker{position:absolute;left:15px;right:15px;top:50px;padding:15px;border-radius:15px;background:#0c2c43f7;color:#e7f5ff;z-index:4;box-shadow:0 4px 20px #03132144}.food-picker p{font-size:11px;color:#b1d3e7}.food-picker button{border:0;border-radius:9px;background:#55b9df;color:#062a42;padding:8px 12px;margin-right:6px}.food-picker button:last-child{background:#214b64;color:#e7f5ff}.suppressed{visibility:hidden}
-.dormant .pet .pet-visual{animation-play-state:paused}@keyframes landing{0%{transform:scale(1.08,.91)}70%{transform:scale(.98,1.02)}100%{transform:scale(1)}}@keyframes breathe{50%{transform:translateY(-1px)}}@keyframes sway{25%{transform:rotate(-2deg)}75%{transform:rotate(2deg)}}@media(prefers-reduced-motion:reduce){.pet .pet-visual{animation:none!important;transform:none!important}}
+.dormant .pet .pet-visual{animation-play-state:paused}@keyframes landing{0%{transform:scale(1.08,.91)}70%{transform:scale(.98,1.02)}100%{transform:scale(1)}}@keyframes breathe{50%{transform:translateY(-1px)}}@keyframes sway{25%{transform:rotate(-2deg)}75%{transform:rotate(2deg)}}
 </style>

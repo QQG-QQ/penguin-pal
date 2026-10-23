@@ -76,7 +76,7 @@ const toggles: { key: keyof Preferences; label: string }[] = [
       <p v-if="state.preferences.animationPack!=='builtin'&&!packs.some(p=>p.id===state.preferences.animationPack)" class="hint">原动画包暂不可用，当前显示内置企鹅。</p>
       <label class="bridge-toggle media-switch"><input type="checkbox" :checked="state.preferences.videoAnimations" @change="toggle('videoAnimations',$event)"/>播放连续视频</label>
       <small>减少动态或安全模式使用静态预览；隐藏时暂停视频。透明区域点击按预览图判断。</small>
-      <small v-if="systemReduced" class="hint">系统减少动态已开启，正常陪伴使用静态预览；连续动画随系统动画设置调整。</small>
+      <small v-if="systemReduced" class="hint">Windows 界面动画已关闭；企鹅动作仍按桌宠自己的“减少动态”和视频开关播放。</small>
       <div class="pack-controls"><button :disabled="!native||importing" @click="emit('importPack')">{{importing?'正在导入…':'导入动画包'}}</button><button :disabled="!native" @click="emit('refreshPacks')">刷新</button><button :disabled="!native" @click="emit('packFolder')">文件夹</button></div>
       <p class="hint">选择素材目录中的 manifest.json；不直接兼容 dsh-pet 配置。清单与所有素材放在同一目录，PNG 画布为 256 × 256。格式和示例随本版说明提供。</p>
     </div>

@@ -31,4 +31,4 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --lib live_output_probe -- --ignored --nocapture
 ```
 
-隔离的原生场景验收可使用 `--smoke --smoke-preview --smoke-music`；它使用独立状态目录并开启音乐律动，且只在这个显式预览内忽略系统减少动态。再加 `--smoke-music-simulated` 仅验证模拟拍点下的视频和灯条，不作为真实采集证据。普通启动不会生成模拟音乐。
+隔离的原生场景验收可使用 `--smoke --smoke-preview --smoke-music`；它使用独立状态目录并开启音乐律动。普通陪伴与预览都按桌宠自己的减少动态开关运行，不受 Windows 界面动画设置影响。再加 `--smoke-music-simulated` 仅验证模拟拍点下的视频和灯条，不作为真实采集证据。普通启动不会生成模拟音乐。
