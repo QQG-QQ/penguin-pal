@@ -26,8 +26,9 @@ export class MotionPicker {
   private last=new Map<string,string>()
   sample(pack:MediaPack|undefined,slot:string,now:number,random:number){
     const key=`${pack?.id??''}:${slot}`
-    // Rotate idle variants at a relaxed cadence. Explicit actions play once per request.
-    if(key!==this.key||(slot==='idle'&&now-this.started>12000)){
+    // Rotate only when another idle candidate exists; keep singleton loops running.
+    const rotate=slot==='idle'&&now-this.started>12000&&(pack?.clips.filter(c=>c.slot===slot&&c.weight>0).length??0)>1
+    if(key!==this.key||rotate){
       this.key=key;this.started=now
       this.revision++
       this.selected=pack?pickMotion(pack.clips,slot,this.last.get(key),random):undefined

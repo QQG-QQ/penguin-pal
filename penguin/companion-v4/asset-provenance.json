@@ -12,12 +12,13 @@
     "annoyed",
     "dizzy",
     "land",
-    "eat"
+    "eat",
+    "idle"
   ],
   "origins": [
     {
       "slot": "idle",
-      "origin": "0.5.4 real source video retained byte-for-byte"
+      "origin": "Original Doubao forward frames with reverse return, no duplicate endpoints; offline 0.9.4 loop closure"
     },
     {
       "slot": "blink",
@@ -121,10 +122,10 @@
     }
   ],
   "hashes": {
-    "motions.json": "819451a1cdaea375ba8f03d4f324a09aeeed9472717caa7f361e04d764635b3d",
+    "motions.json": "cbf864764129f761a3eb8abcfd04e33e16aaca77f0a2fb4188fe90ae367e761e",
     "artwork.json": "761a2b454f52216aee80e2b4ece8621573474efaf9d31e7787600aa5cdbaabaf",
     "idle.png": "c842da8e03f0ed342302a10fc9bf5cf11c055813121bc8a694167ca02d9ec2ed",
-    "idle.webm": "c87fd7f9526a0b44c11e3514e448309c133dfbcc41699763cd719fe0aaef5e9f",
+    "idle.webm": "3662bc1c77c1561bf215c72726220d753c522a36edbd5aee0c85b2b50bac115c",
     "idle-0.png": "c842da8e03f0ed342302a10fc9bf5cf11c055813121bc8a694167ca02d9ec2ed",
     "idle-1.png": "87583135ee41afb40f4acf02c79f210ede023c7085945f9b70df3a74d719a80a",
     "idle-2.png": "2fa2b001383e1a662e72d5ac568a9c0aa641b4bfc9de4a24011437b7b970eb57",
@@ -1208,5 +1209,51 @@
     "version": "0.5.8",
     "characterRedrawn": false,
     "transitionFrames": "Offline interpolation between original frames; body keeps source pixels after fixed scale and chroma key"
+  },
+  "idleLoop094": {
+    "method": "original forward frames followed by reverse frames without duplicate endpoints",
+    "sourceSha256": "c87fd7f9526a0b44c11e3514e448309c133dfbcc41699763cd719fe0aaef5e9f",
+    "sourceFrames": 82,
+    "fps": 24,
+    "frameCount": 162,
+    "durationMs": 6750.0,
+    "fallbackFrameMs": 482.14285714285717,
+    "frames": [
+      "idle-0.png",
+      "idle-1.png",
+      "idle-2.png",
+      "idle-3.png",
+      "idle-4.png",
+      "idle-5.png",
+      "idle-6.png",
+      "idle-7.png",
+      "idle-6.png",
+      "idle-5.png",
+      "idle-4.png",
+      "idle-3.png",
+      "idle-2.png",
+      "idle-1.png"
+    ],
+    "before": {
+      "frameCount": 82,
+      "internalMedianDelta": 0.5233166813850403,
+      "internalP95Delta": 1.2208510637283325,
+      "internalMaxDelta": 1.541771411895752,
+      "seamDelta": 5.821403503417969,
+      "cornerAlphaMax": 0
+    },
+    "after": {
+      "frameCount": 162,
+      "internalMedianDelta": 0.5306351780891418,
+      "internalP95Delta": 1.2045632600784302,
+      "internalMaxDelta": 1.569743275642395,
+      "seamDelta": 0.9245488047599792,
+      "cornerAlphaMax": 0
+    },
+    "ffmpegSha256": "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
+    "hashes": {
+      "idle.webm": "3662bc1c77c1561bf215c72726220d753c522a36edbd5aee0c85b2b50bac115c"
+    },
+    "characterRedrawn": false
   }
 }

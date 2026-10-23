@@ -38,6 +38,25 @@ function feet(pixels){
  return groups.sort((a,b)=>b.area-a.area)
 }
 const root=process.env.PENGUIN_GAIT_FIXTURE?pathToFileURL(process.env.PENGUIN_GAIT_FIXTURE.replace(/[\\/]?$/,'/')):new URL('../penguin/companion-v3/',import.meta.url)
+
+test('builtin idle PNG loop closes within an ordinary frame step without a pose flash',()=>{
+ const dir=new URL('../penguin/companion-v4/',import.meta.url)
+ const clip=JSON.parse(readFileSync(new URL('motions.json',dir),'utf8')).clips.find(c=>c.slot==='idle')
+ const frames=clip.frames.map(file=>rgba(new URL(file,dir)))
+ const delta=(a,b)=>{
+  let total=0
+  for(let i=0;i<a.length;i+=4)for(let c=0;c<3;c++){
+   const aa=a[i+3]/255,ba=b[i+3]/255
+   total+=Math.abs(a[i+c]*aa+190*(1-aa)-b[i+c]*ba-190*(1-ba))
+  }
+  return total/(256*256*3)
+ }
+ const steps=frames.slice(1).map((frame,i)=>delta(frames[i],frame)).sort((a,b)=>a-b)
+ const seam=delta(frames.at(-1),frames[0]),p95=steps[Math.floor((steps.length-1)*.95)]
+ assert.ok(seam<=p95,`loop seam ${seam.toFixed(3)} exceeds normal frame delta ${p95.toFixed(3)}`)
+ assert.ok(Math.abs(clip.durationMs-clip.frames.length*clip.frameMs)<.001)
+ for(const frame of frames)for(const i of [0,255,255*256,65535])assert.equal(frame[i*4+3],0,'transparent corners')
+})
 for(const [direction,sign] of [['right',1],['left',-1]])test(`${direction} gait exchanges support feet and lifts each foot in turn`,()=>{
  const rows=JSON.parse(readFileSync(new URL('motions.json',root),'utf8')),clip=rows.find(c=>c.slot===`walk-${direction}`)
  assert.equal(clip.loop,true);assert.equal(clip.frameMs,200);assert.equal(clip.frames.length,4)

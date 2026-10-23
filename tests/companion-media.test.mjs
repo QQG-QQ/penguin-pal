@@ -20,6 +20,17 @@ test('pack changes, idle rotation, frame loops and one-shot boundaries',()=>{
  assert.equal(player.sample({...pack,id:'two'},'idle',12500,0).frame,'b.png');assert.equal(player.sample(undefined,'idle',12600,0),undefined)
  player.reset();assert.equal(player.sample(pack,'idle',13000,0).clip.id,'a')
 })
+
+test('one eligible idle candidate keeps its phase and revision beyond the rotation interval',()=>{
+ const player=new media.MotionPicker(),pack={id:'single',clips:[clip('idle'),clip('disabled',0),{...clip('other'),slot:'happy'}]}
+ const first=player.sample(pack,'idle',0,0)
+ for(const time of [12001,24050,36000]){
+  const next=player.sample(pack,'idle',time,.9)
+  assert.equal(next.revision,first.revision);assert.equal(next.frame,first.clip.frames[Math.floor(time/100)%2])
+ }
+ player.reset();assert.ok(player.sample(pack,'idle',36001,0).revision>first.revision)
+ assert.equal(player.sample({...pack,id:'replacement'},'idle',36002,0).directory,undefined)
+})
 test('native task priorities and new greeting retain builtin fallbacks',()=>{
  assert.equal(animation.selectClip('greet','working',false,false,1).slot,'greet')
  assert.equal(animation.selectClip('idle','waiting',true,false,1).slot,'drag')

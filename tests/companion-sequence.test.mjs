@@ -9,6 +9,16 @@ const part=id=>({video:id+'.webm',poster:id+'.png',frames:[id+'0.png',id+'1.png'
 const clip=(id,loop=true,phases=true)=>({...part(id),id,slot:id,weight:1,loop,...(phases?{enter:part(id+'-in'),exit:part(id+'-out')}:{})})
 const pack={id:'builtin',clips:[clip('rest'),clip('talk'),clip('poke',false),clip('idle',true,false),clip('drag',true,false)]}
 const sample=(p,slot,now,options={})=>p.sample(pack,slot,now,0,{video:true,...options})
+
+test('a single idle video or PNG loop never reloads at twelve seconds',()=>{
+ for(const video of [true,false]){
+  const p=new MotionSequencer(),first=sample(p,'idle',0,{video})
+  for(const time of [12001,24100,36300]){
+   const current=sample(p,'idle',time,{video})
+   assert.equal(current.revision,first.revision);assert.equal(current.frame,time%200>=100?'idle1.png':'idle0.png')
+  }
+ }
+})
 test('native phase waits for actual end, then body; metadata duration includes all phases',()=>{const p=new MotionSequencer(),a=sample(p,'rest',0);assert.equal(a.phase,'enter');assert.equal(sample(p,'rest',1000).phase,'enter');p.ended(a.revision,1000);assert.equal(sample(p,'rest',1000).phase,'body');assert.equal(motionDuration(pack,'rest',0),700)})
 test('ordinary switch completes loop, exits, then starts target without hard cut',()=>{const p=new MotionSequencer();let s=sample(p,'rest',0);p.ended(s.revision,200);s=sample(p,'talk',250);assert.equal(s.clip.slot,'rest');assert.equal(s.phase,'body');assert.equal(s.clip.loop,false);p.ended(s.revision,400);s=sample(p,'talk',400);assert.equal(s.phase,'exit');p.ended(s.revision,600);s=sample(p,'talk',600);assert.equal(s.clip.slot,'talk');assert.equal(s.phase,'enter')})
 test('latest queued request wins, including returning to active while exiting',()=>{const p=new MotionSequencer();let s=sample(p,'rest',0);p.ended(s.revision,200);s=sample(p,'talk',250);p.ended(s.revision,400);s=sample(p,'rest',450);assert.equal(s.phase,'exit');p.ended(s.revision,600);s=sample(p,'rest',600);assert.equal(s.clip.slot,'rest');assert.equal(s.phase,'enter')})

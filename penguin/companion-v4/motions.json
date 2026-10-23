@@ -7,7 +7,7 @@
       "id": "idle",
       "slot": "idle",
       "weight": 1,
-      "frameMs": 427,
+      "frameMs": 482.14285714285717,
       "loop": true,
       "poster": "idle.png",
       "frames": [
@@ -18,10 +18,16 @@
         "idle-4.png",
         "idle-5.png",
         "idle-6.png",
-        "idle-7.png"
+        "idle-7.png",
+        "idle-6.png",
+        "idle-5.png",
+        "idle-4.png",
+        "idle-3.png",
+        "idle-2.png",
+        "idle-1.png"
       ],
       "video": "idle.webm",
-      "durationMs": 3417
+      "durationMs": 6750.0
     },
     {
       "id": "blink",
@@ -1293,7 +1299,7 @@
       "id": "drag",
       "slot": "drag",
       "weight": 1,
-      "frameMs": 427,
+      "frameMs": 482.14285714285717,
       "loop": true,
       "poster": "idle.png",
       "frames": [
@@ -1304,10 +1310,16 @@
         "idle-4.png",
         "idle-5.png",
         "idle-6.png",
-        "idle-7.png"
+        "idle-7.png",
+        "idle-6.png",
+        "idle-5.png",
+        "idle-4.png",
+        "idle-3.png",
+        "idle-2.png",
+        "idle-1.png"
       ],
       "video": "idle.webm",
-      "durationMs": 3417
+      "durationMs": 6750.0
     },
     {
       "id": "fall",
