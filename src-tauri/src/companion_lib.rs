@@ -17,4 +17,14 @@ mod companion_updates;
 #[cfg(not(feature = "legacy-assistant"))]
 mod companion_music;
 #[cfg(not(feature = "legacy-assistant"))]
+mod companion_sync;
+#[cfg(not(feature = "legacy-assistant"))]
+mod companion_sync_transport;
+#[cfg(not(feature = "legacy-assistant"))]
+mod companion_social;
+#[cfg(not(feature = "legacy-assistant"))]
+mod companion_chat;
+#[cfg(not(feature = "legacy-assistant"))]
+mod companion_history;
+#[cfg(not(feature = "legacy-assistant"))]
 pub use companion::run;

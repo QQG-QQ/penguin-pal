@@ -13,7 +13,7 @@ use std::{
 #[serde(rename_all = "lowercase")]
 pub enum MusicMode {
     #[default]
-    Auto,
+    #[serde(alias = "auto")]
     Audio,
     Off,
 }
@@ -262,13 +262,6 @@ mod platform {
     use super::*;
     use windows::{
         core::Result,
-        Media::{
-            Control::{
-                GlobalSystemMediaTransportControlsSessionManager as Sessions,
-                GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
-            },
-            MediaPlaybackType,
-        },
         Win32::{
             Media::Audio::*,
             System::{
@@ -426,44 +419,6 @@ mod platform {
             }
         }
     }
-    fn music_source(manager: &Sessions) -> Option<String> {
-        let sessions = manager.GetSessions().ok()?;
-        for session in sessions {
-            let Ok(info) = session.GetPlaybackInfo() else {
-                continue;
-            };
-            if info.PlaybackStatus().ok() != Some(Status::Playing) {
-                continue;
-            }
-            let Ok(source) = session.SourceAppUserModelId() else {
-                continue;
-            };
-            let source = source.to_string().to_lowercase();
-            let music =
-                info.PlaybackType().and_then(|p| p.Value()).ok() == Some(MediaPlaybackType::Music);
-            let known = [
-                "spotify",
-                "cloudmusic",
-                "qqmusic",
-                "foobar2000",
-                "musicbee",
-                "aimp",
-                "applemusic",
-                "zunemusic",
-            ];
-            if music || known.iter().any(|name| source.contains(name)) {
-                return Some(
-                    if music {
-                        "音乐播放器"
-                    } else {
-                        "已识别的音乐播放器"
-                    }
-                    .into(),
-                );
-            }
-        }
-        None
-    }
     pub(super) fn worker(
         control: Arc<Mutex<Control>>,
         snapshot: Arc<Mutex<Snapshot>>,
@@ -478,8 +433,6 @@ mod platform {
         {
             let mut capture: Option<Capture> = None;
             let mut analyzer = Analyzer::new(48000);
-            let mut sessions = None;
-            let mut source = None;
             let mut checked = Instant::now() - Duration::from_secs(10);
             let mut retry = Instant::now();
             let mut mode_was = MusicMode::Off;
@@ -497,8 +450,6 @@ mod platform {
                     .unwrap_or(MusicMode::Off);
                 if mode == MusicMode::Off {
                     capture = None;
-                    sessions = None;
-                    source = None;
                     mode_was = mode;
                     if let Ok(mut s) = snapshot.lock() {
                         *s = Snapshot::default();
@@ -513,14 +464,6 @@ mod platform {
                 }
                 if checked.elapsed() > Duration::from_secs(1) {
                     checked = Instant::now();
-                    if mode == MusicMode::Auto {
-                        if sessions.is_none() {
-                            sessions = Sessions::RequestAsync().and_then(|op| op.get()).ok();
-                        }
-                        source = sessions.as_ref().and_then(music_source);
-                    } else {
-                        source = Some("电脑播放声音".into());
-                    }
                     if let Some(c) = &capture {
                         if endpoint().and_then(|d| device_id(&d)).ok().as_deref()
                             != Some(c.device.as_str())
@@ -528,19 +471,6 @@ mod platform {
                             capture = None;
                         }
                     }
-                }
-                if source.is_none() {
-                    capture = None;
-                    analyzer = Analyzer::new(48000);
-                    if let Ok(mut s) = snapshot.lock() {
-                        *s = Snapshot {
-                            available: true,
-                            source: "等待音乐播放器；浏览器音乐可选音频跟随".into(),
-                            ..Snapshot::default()
-                        };
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
                 }
                 if capture.is_none() && Instant::now() >= retry {
                     match Capture::open() {
@@ -585,7 +515,12 @@ mod platform {
                     }
                     if let Ok(mut s) = snapshot.lock() {
                         *s = analyzer.output.clone();
-                        s.source = source.clone().unwrap_or_default();
+                        s.source = if s.active {
+                            "电脑播放声音"
+                        } else {
+                            "等待音乐或浏览器播放声音"
+                        }
+                        .into();
                     }
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -668,8 +603,17 @@ mod tests {
         }
     }
     #[test]
-    fn old_preferences_default_to_auto_and_unknown_mode_is_rejected() {
-        assert_eq!(MusicMode::default(), MusicMode::Auto);
+    fn old_preferences_migrate_to_audio_and_unknown_mode_is_rejected() {
+        assert_eq!(MusicMode::default(), MusicMode::Audio);
+        for legacy in ["auto", "audio"] {
+            let mode: MusicMode = serde_json::from_value(serde_json::json!(legacy)).unwrap();
+            assert_eq!(mode, MusicMode::Audio);
+            assert_eq!(serde_json::to_value(mode).unwrap(), "audio");
+        }
+        assert_eq!(
+            serde_json::from_str::<MusicMode>("\"off\"").unwrap(),
+            MusicMode::Off
+        );
         assert!(serde_json::from_str::<MusicMode>("\"execute\"").is_err());
         let s = MusicService::new();
         assert!(!s.poll(MusicMode::Off).active);

@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed,onBeforeUnmount,onMounted,ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import CompanionSync from './CompanionSync.vue'
+import type {SyncView} from '../lib/companionSync'
 const props=defineProps<{native:boolean}>()
-const emit=defineEmits<{close:[];safe:[boolean]}>()
+const emit=defineEmits<{close:[];safe:[boolean];sync:[SyncView,boolean]}>()
 interface Health {version:string;safeMode:boolean;crashStreak:number;restoredBackup:boolean;nodeAvailable:boolean;configuredHooks:number;scriptCurrent:boolean;bridge:{status:string;activeSessions:number;lastReceived:number};rejectedEvents:number;dataDirectory:string;legacyFileCount:number;metrics:{workingSetBytes:number|null;privateBytes:number|null;cpuMillis:number|null};logs:{at:number;event:string}[]}
 interface LegacyFile{id:string;name:string;kind:string;bytes:number}
 interface UpdateInfo{status:string;currentVersion:string;latestVersion:string|null;assetName:string|null;downloadable:boolean;message:string}
-const tab=ref<'status'|'data'|'updates'>('status'),health=ref<Health|null>(null),files=ref<LegacyFile[]>([])
+const tab=ref<'status'|'data'|'updates'|'sync'>('status'),health=ref<Health|null>(null),files=ref<LegacyFile[]>([])
 const selected=ref<string[]>([]),preview=ref(''),info=ref(''),error=ref(''),busy=ref(false),refreshing=ref(false),update=ref<UpdateInfo|null>(null),cpu=ref<number|null>(null)
 let timer:number|undefined,disposed=false,lastCpu:{time:number;value:number}|undefined
 const age=computed(()=>health.value?.bridge.lastReceived?new Date(health.value.bridge.lastReceived).toLocaleString():'尚未收到；配置存在不代表已获信任')
@@ -36,7 +38,7 @@ onBeforeUnmount(()=>{disposed=true;preview.value='';window.clearInterval(timer)}
 <template>
   <section class="diagnostics" aria-label="企鹅设置与诊断">
     <header><div><strong>企鹅工具箱</strong><small>Companion {{health?.version??'0.3.0'}}</small></div><button class="back" @click="emit('close')">返回</button></header>
-    <nav><button v-for="item in [{id:'status',label:'状态与恢复'},{id:'data',label:'旧资料导出'},{id:'updates',label:'软件更新'}] as const" :class="{active:tab===item.id}" @click="chooseTab(item.id)">{{item.label}}</button></nav>
+    <nav><button v-for="item in [{id:'status',label:'状态与恢复'},{id:'sync',label:'同步与数据'},{id:'data',label:'旧资料导出'},{id:'updates',label:'软件更新'}] as const" :class="{active:tab===item.id}" @click="chooseTab(item.id)">{{item.label}}</button></nav>
     <p v-if="!native" class="note">浏览器预览。诊断与旧资料操作仅在桌面版可用。</p>
     <div v-if="tab==='status'">
       <div v-if="health?.safeMode" class="warning"><strong>安全模式</strong><p>检测到连续异常退出，已临时关闭自主运动与环境感知。原设置已保留。</p><button :disabled="busy" @click="support('resetRecovery')">退出安全模式</button></div>
@@ -53,7 +55,8 @@ onBeforeUnmount(()=>{disposed=true;preview.value='';window.clearInterval(timer)}
       <div class="actions"><button :disabled="busy||!selected.length||!native" @click="exportSelected">导出所选（{{selected.length}}）</button><button :disabled="busy||!native" @click="support('openExports')">打开导出目录</button></div>
       <pre v-if="preview" class="preview">{{preview}}</pre>
     </div>
-    <div v-else>
+    <CompanionSync v-else-if="tab==='sync'&&native" :native="native" @changed="(value,apply)=>emit('sync',value,apply)"/>
+    <div v-else-if="tab==='updates'">
       <p class="note">只检查 PenguinPal Companion 正式发布包，不更新私有 Codex。手动联网检查，下载后必须通过 SHA-256；不会自动运行安装程序。</p>
       <div class="actions"><button :disabled="busy||!native" @click="checkUpdate">检查 Companion 更新</button><button :disabled="busy||!native" @click="support('openReleases')">打开发布页</button></div>
       <div v-if="update" class="update-info"><strong>{{update.message}}</strong><p>当前 {{update.currentVersion}}<template v-if="update.latestVersion"> · 已发布 {{update.latestVersion}}</template></p><small>{{update.assetName}}</small><button v-if="update.downloadable" :disabled="busy" @click="download">下载并校验</button></div>
@@ -65,4 +68,5 @@ onBeforeUnmount(()=>{disposed=true;preview.value='';window.clearInterval(timer)}
 
 <style scoped>
 .diagnostics{width:424px;max-height:calc(100vh - 16px);overflow:auto;padding:18px;background:#0b2b43fa;border:1px solid #31526b;color:#e6f5ff;border-radius:16px;box-shadow:0 8px 24px #03132155;font-size:12px;line-height:1.6;scrollbar-width:thin;scrollbar-color:#3f6680 transparent}header{display:flex;align-items:center;justify-content:space-between}header strong{font-size:18px}small{display:block;color:#a5c7db;font-size:10px}button{border:0;border-radius:8px;background:#1c4966;color:#edf8ff;padding:8px 11px;font:inherit;cursor:pointer}button:hover{background:#2b6487}button:disabled{opacity:.45;cursor:default}button:focus-visible,input:focus-visible{outline:2px solid #79d6fa;outline-offset:2px}.back{background:transparent}nav{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:16px 0}nav button{font-size:11px;padding:8px 2px}nav .active{background:#59bfe4;color:#072c43}.note{font-size:10px;color:#b1cbdd;line-height:1.8}.warning{background:#5b4127;color:#ffe3b9;padding:12px;border-radius:10px;font-size:11px}.warning p{margin:5px 0}.feedback{background:#194e56;color:#d5f4ed;padding:12px;border-radius:10px;overflow-wrap:anywhere}dl{display:grid;grid-template-columns:110px 1fr;gap:7px 10px}dt{color:#a4c8dc}dd{margin:0;overflow-wrap:anywhere}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}h3{font-size:13px;margin:20px 0 9px}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.metrics div{background:#143d58;border-radius:10px;padding:10px}.metrics b{font-size:14px;font-weight:600}.logs{max-height:180px;overflow:auto;font-size:10px;margin-bottom:10px}.logs div{display:flex;gap:10px;padding:4px;border-bottom:1px solid #ffffff0a}.logs time{color:#8eafc4}.legacy-list{max-height:280px;overflow:auto}.legacy-list>div{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 0;border-bottom:1px solid #ffffff15}.legacy-list label{display:flex;align-items:center;gap:8px;min-width:0}.legacy-list b{font-size:11px;font-weight:500;overflow-wrap:anywhere}.legacy-list input{accent-color:#59bfe4}.legacy-list button{font-size:10px}.preview{max-height:250px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#061f31;color:#d0e4f1;padding:12px;border-radius:10px;font-size:10px;user-select:text}.update-info{padding:14px;border-radius:10px;background:#163e56;margin:15px 0}.update-info button{display:block;margin-top:10px}.update-info p{margin:6px 0}
+nav{grid-template-columns:repeat(4,1fr)}
 </style>

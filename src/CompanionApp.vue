@@ -12,6 +12,8 @@ import djMetadata from '../penguin/music-dj/media.json'
 import { DragTrail, motionDuration, motionPackForSlot, springStep, type MediaPack } from './lib/companionMedia'
 import { MotionSequencer } from './lib/companionSequence'
 import CompanionDiagnostics from './components/CompanionDiagnostics.vue'
+import CompanionChat from './components/CompanionChat.vue'
+import type {ChatView,SyncView} from './lib/companionSync'
 import { computePetLayoutMetrics, isPetOpaqueHit, loadPetAlphaMask, type PetAlphaMask } from './lib/petArtwork'
 import { builtinMotionPack, companionArtwork } from './lib/companionArtwork'
 import { AnimationPlayer, selectClip } from './lib/companionAnimation'
@@ -24,6 +26,30 @@ const previewSuite=ref(false),previewAction=ref<string>(),previewPlan:string[]=[
 let previewTimer:number|undefined
 let previewTicks=0
 const state = ref(defaultCompanion(Date.now())), activity = ref<Activity>('idle')
+const syncView=ref<SyncView|null>(null),chatOpen=ref(false),chatSession=ref('')
+let chatTimer:number|undefined
+const chatGate=()=>({busy:busy.value||pressed,quiet:state.value.preferences.quiet||menu.value||safeMode.value,fullscreen:fullscreen.value,visible:visible.value&&!dockHidden.value})
+function receiveChat(value:ChatView){receiveSync(value.status);chatSession.value=value.session;if(value.reply)talk(value.reply.length>180?value.reply.slice(0,177)+'…':value.reply)}
+async function chatTick(){if(!native||disposed||previewGreeting.value)return;try{receiveChat(await invoke<ChatView>('companion_chat',{action:'tick',payload:chatGate()}))}catch{/* Manual chat shows connection errors. */}}
+async function openChat(){chatOpen.value=true;tools.value=false;await toggleMenu(true);if(native){try{receiveChat(await invoke<ChatView>('companion_chat',{action:'status',payload:null}))}catch(e){error.value=String(e)}}}
+let syncTimer:number|undefined,syncBusy=false
+function receiveSync(value:SyncView,apply=false){
+  syncView.value=value
+  if(value.mode==='server'||apply){
+    const pet=value.document.pet
+    state.value.energy=pet.energy;state.value.hunger=pet.hunger;state.value.affection=pet.affection
+    state.value.preferences.personality=pet.personality
+    if(apply)void save()
+  }
+}
+async function syncTick(){
+  if(!native||syncBusy||disposed)return
+  syncBusy=true
+  try{receiveSync(await invoke<SyncView>('companion_sync',{action:syncView.value?.mode==='server'?'sync':'status',payload:{manual:false}}))}
+  catch{try{receiveSync(await invoke<SyncView>('companion_sync',{action:'status',payload:null}))}catch{/* Existing pet stays usable; toolbox reports storage errors. */}}
+  finally{syncBusy=false}
+}
+function syncRecord(action:string,payload:unknown){if(native)void invoke<SyncView>('companion_sync',{action,payload}).then(value=>receiveSync(value)).catch(e=>{error.value='陪伴数据保存失败：'+String(e)})}
 const menu = ref(false), expanded = ref(false), food = ref(false), message = ref(''), error = ref('')
 const tools=ref(false),safeMode=ref(false),dock=ref<DockEdge>('none'),dockHidden=ref(false)
 const codexStatus = ref('idle'), lastEvent = ref(0), connected = ref(false), visible = ref(true)
@@ -118,6 +144,7 @@ function interact(action:CareAction) {
   const result=care(state.value,action,recent.filter(item=>item.action===action).length)
   state.value=result.state;recent.push({action,at:now});updateActivity(result.activity,action==='rest'?45000:3000,true)
   talk(result.message);nextActivity=now+20000;void save()
+  if(syncView.value?.mode==='server')syncRecord('care',{action})
 }
 async function openCodex() {
   if (!native){talk('桌面版会打开你现有的 Codex 聊天界面。');return}
@@ -171,7 +198,7 @@ async function layoutPanel() {
       await win.setPosition(new PhysicalPosition(Math.round(base.x),Math.round(base.y)))
       await win.setSize(new PhysicalSize(Math.round(w),Math.round(h)));stage.value={x:0,y:0};windowOrigin=base
     }else{
-      const pw=(tools.value?440:280)*scale,ph=Math.min((tools.value?740:expanded.value?800:440)*scale,workArea.bottom-workArea.top)
+      const pw=(tools.value||chatOpen.value?440:280)*scale,ph=Math.min((tools.value||chatOpen.value?740:expanded.value?800:440)*scale,workArea.bottom-workArea.top)
       const px=base.x+w+pw<=workArea.right?base.x+w-12*scale:Math.max(workArea.left,base.x-pw+12*scale)
       const py=Math.max(workArea.top,Math.min(workArea.bottom-ph,base.y))
       const left=Math.min(base.x,px),top=Math.min(base.y,py),right=Math.max(base.x+w,px+pw),bottom=Math.max(base.y+h,py+ph)
@@ -183,11 +210,12 @@ async function layoutPanel() {
   }catch(e){error.value=`面板布局失败：${String(e)}`}
   finally{layingOut=false}
 }
-async function toggleMenu(open=!menu.value){if(open)await showDock(false);menu.value=open;food.value=false;if(!open)tools.value=false;await layoutPanel();if(!open){await refreshGeometry();dockHideAt=Date.now()+1600}}
-async function openTools(){await showDock(false);tools.value=true;menu.value=true;await layoutPanel()}
+async function toggleMenu(open=!menu.value){if(open)await showDock(false);menu.value=open;food.value=false;if(!open){tools.value=false;chatOpen.value=false;}await layoutPanel();if(!open){await refreshGeometry();dockHideAt=Date.now()+1600}}
+async function openTools(){await save();await showDock(false);tools.value=true;chatOpen.value=false;menu.value=true;await layoutPanel()}
 async function closeTools(){tools.value=false;await layoutPanel()}
 async function expandPanel(value:boolean){expanded.value=value;await layoutPanel()}
 async function preferencesChanged(patch:Partial<Preferences>) {
+  if(patch.personality!==undefined)syncRecord('personality',{value:patch.personality})
   if(patch.animationPack!==undefined)patch={...patch,animationPack:canonicalAnimationPack(patch.animationPack)}
   const wasOpen=menu.value,resize=patch.size!==undefined
   if(resize||patch.edgeDock===false){await showDock(false);dock.value='none';dockHome=undefined;dockHidden.value=false;state.value.dock='none'}
@@ -278,7 +306,8 @@ async function poll(){
       await updateHitTest()
     }
     if(hiddenForFullscreen.value)message.value=''
-    if(shown&&context.value!==lastContext&&Date.now()>nextContext&&!busy.value&&!pressed&&!menu.value){if(context.value!=='quiet')talk(localLine(state.value.preferences.personality,context.value,Math.random()));nextContext=Date.now()+600000}lastContext=context.value
+    if(native&&!previewGreeting.value)void invoke('companion_chat',{action:'gate',payload:chatGate()}).catch(()=>{})
+    if(!syncView.value?.document.social?.proactive&&shown&&context.value!==lastContext&&Date.now()>nextContext&&!busy.value&&!pressed&&!menu.value&&(syncView.value?.mode!=='server'||(syncView.value.active&&Date.now()-syncView.value.lastSync<45000))){if(context.value!=='quiet')talk(localLine(state.value.preferences.personality,context.value,Math.random()));nextContext=Date.now()+600000}lastContext=context.value
     if(pressed&&Date.now()-heldAt>1000&&!data.desktop.leftButtonDown)void release()
     if(shouldIdleRest(data.desktop.idleSeconds,Date.now(),actionUntil,busy.value||pressed||menu.value,activity.value))updateActivity('rest',30000)
   }catch{connected.value=false;codexStatus.value='idle';surfaces=[];fullscreen.value=false}finally{inPoll=false}
@@ -298,7 +327,7 @@ async function frame(){
   const now=performance.now(),elapsed=(now-lastFrame)/1000,dt=Math.min(.05,elapsed);lastFrame=now;inFrame=true
   if(previewAction.value==='motion')previewTicks++
   try{
-    advanceNeeds(state.value,elapsed,activity.value==='rest')
+    if(syncView.value?.mode!=='server')advanceNeeds(state.value,elapsed,activity.value==='rest')
     const eligible=musicEligible(),wantsMusic=eligible&&music.value.active&&now-musicReceived<500
     const wasMusic=musicScene.value.showing
     musicClock.value.step(music.value,elapsed,!musicScene.value.showing)
@@ -356,7 +385,7 @@ async function frame(){
       const rhythm=state.value.preferences.rhythm==='calm'?2:state.value.preferences.rhythm==='lively'?.65:1
       nextActivity=Date.now()+(25000+Math.random()*30000)*rhythm
     }
-    if(Date.now()>nextLine&&!busy.value&&!pressed&&!menu.value&&!dockHidden.value&&!fullscreen.value){talk(state.value.hunger>75?'小鱼可以留一点给我吗？':localLine(state.value.preferences.personality,context.value,Math.random()));nextLine=Date.now()+300000+Math.random()*600000}
+    if(!syncView.value?.document.social?.proactive&&Date.now()>nextLine&&!busy.value&&!pressed&&!menu.value&&!dockHidden.value&&!fullscreen.value&&(syncView.value?.mode!=='server'||(syncView.value.active&&Date.now()-syncView.value.lastSync<45000))){talk(state.value.hunger>75?'小鱼可以留一点给我吗？':localLine(state.value.preferences.personality,context.value,Math.random()));nextLine=Date.now()+300000+Math.random()*600000}
   }catch{cancelDrag();attached=undefined;updateActivity('idle');nextActivity=Date.now()+60000;error.value='移动已暂停，仍可打开 Codex。'}finally{inFrame=false}
 }
 async function tick(){await frame();if(!disposed)tickTimer=window.setTimeout(()=>{void tick()},frameDelay(!visible.value||hiddenForFullscreen.value||dockHidden.value,dragging.value||airborne.value||activity.value==='walk'||!!attached||musicScene.value.showing,activity.value!=='idle'||busy.value))}
@@ -368,6 +397,9 @@ onMounted(async()=>{
     if(native){
       previewGreeting.value=await invoke<boolean>('companion_preview_mode');previewPlan.push(...await invoke<string[]>('companion_preview_plan'))
       const loaded=await invoke<CompanionState>('companion_load');state.value=recoverNeeds(loaded,Date.now());
+      receiveSync(await invoke<SyncView>('companion_sync',{action:'status',payload:null}))
+      void syncTick();syncTimer=window.setInterval(()=>{void syncTick()},15000)
+      chatTimer=window.setInterval(()=>{void chatTick()},15000)
       if(loaded.preferences.animationPack!==state.value.preferences.animationPack)await invoke('companion_save',{state:JSON.parse(JSON.stringify(state.value))});
       await refreshPacks();const win=getCurrentWindow()
       if(previewGreeting.value)await win.show()
@@ -387,23 +419,24 @@ onMounted(async()=>{
     saveTimer=window.setInterval(()=>{void save()},30000);hitTimer=window.setInterval(()=>{void updateHitTest()},100)
   }catch(e){error.value=`初始化失败：${String(e)}`}
 })
-onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',{enabled:false}).catch(()=>{});cancelDrag();[tickTimer,pollTimer,saveTimer,hitTimer,musicTimer].forEach(t=>window.clearTimeout(t));window.clearTimeout(clearMessageTimer);window.clearTimeout(codexTimer);window.clearTimeout(previewTimer);motionQuery?.removeEventListener('change',motionChanged);unlisten?.()})
+onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',{enabled:false}).catch(()=>{});cancelDrag();[tickTimer,pollTimer,saveTimer,hitTimer,musicTimer,syncTimer,chatTimer].forEach(t=>window.clearTimeout(t));window.clearTimeout(clearMessageTimer);window.clearTimeout(codexTimer);window.clearTimeout(previewTimer);motionQuery?.removeEventListener('change',motionChanged);unlisten?.()})
 </script>
 
 <template>
   <main class="companion" :class="{still, suppressed:hiddenForFullscreen, dormant:!visible||dockHidden||hiddenForFullscreen}" @contextmenu.prevent="toggleMenu()" @keydown.esc="toggleMenu(false)">
     <div class="pet-stage" :style="stageStyle">
-      <div v-if="message" class="speech" role="status"><span>● 企鹅</span><p>{{message}}</p></div>
+      <div v-if="message" class="speech" role="button" tabindex="0" aria-label="打开气泡聊天" @click="openChat" @keydown.enter="openChat" @keydown.space.prevent="openChat"><span>● 企鹅</span><p>{{message}}</p></div>
       <button v-else-if="safeMode||busy||codexStatus==='ended'||codexStatus==='interrupted'" class="codex-marker" @click="safeMode?openTools():openCodex"><i :class="codexStatus"></i>{{safeMode?'安全模式 · 查看诊断':presentation.label}}</button>
       <div class="pet" :class="[activity,{music:musicScene.showing,dragging:dragging&&moved,held:dragging&&!moved,airborne}]" @pointerdown="pointerDown" @pointerup="release" @pointercancel="release()" @lostpointercapture="release()">
         <div ref="img" class="pet-visual" :style="{opacity:musicScene.opacity}"><CompanionDJ v-if="musicScene.showing" :clock="musicClock" :paused="still||!visible||dockHidden||hiddenForFullscreen" :video-enabled="state.preferences.videoAnimations&&!djFailed" :probe="previewGreeting" @verified="verifyPreview" @failed="djFailed=true"/><CompanionSprite v-else :src="artwork.src" :alt="artwork.alt" :video="video" :request="media?.revision" :loop="media?.clip.loop??true" :paused="still||!visible||dockHidden||hiddenForFullscreen" :probe="previewGreeting" @verified="verifyPreview" @playing="videoPlaying" @ended="videoEnded" @failed="videoFailed" @image-failed="imageFailed"/></div>
       </div>
-      <div v-if="hovered&&!dockHidden&&!menu&&!pressed&&!state.preferences.passthrough" class="pet-tools"><button @click.stop="openCodex" title="在现有 Codex 中聊天">Codex ↗</button><button @click.stop="toggleMenu(true)" aria-label="打开快速控制">···</button></div>
+      <div v-if="hovered&&!dockHidden&&!menu&&!pressed&&!state.preferences.passthrough" class="pet-tools"><button @click.stop="openChat" title="和企鹅聊聊">聊聊</button><button @click.stop="openCodex" title="在现有 Codex 中聊天">Codex ↗</button><button @click.stop="toggleMenu(true)" aria-label="打开快速控制">···</button></div>
       <div v-if="food" class="food-picker"><strong>给企鹅一点小鱼</strong><p>饥饿 {{Math.round(state.hunger)}} · 体力 {{Math.round(state.energy)}}</p><button @click="interact('feed');food=false">喂小鱼</button><button @click="food=false">下次再喂</button></div>
     </div>
     <div v-if="menu" class="panel-host" :style="{left:`${panel.x}px`,top:`${panel.y}px`}" @contextmenu.stop.prevent>
-      <CompanionDiagnostics v-if="tools" :native="native" @close="closeTools" @safe="setSafety"/>
-      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
+      <CompanionChat v-if="chatOpen" :native="native" :view="syncView" :session="chatSession" @close="toggleMenu(false)" @received="receiveChat" @tools="openTools"/>
+      <CompanionDiagnostics v-else-if="tools" :native="native" @close="closeTools" @safe="setSafety" @sync="receiveSync"/>
+      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @chat="openChat" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
     </div>
     <p v-if="error" class="notice" role="alert" @click="error=''">{{error}}</p>
   </main>
@@ -413,6 +446,6 @@ onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',
 .pet.music .pet-visual{animation:none!important}
 :root{font-family:'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;color:#173c56}*{box-sizing:border-box}body{margin:0;background:transparent;overflow:hidden}.companion{position:relative;width:100vw;height:100vh;user-select:none}.pet-stage{position:absolute;width:280px;height:290px;transform-origin:0 0}.pet{position:absolute;left:15px;top:40px;width:250px;height:250px;touch-action:none;cursor:grab}.pet .pet-visual{width:250px;height:250px;object-fit:contain;pointer-events:none;transform-origin:50% 90%}.pet.idle .pet-visual,.pet.rest .pet-visual{animation:breathe 5s ease-in-out infinite}.pet.held .pet-visual{transform:scale(.97,1.02)}.pet.land .pet-visual{animation:landing .4s ease-out}.pet.dragging{cursor:grabbing}.pet.dragging .pet-visual{transform:rotate(-3deg)}.pet.dizzy .pet-visual{animation:sway .8s ease-in-out infinite}.still .pet .pet-visual{animation:none!important;transform:none!important}
 button{font:inherit;cursor:pointer}.speech{position:absolute;top:0;left:16px;right:16px;background:#f3fafff7;border-radius:15px;padding:9px 13px;z-index:3;box-shadow:0 3px 12px #03132122;pointer-events:auto}.speech:after{content:'';position:absolute;bottom:-7px;left:48%;border-left:8px solid transparent;border-right:8px solid transparent;border-top:8px solid #f3faff}.speech span{color:#36a5d1;font-size:10px;font-weight:700}.speech p{margin:4px 0 0;font-size:12px;font-weight:600;line-height:1.5}
-.codex-marker{position:absolute;top:10px;left:50%;transform:translateX(-50%);white-space:nowrap;border:1px solid #bdd9e9;border-radius:14px;background:#edf8fff2;color:#194460;font-size:10px;padding:5px 10px;z-index:2}.codex-marker i{display:inline-block;width:6px;height:6px;background:#36a5d1;border-radius:50%;margin-right:5px}.codex-marker i.waiting{background:#dc9d39}.codex-marker i.ended{background:#4aaf8e}.pet-tools{position:absolute;bottom:1px;left:70px;display:flex;gap:6px;z-index:3}.pet-tools button{border:1px solid #8fb4c9;border-radius:12px;background:#eef9ffed;color:#194460;font-size:10px;padding:4px 10px}.panel-host{position:absolute;z-index:8}.notice{position:absolute;bottom:8px;left:8px;max-width:260px;max-height:125px;overflow:auto;margin:0;padding:11px;background:#fff4ddf7;color:#72521c;border:1px solid #d9bd83;border-radius:12px;z-index:20;font-size:11px;cursor:pointer;line-height:1.5}.food-picker{position:absolute;left:15px;right:15px;top:50px;padding:15px;border-radius:15px;background:#0c2c43f7;color:#e7f5ff;z-index:4;box-shadow:0 4px 20px #03132144}.food-picker p{font-size:11px;color:#b1d3e7}.food-picker button{border:0;border-radius:9px;background:#55b9df;color:#062a42;padding:8px 12px;margin-right:6px}.food-picker button:last-child{background:#214b64;color:#e7f5ff}.suppressed{visibility:hidden}
+.codex-marker{position:absolute;top:10px;left:50%;transform:translateX(-50%);white-space:nowrap;border:1px solid #bdd9e9;border-radius:14px;background:#edf8fff2;color:#194460;font-size:10px;padding:5px 10px;z-index:2}.codex-marker i{display:inline-block;width:6px;height:6px;background:#36a5d1;border-radius:50%;margin-right:5px}.codex-marker i.waiting{background:#dc9d39}.codex-marker i.ended{background:#4aaf8e}.pet-tools{position:absolute;bottom:1px;left:40px;display:flex;gap:6px;z-index:3}.pet-tools button{border:1px solid #8fb4c9;border-radius:12px;background:#eef9ffed;color:#194460;font-size:10px;padding:4px 10px}.panel-host{position:absolute;z-index:8}.notice{position:absolute;bottom:8px;left:8px;max-width:260px;max-height:125px;overflow:auto;margin:0;padding:11px;background:#fff4ddf7;color:#72521c;border:1px solid #d9bd83;border-radius:12px;z-index:20;font-size:11px;cursor:pointer;line-height:1.5}.food-picker{position:absolute;left:15px;right:15px;top:50px;padding:15px;border-radius:15px;background:#0c2c43f7;color:#e7f5ff;z-index:4;box-shadow:0 4px 20px #03132144}.food-picker p{font-size:11px;color:#b1d3e7}.food-picker button{border:0;border-radius:9px;background:#55b9df;color:#062a42;padding:8px 12px;margin-right:6px}.food-picker button:last-child{background:#214b64;color:#e7f5ff}.suppressed{visibility:hidden}
 .dormant .pet .pet-visual{animation-play-state:paused}@keyframes landing{0%{transform:scale(1.08,.91)}70%{transform:scale(.98,1.02)}100%{transform:scale(1)}}@keyframes breathe{50%{transform:translateY(-1px)}}@keyframes sway{25%{transform:rotate(-2deg)}75%{transform:rotate(2deg)}}@media(prefers-reduced-motion:reduce){.pet .pet-visual{animation:none!important;transform:none!important}}
 </style>

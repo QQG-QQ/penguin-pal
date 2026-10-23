@@ -4,7 +4,7 @@ import type { MediaPack } from '../lib/companionMedia'
 import type { Activity, CareAction, CompanionState, Preferences } from '../lib/companionCore'
 const props = defineProps<{ state: CompanionState; status: string; connection: string; expanded: boolean; packs:MediaPack[]; native:boolean; importing:boolean; systemReduced:boolean; musicStatus:string }>()
 const emit = defineEmits<{
-  care: [CareAction]; action: [Activity]; codex: []; close: []; hide: []; quit: []; install: []
+  care: [CareAction]; action: [Activity]; codex: []; chat: []; close: []; hide: []; quit: []; install: []
   preference: [Partial<Preferences>]; expand: [boolean]; snap: []; tools: []; importPack:[]; refreshPacks:[]; packFolder:[]
 }>()
 const privacy = ref(false),tab=ref<'home'|'actions'|'media'>('home'),category=ref('互动')
@@ -35,7 +35,7 @@ const toggles: { key: keyof Preferences; label: string }[] = [
     <nav class="tabs" aria-label="控制分类"><button v-for="(label,key) in {home:'陪伴',actions:'动作',media:'素材'}" :key="key" :class="{selected:tab===key}" @click="showTab(key)">{{label}}</button></nav>
     <template v-if="tab==='home'">
     <div class="quick-actions">
-      <button @click="emit('care', 'feed')">投喂</button><button @click="emit('codex')">Codex</button>
+      <button @click="emit('care', 'feed')">投喂</button><button @click="emit('chat')">聊聊</button>
       <button @click="emit('action', 'happy')">开心</button><button @click="emit('care', 'rest')">休息</button>
     </div>
     <div class="rule"></div><label class="caption">移动</label>
@@ -43,10 +43,9 @@ const toggles: { key: keyof Preferences; label: string }[] = [
       <button v-for="(label, mode) in { wander: '散步', follow: '跟随', still: '静止' }" :key="mode"
         :class="{ selected: props.state.preferences.movement === mode }" :aria-pressed="props.state.preferences.movement === mode" @click="movement(mode)">{{ label }}</button>
     </div>
-    <div class="panel-footer"><button @click="emit('expand', !expanded)">{{ expanded ? '收起设置' : '更多设置' }}</button><button @click="emit('tools')">工具箱</button><button @click="emit('hide')">隐藏</button></div>
-    <div class="rule"></div><label class="caption" for="music-mode">音乐打碟 · 双彩灯</label>
-    <select id="music-mode" :value="state.preferences.musicMode" @change="patch({musicMode:($event.target as HTMLSelectElement).value as Preferences['musicMode']})"><option value="auto">自动识别音乐</option><option value="audio">音频跟随（含浏览器）</option><option value="off">关闭</option></select>
-    <small role="status">{{musicStatus}}</small><small>关闭面板后开始律动。自动模式识别音乐播放器；浏览器未识别时选音频跟随，此时人声、游戏也可能触发。</small>
+    <div class="panel-footer"><button @click="emit('expand', !expanded)">{{ expanded ? '收起设置' : '更多设置' }}</button><button @click="emit('tools')">工具箱</button><button @click="emit('codex')">Codex ↗</button><button @click="emit('hide')">隐藏</button></div>
+    <div class="rule"></div><label class="bridge-toggle"><input id="music-mode" type="checkbox" :checked="state.preferences.musicMode!=='off'" @change="patch({musicMode:($event.target as HTMLInputElement).checked?'audio':'off'})" />音乐打碟 · 双彩灯</label>
+    <small role="status">{{musicStatus}}</small><small>关闭面板后，自动跟随播放器和浏览器的声音律动；暂停或静音后停止。持续人声、游戏声音也可能触发。</small>
     <div v-if="expanded" class="advanced">
       <div class="rule"></div><label class="caption">大小</label>
       <div class="choices"><button v-for="item in [{label:'小',value:.8},{label:'中',value:1},{label:'大',value:1.2}]" :key="item.value" :class="{ selected: state.preferences.size === item.value }" @click="patch({ size: item.value })">{{ item.label }}</button></div>
@@ -58,7 +57,7 @@ const toggles: { key: keyof Preferences; label: string }[] = [
       <div class="rule"></div><label class="bridge-toggle"><input type="checkbox" :checked="state.preferences.codexEvents" @change="toggle('codexEvents', $event)" />跟随 Codex 工作状态</label>
       <button class="install" @click="emit('install')">安装 / 更新 Codex 联动</button><small>{{ connection }}</small>
       <div class="utilities"><button @click="emit('snap')">回到屏幕内</button><button @click="privacy = !privacy">隐私</button><button class="danger" @click="emit('quit')">退出</button></div>
-      <p v-if="privacy" class="privacy">聊天、语音与长期记忆由现有 Codex 管理。场景感知仅在本地使用进程类别、空闲和全屏状态；不读标题、不截图。事件桥只保留匿名状态元数据。</p>
+      <p v-if="privacy" class="privacy">聊天与语音沿用 Codex。陪伴记忆和近期对话可在工具箱选择本地保存或服务器同步。场景感知仅使用进程类别、空闲与全屏状态；不读标题、不截图。</p>
     </div>
     </template>
     <div v-else-if="tab==='actions'" class="motion-library">

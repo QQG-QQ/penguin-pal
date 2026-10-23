@@ -30,3 +30,7 @@ Thumbs.db
 .vscode/
 .idea/
 .codex-bootstrap-backups/
+
+# Python sync protocol test caches
+__pycache__/
+*.py[cod]

@@ -1,8 +1,9 @@
-// Only allowlisted lifecycle metadata leaves stdin. Never log or store raw payloads.
+// Lifecycle metadata plus separately enabled visible-message capture. Never store raw hook payloads.
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, unlink, writeFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { capture } from './conversation-events.mjs'
 
 export const events = new Set(['UserPromptSubmit', 'PermissionRequest', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd'])
 export function sanitize(input, at = Date.now()) {
@@ -20,9 +21,10 @@ export function sanitize(input, at = Date.now()) {
   return result
 }
 export async function emit(root, input) {
-  if (!root || (await readFile(join(root, 'bridge-enabled.json'), 'utf8')).trim() !== 'true') return
+  const context = await capture(root, input).catch(() => undefined)
+  if (!root || (await readFile(join(root, 'bridge-enabled.json'), 'utf8')).trim() !== 'true') return context
   const event = sanitize(input)
-  if (!event) return
+  if (!event) return context
   const dir = join(root, 'events')
   await mkdir(dir, { recursive: true })
   const files = (await readdir(dir)).filter(name => /^[0-9]+-[a-f0-9-]+\.json$/.test(name)).sort()
@@ -34,6 +36,7 @@ export async function emit(root, input) {
   // Concurrent hooks can all see the same pre-write count. Prune after publishing too.
   const published = (await readdir(dir)).filter(name => /^[0-9]+-[a-f0-9-]+\.json$/.test(name)).sort()
   for (const file of published.slice(0, Math.max(0, published.length - 128))) await unlink(join(dir, file)).catch(() => {})
+  return context
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   let bytes = 0, chunks = []
@@ -43,6 +46,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       if (bytes > 1048576) { chunks = []; break }
       chunks.push(chunk)
     }
-    if (bytes <= 1048576) await emit(process.argv[2], JSON.parse(Buffer.concat(chunks).toString('utf8')))
+    if (bytes <= 1048576) {
+      const context = await emit(process.argv[2], JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      if (context) process.stdout.write(JSON.stringify(context))
+    }
   } catch { /* Pet failures never block Codex and never echo private hook payloads. */ }
 }

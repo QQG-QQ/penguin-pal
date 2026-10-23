@@ -1,6 +1,6 @@
 [package]
 name = "penguin-pal"
-version = "0.6.1"
+version = "0.9.1"
 description = "AI Desktop Pet Assistant"
 authors = ["PenguinPal Team"]
 edition = "2021"
@@ -21,7 +21,10 @@ tauri-plugin-shell = { version = "2.0", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = { version = "0.8", optional = true }
-uuid = { version = "1.0", features = ["v4"] , optional = true }
+uuid = { version = "1.0", features = ["v4"] }
+regex = "1"
+ssh2 = "0.9.6"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 base64 = "0.22"
 # === Whisper 语音识别依赖 ===
@@ -33,16 +36,16 @@ futures-util = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["sync", "rt", "macros"] , optional = true }
 rand = { version = "0.8", optional = true }
 sha2 = { version = "0.10" }
-chrono = { version = "0.4", features = ["clock", "serde"] , optional = true }
+chrono = { version = "0.4", features = ["clock", "serde"] }
 
 
 [features]
 default = ["custom-protocol"]
-legacy-assistant = ["dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-shell", "dep:toml", "dep:uuid", "dep:whisper-rs", "dep:cpal", "dep:ringbuf", "dep:parking_lot", "dep:futures-util", "dep:tokio", "dep:rand", "dep:chrono"]
+legacy-assistant = ["dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-shell", "dep:toml", "dep:whisper-rs", "dep:cpal", "dep:ringbuf", "dep:parking_lot", "dep:futures-util", "dep:tokio", "dep:rand"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
 tempfile = "3.10"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.3", features = ["Foundation", "Media_Control", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_WinRT"] }
+windows = { version = "0.61.3", features = ["Foundation", "Win32_Security_Credentials", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_WinRT"] }

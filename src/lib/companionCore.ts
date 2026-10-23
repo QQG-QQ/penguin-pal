@@ -6,7 +6,7 @@ export interface Preferences {
   passthrough: boolean; autostart: boolean; personality: 'gentle' | 'playful' | 'quiet' | 'warm'
   edgeDock: boolean; autoHide: boolean; notifications: boolean
   animationPack:string; videoAnimations:boolean; springDrag:boolean; statusAnimations:boolean
-  musicMode:'auto'|'audio'|'off'
+  musicMode:'audio'|'off'
 }
 export interface CompanionState {
   schema: number; energy: number; hunger: number; affection: number; savedAt: number
@@ -24,7 +24,7 @@ export const defaultCompanion = (now: number): CompanionState => ({ schema: 1, e
     surfaces: true, awareness: false, reducedMotion: false, quiet: false, codexEvents: true,
     movement: 'still', size: 1, rhythm: 'balanced', walkSpeed: 55, hoverPause: true,
     topmost: true, fullscreenHide: true, passthrough: false, autostart: false, personality: 'gentle',
-    edgeDock: true, autoHide: true, notifications: true, animationPack:'builtin',videoAnimations:true,springDrag:true,statusAnimations:true,musicMode:'auto' } })
+    edgeDock: true, autoHide: true, notifications: true, animationPack:'builtin',videoAnimations:true,springDrag:true,statusAnimations:true,musicMode:'audio' } })
 const clamp = (v: number, min = 0, max = 100) => Math.min(max, Math.max(min, v))
 
 const mergedBuiltinPacks = new Set(['penguin-greeting-video','doubao-walk-right-20261021','doubao-walk-pair-20261021','doubao-core-20261021','doubao-gray-20261021'])
@@ -33,7 +33,7 @@ export const canonicalAnimationPack = (id:string) => isMergedBuiltinPack(id)?'bu
 
 export function recoverNeeds(state: CompanionState, now: number): CompanionState {
   const hours = clamp((now - state.savedAt) / 3600000, 0, 24)
-  return { ...state, dock: state.dock ?? 'none', preferences: { ...defaultCompanion(now).preferences, ...state.preferences, animationPack:canonicalAnimationPack(state.preferences.animationPack??'builtin') }, energy: clamp(state.energy + hours * 2), hunger: clamp(state.hunger + hours * 2),
+  return { ...state, dock: state.dock ?? 'none', preferences: { ...defaultCompanion(now).preferences, ...state.preferences, musicMode:state.preferences.musicMode==='off'?'off':'audio', animationPack:canonicalAnimationPack(state.preferences.animationPack??'builtin') }, energy: clamp(state.energy + hours * 2), hunger: clamp(state.hunger + hours * 2),
     affection: clamp(state.affection - hours / 4), savedAt: now }
 }
 export function care(state: CompanionState, action: CareAction, recentCount = 0) {

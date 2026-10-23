@@ -7,6 +7,22 @@ const source=readFileSync(new URL('../src/lib/companionMusic.ts',import.meta.url
 const code=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText
 const {musicAllowed,musicRate,MusicScene,MusicClock,silentMusic}=await import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'))
 const normal={enabled:true,reduced:false,quiet:false,visible:true,hidden:false,codex:'idle',pressed:false,falling:false,panel:false,manual:false,activity:'idle'}
+const coreSource=readFileSync(new URL('../src/lib/companionCore.ts',import.meta.url),'utf8')
+const coreCode=ts.transpileModule(coreSource,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText
+const {defaultCompanion,recoverNeeds}=await import('data:text/javascript;base64,'+Buffer.from(coreCode).toString('base64'))
+
+test('music uses one enabled mode and migrates old preferences while preserving off and other settings',()=>{
+ assert.equal(defaultCompanion(1000).preferences.musicMode,'audio')
+ for(const [legacy,canonical] of [['auto','audio'],['audio','audio'],['off','off'],[undefined,'audio']]){
+  const state=defaultCompanion(1000)
+  state.preferences={...state.preferences,musicMode:legacy,quiet:true,walkSpeed:35}
+  const restored=recoverNeeds(state,1000)
+  assert.equal(restored.preferences.musicMode,canonical)
+  assert.equal(restored.preferences.quiet,true)
+  assert.equal(restored.preferences.walkSpeed,35)
+  assert.equal(recoverNeeds(JSON.parse(JSON.stringify(restored)),1000).preferences.musicMode,canonical)
+ }
+})
 
 test('music yields to physics, direct interaction and every Codex feedback state',()=>{
  assert.equal(musicAllowed(normal),true)

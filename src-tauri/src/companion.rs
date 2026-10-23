@@ -105,7 +105,7 @@ impl Default for Preferences {
             video_animations: true,
             spring_drag: true,
             status_animations: true,
-            music_mode: MusicMode::Auto,
+            music_mode: MusicMode::Audio,
         }
     }
 }
@@ -441,6 +441,7 @@ fn companion_load(window: WebviewWindow, store: State<Mutex<Store>>) -> Result<P
 fn companion_save(
     window: WebviewWindow,
     store: State<Mutex<Store>>,
+    sync: State<crate::companion_sync::Service>,
     mut state: PetState,
 ) -> Result<(), String> {
     main_only(&window)?;
@@ -461,6 +462,7 @@ fn companion_save(
         return Err(error);
     }
     store.runtime.pulse(now())?;
+    sync.local_pet(&serde_json::to_value(&state).map_err(|_| "无法编码宠物状态。")?)?;
     store.state = state;
     Ok(())
 }
@@ -963,6 +965,7 @@ fn install_hooks(root: &Path) -> Result<String, String> {
     if current.as_ref() != previous.as_ref() {
         return Err("hooks.json 在安装期间发生变化，请重新安装联动".into());
     }
+    atomic_write(&root.join("conversation-events.mjs"), include_bytes!("../resources/companion/conversation-events.mjs"))?;
     atomic_write(
         &script,
         include_bytes!("../resources/companion/codex-events.mjs"),
@@ -1055,6 +1058,7 @@ pub fn run() {
                 companion_runtime::record(&root, "state.recovered_backup", now());
             }
             let crash_root = root.clone();
+            app.manage(crate::companion_sync::Service::new(&root, serde_json::to_value(&state)?).map_err(std::io::Error::other)?);
             let previous = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
                 companion_runtime::record(&crash_root, "panic", now());
@@ -1070,6 +1074,7 @@ pub fn run() {
                 update: None,
             }));
             app.manage(MusicService::new());
+            app.manage(crate::companion_chat::ChatService::new());
             let show = MenuItem::with_id(app, "show", "显示/隐藏企鹅", true, None::<&str>)?;
             let controls = MenuItem::with_id(app, "controls", "快速控制", true, None::<&str>)?;
             let codex = MenuItem::with_id(app, "codex", "打开 Codex", true, None::<&str>)?;
@@ -1134,6 +1139,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            crate::companion_chat::companion_chat,
+            crate::companion_sync::companion_sync,
             companion_load,
             companion_save,
             companion_poll,
@@ -1296,7 +1303,19 @@ mod tests {
             serde_json::from_str(r#"{"schema":1,"preferences":{"wander":false}}"#).unwrap();
         assert_eq!(state.preferences.size, 1.0);
         assert!(state.preferences.hover_pause);
-        assert_eq!(state.preferences.music_mode, MusicMode::Auto);
+        assert_eq!(state.preferences.music_mode, MusicMode::Audio);
+        for (legacy, canonical) in [("auto", "audio"), ("audio", "audio"), ("off", "off")] {
+            let restored: PetState = serde_json::from_value(serde_json::json!({
+                "preferences":{"musicMode":legacy,"walkSpeed":35.0,"quiet":true}
+            })).unwrap();
+            restored.validate().unwrap();
+            let saved = serde_json::to_value(&restored).unwrap();
+            assert_eq!(saved["preferences"]["musicMode"], canonical);
+            assert_eq!(restored.preferences.walk_speed, 35.0);
+            assert!(restored.preferences.quiet);
+            let reloaded: PetState = serde_json::from_value(saved).unwrap();
+            assert_eq!(reloaded.preferences.music_mode, restored.preferences.music_mode);
+        }
         let mut invalid = state.clone();
         invalid.preferences.size = 9.0;
         assert!(invalid.validate().is_err());
