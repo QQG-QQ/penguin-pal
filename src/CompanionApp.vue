@@ -58,6 +58,8 @@ const img = ref<HTMLElement | null>(null), mask = ref<PetAlphaMask | null>(null)
 const stage = ref({x:0,y:0}), panel = ref({x:296,y:8})
 const reduce = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches)
 const still = computed(() => (reduce.value&&!previewGreeting.value) || state.value.preferences.reducedMotion || safeMode.value)
+// Manual throws use the app's explicit controls; system reduction still gates decorative motion.
+const physicsEnabled = computed(() => state.value.preferences.gravity && !state.value.preferences.reducedMotion && !safeMode.value)
 const busy = computed(() => ['working','waiting','toolError'].includes(codexStatus.value))
 const presentation = computed(() => codexPresentation(codexStatus.value))
 const packs=ref<MediaPack[]>([]), importing=ref(false), media=ref<ReturnType<MotionSequencer['sample']>>()
@@ -222,7 +224,7 @@ async function preferencesChanged(patch:Partial<Preferences>) {
   if(resize&&wasOpen)await toggleMenu(false)
   Object.assign(state.value.preferences,patch)
   if(patch.animationPack!==undefined){media.value=undefined;failedVideos.clear();motionPicker.reset(true);player.reset()}
-  if(still.value||!state.value.preferences.gravity){airborne.value=false;body.vx=0;body.vy=0}
+  if(!physicsEnabled.value){airborne.value=false;body.vx=0;body.vy=0}
   if(!state.value.preferences.surfaces)attached=undefined
   if(!state.value.preferences.wander)updateActivity('idle')
   if(state.value.preferences.quiet)message.value=''
@@ -269,7 +271,7 @@ async function release(e?:PointerEvent){
     try{await refreshGeometry()}catch{/* Last valid bounds remain available. */}
     const edge=state.value.preferences.edgeDock&&!safeMode.value?nearEdge(windowOrigin,workArea,280*unit.value*scale,290*unit.value*scale,28*unit.value*scale):'none'
     if(edge!=='none'){await setDock(edge);return}
-    airborne.value=state.value.preferences.gravity&&!still.value
+    airborne.value=physicsEnabled.value
     if(!airborne.value){body.vx=0;body.vy=0;updateActivity('idle')}void save()
   }
   }catch{cancelDrag();error.value='暂时无法完成拖放，请重新拖动。'}finally{releasing=false}
@@ -355,8 +357,8 @@ async function frame(){
       else if(Date.now()>patAt){interact('pat');heldPat=true;patAt=Date.now()+650}
       previousCursor={...c,at:now}
     }else if(native&&!releasing&&!menu.value&&!food.value&&dock.value==='none'&&!dockMoving){
-      if(attached){const next=surfaces.find(s=>s.id===attached?.id),following=followSurface(body,attached,next,bounds);if(following&&state.value.preferences.surfaces){body=following;attached=next;await moveBody()}else{attached=undefined;airborne.value=state.value.preferences.gravity&&!still.value}}
-      if(airborne.value&&!still.value&&state.value.preferences.gravity){
+      if(attached){const next=surfaces.find(s=>s.id===attached?.id),following=followSurface(body,attached,next,bounds);if(following&&state.value.preferences.surfaces){body=following;attached=next;await moveBody()}else{attached=undefined;airborne.value=physicsEnabled.value}}
+      if(airborne.value&&physicsEnabled.value){
         const result=stepPhysics(body,bounds,state.value.preferences.surfaces?surfaces:[],dt,scale);body=result.body;await moveBody()
         if(result.hard)updateActivity('dizzy',2400)
         if(result.landed){airborne.value=false;attached=surfaces.find(s=>s.id===result.surface);if(activity.value!=='dizzy')updateActivity('land',500);void save()}

@@ -11,23 +11,23 @@ const sequenceJs=ts.transpileModule(readFileSync(new URL('../src/lib/companionSe
 // Run the production component handlers and frame loop with deterministic native IPC.
 // Pointer capture delivery and Vue rendering are additionally checked in the browser.
 const builtinPack={id:'builtin',clips:JSON.parse(readFileSync(new URL('../penguin/companion-v4/motions.json',import.meta.url),'utf8')).clips}
-function app(preferences={},pack={id:'builtin',clips:[]}){
+function app(preferences={},pack={id:'builtin',clips:[]},systemReduced=false){
  const component=readFileSync(process.env.PENGUIN_COMPANION_SOURCE??new URL('../src/CompanionApp.vue',import.meta.url),'utf8')
  const cancelled=component.match(/@pointercancel="([^"]+)"/)[1]
  const source=component.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1].replace(/^import[\s\S]*?from ['"][^'"]+['"]\r?$/mg,'')
  const js=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText
  let clock=0,held=true,defer=false,completeMove,moveStarted,failMove=false,nativeFullscreen=false,windowShown=true,nativeIgnored=false
  const pos={x:420,y:160},cursor={x:520,y:260},writes=[],timers=[]
- const win={scaleFactor:async()=>1,outerPosition:async()=>({...pos}),isVisible:async()=>windowShown,setIgnoreCursorEvents:async value=>{nativeIgnored=value},
+ const win={scaleFactor:async()=>1,outerPosition:async()=>({...pos}),isVisible:async()=>windowShown,setIgnoreCursorEvents:async value=>{nativeIgnored=value},setAlwaysOnTop:async()=>{},
   async setPosition(next){if(failMove)throw Error('position unavailable');if(defer){moveStarted?.();await new Promise(ok=>{completeMove=ok})}Object.assign(pos,next);writes.push({...pos})}}
  const invoke=async command=>{if(command==='companion_poll')return{safeMode:false,bridge:{status:'idle',lastReceived:0},desktop:{surfaces:[],context:'quiet',fullscreen:nativeFullscreen,leftButtonDown:held,idleSeconds:0}}}
- const window={__TAURI_INTERNALS__:{},location:{search:''},matchMedia:()=>({matches:false}),clearTimeout(){},setTimeout(fn){timers.push(fn);return timers.length}}
+ const window={__TAURI_INTERNALS__:{},location:{search:''},matchMedia:()=>({matches:systemReduced}),clearTimeout(){},setTimeout(fn){timers.push(fn);return timers.length}}
  const metrics={petLeft:0,petTop:0,petRight:160,petBottom:220}
  const deps={...core,...media,...animation,...sequence,...musicModule,djPoster:'dj.png',djMetadata:{alphaBBox:[47,25,203,242]},window,document:{querySelectorAll:()=>[]},Math:Object.assign(Object.create(Math),{random:()=>.1}),Date:class extends Date{static now(){return 1720000000000+clock}},performance:{now:()=>clock},ref:value=>({value}),computed:fn=>({get value(){return fn()}}),onMounted(){},onBeforeUnmount(){},
   invoke,listen:async()=>()=>{},convertFileSrc:p=>p,cursorPosition:async()=>({...cursor}),currentMonitor:async()=>({workArea:{position:{x:0,y:0},size:{width:1920,height:1040}}}),primaryMonitor:async()=>null,getCurrentWindow:()=>win,
   PhysicalPosition:class{constructor(x,y){this.x=x;this.y=y}},PhysicalSize:class{},computePetLayoutMetrics:()=>metrics,isPetOpaqueHit:(_a,_r,_m,x,y)=>x>=0&&x<=160&&y>=0&&y<=220,loadPetAlphaMask:async()=>null,
   builtinMotionPack:pack,companionArtwork:()=>({src:'poster.png'})}
- const run=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;\n${js}\ninitialized=true;img.value={getBoundingClientRect:()=>({left:0,top:0,width:160,height:220})};return {state,activity,airborne,dragging,pointerDown,release,frame,poll,error,musicScene,codexStatus,media,pose,facing,requestAction,refreshGeometry,updateHitTest,setFullscreen(value){fullscreen.value=value},setMusic(sample){music.value=sample;musicReceived=performance.now()},cancel:()=>{return ${cancelled.endsWith('()')?cancelled:cancelled+'()'}},age(){heldAt=Date.now()-2000},getBody:()=>({...body})};`)(deps)
+ const run=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;\n${js}\ninitialized=true;img.value={getBoundingClientRect:()=>({left:0,top:0,width:160,height:220})};return {state,activity,airborne,dragging,pointerDown,release,frame,poll,error,musicScene,codexStatus,media,pose,facing,still,musicEnabled,video,setSafety,preferencesChanged,motionChanged,requestAction,refreshGeometry,updateHitTest,setSurfaces(value){surfaces=value},setFullscreen(value){fullscreen.value=value},setMusic(sample){music.value=sample;musicReceived=performance.now()},cancel:()=>{return ${cancelled.endsWith('()')?cancelled:cancelled+'()'}},age(){heldAt=Date.now()-2000},getBody:()=>({...body}),getBounds:()=>({...bounds})};`)(deps)
  Object.assign(run.state.value.preferences,{gravity:true,edgeDock:false,springDrag:false,wander:false,movement:'still',...preferences})
  const press=()=>run.pointerDown({button:0,pointerId:1,clientX:80,clientY:100,currentTarget:{setPointerCapture(){}}})
  const frame=async(ms=33)=>{clock+=ms;await run.frame()}
@@ -35,6 +35,44 @@ function app(preferences={},pack={id:'builtin',clips:[]}){
 }
 async function drag(a){await a.press();for(let i=0;i<6;i++)await a.move()}
 test('normal release retains throw velocity and enters gravity',async()=>{const a=app();await drag(a);await a.release();assert.equal(a.airborne.value,true);assert.ok(a.getBody().vx>0);const y=a.pos.y;for(let i=0;i<15;i++)await a.frame();assert.ok(a.pos.y>y)})
+test('system reduced motion keeps manual throws and gravity while decorative motion stays reduced',async()=>{
+ const a=app({springDrag:true},builtinPack,true)
+ await drag(a);await a.release()
+ assert.equal(a.still.value,true);assert.equal(a.airborne.value,true);assert.ok(a.getBody().vx>0)
+ assert.equal(a.musicEnabled.value,false);assert.equal(a.video.value,undefined)
+ const y=a.pos.y;for(let i=0;i<15;i++)await a.frame();assert.ok(a.pos.y>y)
+ for(let i=0;i<120;i++)await a.frame()
+ assert.equal(a.airborne.value,false);assert.equal(a.getBody().vy,0);assert.equal(a.getBody().y+a.getBody().height,a.getBounds().bottom)
+ const b=app({movement:'follow',hoverPause:false},builtinPack,true)
+ b.setCursor(1800);for(let i=0;i<20;i++)await b.frame();assert.equal(b.pos.x,420)
+})
+test('system animation changes during a throw do not freeze the pet in midair',async()=>{
+ const a=app();await drag(a);await a.release();a.motionChanged({matches:true})
+ assert.equal(a.still.value,true);assert.equal(a.airborne.value,true)
+ const y=a.pos.y;for(let i=0;i<15;i++)await a.frame();assert.ok(a.pos.y>y)
+})
+test('explicit gravity off, app reduced motion and safe mode still stop manual throws',async()=>{
+ for(const systemReduced of [false,true])for(const block of ['gravity','reducedMotion','safe']){
+  const a=app(block==='gravity'?{gravity:false}:block==='reducedMotion'?{reducedMotion:true}:{},builtinPack,systemReduced)
+  if(block==='safe')await a.setSafety(true)
+  await drag(a);await a.release();const pos={...a.pos};await a.frame()
+  assert.equal(a.airborne.value,false);assert.deepEqual(a.pos,pos);assert.equal(a.getBody().vx,0)
+ }
+})
+test('app motion controls cancel an in-flight throw even when system motion is reduced',async()=>{
+ for(const patch of [{gravity:false},{reducedMotion:true}]){
+  const a=app({},builtinPack,true);await drag(a);await a.release();assert.equal(a.airborne.value,true)
+  await a.preferencesChanged(patch);const pos={...a.pos};await a.frame()
+  assert.equal(a.airborne.value,false);assert.equal(a.getBody().vx,0);assert.deepEqual(a.pos,pos)
+ }
+})
+test('a disappearing window continues gravity with system reduced motion enabled',async()=>{
+ const a=app({},builtinPack,true);a.setSurfaces([{id:1,left:0,right:1920,top:700}])
+ await drag(a);await a.release();for(let i=0;i<120;i++)await a.frame()
+ assert.equal(a.getBody().y+a.getBody().height,700);assert.equal(a.airborne.value,false)
+ a.setSurfaces([]);for(let i=0;i<120;i++)await a.frame()
+ assert.equal(a.getBody().y+a.getBody().height,a.getBounds().bottom);assert.equal(a.airborne.value,false)
+})
 test('capture cancellation and duplicate release preserve falling instead of clearing velocity',async()=>{const a=app();await drag(a);await a.cancel();const before=a.getBody();await a.release();assert.equal(a.airborne.value,true);assert.equal(a.dragging.value,false);assert.equal(a.getBody().vx,before.vx)})
 test('small cursor steps accumulate into a drag',async()=>{const a=app();await a.press();for(let i=0;i<20;i++)await a.move(1,0);assert.ok(a.pos.x>430);await a.release();assert.equal(a.airborne.value,true)})
 test('disabled gravity and reduced motion allow drag but stop after release',async()=>{for(const preferences of [{gravity:false},{reducedMotion:true}]){const a=app(preferences);await drag(a);await a.release();const pos={...a.pos};await a.frame();assert.equal(a.airborne.value,false);assert.deepEqual(a.pos,pos);assert.equal(a.getBody().vx,0)}})
