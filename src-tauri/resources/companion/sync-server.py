@@ -194,9 +194,9 @@ def social_default():
 
 
 def can_send(social, now):
-    return (social["proactive"] and social["unanswered"] < 2 and
+    return (social["proactive"] and
             (social["day"] != now // 86400000 or social["sentToday"] < 4) and
-            (social["lastOutreachAt"] == 0 or now - social["lastOutreachAt"] >= 45 * 60000 * (1 + social["unanswered"] * 2)) and
+            (social["lastOutreachAt"] == 0 or now - social["lastOutreachAt"] >= 45 * 60000) and
             social["reservedUntil"] <= now)
 
 
@@ -294,7 +294,7 @@ def apply_social(doc, data, key, now):
             if social["day"] != now // 86400000:
                 social["day"], social["sentToday"] = now // 86400000, 0
             social["sentToday"] += 1
-            social["unanswered"] += 1
+            social["unanswered"] = min(1000, social["unanswered"] + 1)
             social["lastOutreachAt"], social["lastTopic"] = now, topic
         social["reservation"], social["reservedUntil"] = "", 0
     else:

@@ -48,11 +48,9 @@ impl Social {
     }
     pub fn can_send(&self, at: u64) -> bool {
         self.proactive
-            && self.unanswered < 2
             && (self.day != at / 86400000 || self.sent_today < 4)
             && (self.last_outreach_at == 0
-                || at.saturating_sub(self.last_outreach_at)
-                    >= 45 * 60000 * (1 + self.unanswered as u64 * 2))
+                || at.saturating_sub(self.last_outreach_at) >= 45 * 60000)
             && self.reserved_until <= at
     }
 }
@@ -259,7 +257,7 @@ pub fn apply(doc: &mut Value, data: &Value, op_id: &str, at: u64) -> Result<(), 
                 social.sent_today = 0;
             }
             social.sent_today += 1;
-            social.unanswered += 1;
+            social.unanswered = social.unanswered.saturating_add(1).min(1000);
             social.last_outreach_at = at;
             social.last_topic = topic;
             social.reservation.clear();
@@ -301,7 +299,7 @@ mod tests {
         assert_eq!(deleted["memories"][0]["deleted"], true);
     }
     #[test]
-    fn simultaneous_reservations_silence_backoff_and_response_cancel() {
+    fn simultaneous_reservations_fixed_cooldown_and_response_cancel() {
         let mut doc = document();
         apply(
             &mut doc,
@@ -329,24 +327,40 @@ mod tests {
         )
         .unwrap();
         let social: Social = serde_json::from_value(doc["social"].clone()).unwrap();
-        assert!(!social.can_send(1001 + 45 * 60000));
-        assert!(social.can_send(1001 + 135 * 60000));
+        assert!(!social.can_send(1001 + 45 * 60000 - 1));
+        assert!(social.can_send(1001 + 45 * 60000));
         apply(
             &mut doc,
             &json!({"type":"reserve","token":"C"}),
             "c",
-            1001 + 135 * 60000,
+            1001 + 45 * 60000,
         )
         .unwrap();
         apply(
             &mut doc,
             &json!({"type":"user","text":"我回来啦"}),
             "user-2",
-            1002 + 135 * 60000,
+            1002 + 45 * 60000,
         )
         .unwrap();
         assert_eq!(doc["social"]["unanswered"], 0);
         assert_eq!(doc["social"]["reservation"], "");
+    }
+    #[test]
+    fn unanswered_never_pauses_outreach_but_daily_limit_still_applies() {
+        let mut social = Social {
+            proactive: true,
+            unanswered: 1000,
+            last_outreach_at: 1000,
+            day: 0,
+            sent_today: 3,
+            ..Default::default()
+        };
+        assert!(!social.can_send(1000 + 45 * 60000 - 1));
+        assert!(social.can_send(1000 + 45 * 60000));
+        social.sent_today = 4;
+        assert!(!social.can_send(1000 + 45 * 60000));
+        assert!(social.can_send(86400000));
     }
     #[test]
     fn historical_evidence_survives_eviction_uses_source_time_and_never_replays_mood() {

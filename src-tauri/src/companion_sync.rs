@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -228,6 +228,18 @@ struct Runtime {
     next_attempt: u64,
 }
 struct Running(Arc<AtomicBool>);
+fn acquire_sync(running: &Arc<AtomicBool>, timeout: Duration) -> Result<Running, String> {
+    let started = Instant::now();
+    loop {
+        if running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            return Ok(Running(running.clone()));
+        }
+        if started.elapsed() >= timeout {
+            return Err("等待服务器同步超时，请在同步设置中查看。".into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
 impl Drop for Running {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
@@ -868,10 +880,8 @@ impl Service {
             .ok_or("陪伴目录无效。".into())
     }
     pub fn sync_chat(&self) -> Result<(), String> {
-        if self.running.swap(true, Ordering::AcqRel) {
-            return Err("同步正在进行，请稍后重试。".into());
-        }
-        let _running = Running(self.running.clone());
+        // The 15-second chat and background sync timers can arrive together.
+        let _running = acquire_sync(&self.running, Duration::from_secs(30))?;
         if self.inner.lock().map_err(|_| "同步状态忙。")?.next_attempt > now() {
             return Err("服务器同步正在退避或等待修正连接，请在同步设置中查看。".into());
         }
@@ -981,6 +991,23 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chat_sync_waits_for_background_exchange_and_bounds_failure() {
+        let running = Arc::new(AtomicBool::new(true));
+        assert!(acquire_sync(&running, Duration::ZERO).is_err());
+        assert!(running.load(Ordering::Acquire));
+        let holder = Running(running.clone());
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(holder);
+        });
+        let acquired = acquire_sync(&running, Duration::from_secs(2)).unwrap();
+        release.join().unwrap();
+        assert!(running.load(Ordering::Acquire));
+        assert!(acquire_sync(&running, Duration::ZERO).is_err());
+        drop(acquired);
+        assert!(!running.load(Ordering::Acquire));
+    }
     fn service() -> (tempfile::TempDir, Service) {
         let dir = tempfile::tempdir().unwrap();
         let s = Service::new(dir.path(), json!({})).unwrap();

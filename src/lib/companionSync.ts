@@ -8,5 +8,5 @@ export interface SyncDocument {
   social?:{enabled:boolean;proactive:boolean;analyzed:string[];lastOutreachAt:number;lastResponseAt:number;unanswered:number;lastTopic:string;reservation:string;reservedUntil:number;day:number;sentToday:number}
 }
 export interface ChatView {status:SyncView;session:string;reply:string|null}
-export interface HistoryStatus {archived:number;pending:number;processed:number;files:number;pendingFiles:number;pendingDirectories:number;fileErrors:number;lastScan?:string;lastLearn?:string;scanError?:string;learningError?:string;invalidLines?:string;oversizedLines?:string}
+export interface HistoryStatus {archived:number;pending:number;processed:number;files:number;pendingFiles:number;pendingDirectories:number;fileErrors:number;lastScan?:string;lastLearn?:string;scanError?:string;learningError?:string;outreachError?:string;invalidLines?:string;oversizedLines?:string}
 export interface SyncView {mode:'local'|'server';server:SyncServer|null;capture:boolean;captureWarning?:boolean;document:SyncDocument;pending:number;message:string;lastSync:number;active:boolean;running:boolean;history?:HistoryStatus}

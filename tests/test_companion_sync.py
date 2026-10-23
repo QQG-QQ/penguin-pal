@@ -133,7 +133,7 @@ class SyncScenarios(unittest.TestCase):
         restored = self.sync("B", [op("restore-social", "restore", document=first)])["document"]
         self.assertEqual(restored["social"], learned["social"])
 
-    def test_social_active_device_reservation_expiry_busy_takeover_and_backoff(self):
+    def test_social_active_device_reservation_expiry_busy_takeover_and_fixed_cooldown(self):
         self.sync(operations=[op("settings", "social", type="settings", enabled=True, proactive=True)])
         self.sync(operations=[op("reserve-A", "social", type="reserve", token="A")])
         other = self.sync("B", [op("reserve-B", "social", type="reserve", token="B")])
@@ -142,21 +142,21 @@ class SyncScenarios(unittest.TestCase):
         self.assertEqual(len(other["document"]["conversations"]), 0)
         first = self.sync(operations=[op("commit-A", "social", type="commit", token="A", text="小鱼喜欢什么口味？", topic="小鱼")])
         self.assertEqual(first["document"]["social"]["unanswered"], 1)
-        self.assertFalse(server.can_send(first["document"]["social"], NOW + 45*60000))
-        self.assertTrue(server.can_send(first["document"]["social"], NOW + 135*60000))
+        self.assertFalse(server.can_send(first["document"]["social"], NOW + 45*60000 - 1))
+        self.assertTrue(server.can_send(first["document"]["social"], NOW + 45*60000))
         takeover = self.sync("B", [op("response-B", "social", type="user", text="我回来啦")])
         self.assertTrue(takeover["active"])
         self.assertEqual(takeover["document"]["social"]["unanswered"], 0)
         # Replaying a previously acknowledged interaction cannot steal ownership.
         self.sync("A", [op("care-A", "care", action="pat")])
         self.assertFalse(self.sync("B", [op("response-B", "social", type="user", text="我回来啦")])["active"])
-        later = NOW + 135*60000
+        later = NOW + 45*60000
         self.sync(now=later)
         self.sync(operations=[op("reserve-later", "social", type="reserve", token="later")], now=later)
         expired = self.sync(operations=[op("commit-expired", "social", type="commit", token="later", text="过时消息", topic="过时")], now=later+180001)
         self.assertEqual(len(expired["document"]["conversations"]), 2)
 
-    def test_social_response_and_disable_cancel_and_daily_silence_limits(self):
+    def test_social_response_and_disable_cancel_and_daily_limits(self):
         doc = server.initial({}, NOW)
         def apply(key, **data): server.apply(doc, op(key, "social", **data), NOW)
         apply("settings", type="settings", enabled=True, proactive=True)
@@ -169,11 +169,30 @@ class SyncScenarios(unittest.TestCase):
         apply("commit2", type="commit", token="t2", text="已关闭", topic="关闭")
         self.assertEqual(len(doc["conversations"]), 1)
         state = server.social_default(); state["proactive"] = True
-        state["unanswered"] = 2
-        self.assertFalse(server.can_send(state, NOW))
+        for unanswered in [0, 1, 2, 1000]:
+            state["unanswered"] = unanswered
+            state["lastOutreachAt"] = NOW
+            self.assertFalse(server.can_send(state, NOW + 45*60000 - 1))
+            self.assertTrue(server.can_send(state, NOW + 45*60000))
         state["unanswered"] = 0; state["day"] = NOW//86400000; state["sentToday"] = 4
         self.assertFalse(server.can_send(state, NOW))
         self.assertTrue(server.can_send(state, NOW+86400000))
+
+    def test_unanswered_outreach_continues_across_devices_until_daily_limit(self):
+        self.sync(operations=[op("settings", "social", type="settings", enabled=True, proactive=True)])
+        for n, device in enumerate(["A", "B", "A", "B"]):
+            at = NOW + n * 45 * 60000
+            self.sync(device, now=at)
+            reserved = self.sync(device, [op(f"reserve-{n}", "social", type="reserve", token=f"token-{n}")], now=at)
+            self.assertEqual(reserved["document"]["social"]["reservation"], f"token-{n}")
+            committed = self.sync(device, [op(f"commit-{n}", "social", type="commit", token=f"token-{n}", text=f"聊聊近况{n}", topic=f"topic-{n}")], now=at)
+            self.assertEqual(committed["document"]["social"]["sentToday"], n+1)
+            self.assertEqual(committed["document"]["social"]["unanswered"], n+1)
+        at = NOW + 4 * 45 * 60000
+        self.sync("A", now=at)
+        blocked = self.sync("A", [op("reserve-fifth", "social", type="reserve", token="fifth")], now=at)
+        self.assertEqual(blocked["document"]["social"]["reservation"], "")
+        self.assertEqual(len(blocked["document"]["conversations"]), 4)
 
     def test_history_after_eviction_syncs_evidence_time_and_ignores_old_emotions(self):
         source = {"id": "old-source", "session": "outside-project", "role": "user", "text": "喜欢清淡小鱼，谢谢你陪我", "at": NOW-30*86400000}

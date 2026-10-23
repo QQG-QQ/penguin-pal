@@ -310,7 +310,9 @@ pub async fn companion_chat(
     } else {
         Some(Running(chat.running.clone()))
     };
-    tauri::async_runtime::spawn_blocking(move||{
+    let report_service = service.clone();
+    let report_error = action == "tick";
+    let outcome = tauri::async_runtime::spawn_blocking(move||{
         // Persist a user's response immediately, even while an opener is being generated.
         // This cancels its reservation before waiting for the single inference slot.
         let mut user_source=None;
@@ -379,6 +381,7 @@ pub async fn companion_chat(
                 if view["pending"]!=0||view["document"]["social"]["reservation"]!=token{return result(&service,None);}
                 let generated=bridge(&service,json!({"action":"opener","document":view["document"],"sources":[],"prompt":"围绕一条共同记忆或近期事情自然说一两句话，只开一个话题。"}));
                 let output=match generated{Ok(value)=>value,Err(error)=>{service.record("social",json!({"type":"release","token":token}))?;let _=sync_if_server(&service,&view);return Err(error);}};
+                service.history_note("outreachError", "")?;
                 sync_if_server(&service,&view)?;view=service.status()?;
                 if view["pending"]!=0||!environment_ok(&chat)||view["document"]["social"]["reservation"]!=token||(view["mode"]=="server"&&view["active"]!=true){service.record("social",json!({"type":"release","token":token}))?;let _=sync_if_server(&service,&view);return result(&service,None);}
                 let previous=view["document"]["social"]["lastOutreachAt"].as_u64().unwrap_or(0);
@@ -389,7 +392,13 @@ pub async fn companion_chat(
             _=>return Err("不支持的气泡操作。".into()),
         }
         result(&service,None)
-    }).await.map_err(|_|"气泡任务中断，已保存的数据仍保留。".to_string())?
+    }).await.map_err(|_|"气泡任务中断，已保存的数据仍保留。".to_string())?;
+    if report_error {
+        if let Err(error) = &outcome {
+            report_service.history_note("outreachError", error)?;
+        }
+    }
+    outcome
 }
 
 #[cfg(test)]
@@ -402,6 +411,11 @@ mod tests {
             ..Default::default()
         };
         assert!(allowed(12, 120, &gate));
+        assert!(!allowed(12, 89, &gate));
+        assert!(allowed(8, 90, &gate));
+        assert!(allowed(21, 1799, &gate));
+        assert!(!allowed(22, 120, &gate));
+        assert!(!allowed(12, 1800, &gate));
         assert!(!allowed(23, 120, &gate));
         assert!(!allowed(7, 120, &gate));
         assert!(!allowed(12, 10, &gate));

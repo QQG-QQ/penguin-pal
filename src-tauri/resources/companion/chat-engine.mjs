@@ -53,7 +53,7 @@ export async function run(request,{factory}={}){
   const args=['app-server',...disabled.flatMap(x=>['-c',`features.${x}=false`]),'-c','web_search="disabled"']
   const rpc=factory?factory():new Rpc(request.command,args)
   try{
-    await rpc.request('initialize',{clientInfo:{name:'penguinpal_companion',title:'PenguinPal Bubble',version:'0.9.4'}})
+    await rpc.request('initialize',{clientInfo:{name:'penguinpal_companion',title:'PenguinPal Bubble',version:'0.9.5'}})
     rpc.notify({method:'initialized',params:{}})
     if(request.action==='sessions'){
       const result=await rpc.request('thread/list',{limit:50,sortKey:'updated_at',modelProviders:[]})

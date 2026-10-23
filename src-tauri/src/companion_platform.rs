@@ -166,8 +166,27 @@ mod windows {
     }
 
     pub fn desktop(surfaces: bool, awareness: bool) -> Desktop {
+        desktop_with_idle(surfaces, awareness, input_idle_seconds)
+    }
+
+    fn input_idle_seconds() -> u32 {
+        let mut input = LastInput {
+            size: std::mem::size_of::<LastInput>() as u32,
+            tick: 0,
+        };
+        unsafe {
+            if GetLastInputInfo(&mut input) != 0 {
+                return GetTickCount().wrapping_sub(input.tick) / 1000;
+            }
+        }
+        0
+    }
+
+    fn desktop_with_idle(surfaces: bool, awareness: bool, read_idle: impl FnOnce() -> u32) -> Desktop {
         let mut result = Desktop {
             context: "quiet",
+            // Idle duration is needed even when foreground app classification is off.
+            idle_seconds: read_idle(),
             ..Desktop::default()
         };
         unsafe {
@@ -179,13 +198,6 @@ mod windows {
                 let hwnd = GetForegroundWindow();
                 let name = executable(hwnd);
                 result.context = super::classify(&name);
-                let mut input = LastInput {
-                    size: std::mem::size_of::<LastInput>() as u32,
-                    tick: 0,
-                };
-                if GetLastInputInfo(&mut input) != 0 {
-                    result.idle_seconds = GetTickCount().wrapping_sub(input.tick) / 1000;
-                }
             }
             {
                 // Fullscreen suppression only reads geometry, even with context sensing off.
@@ -209,6 +221,23 @@ mod windows {
             }
         }
         result
+    }
+
+    #[cfg(test)]
+    mod idle_tests {
+        use super::*;
+
+        #[test]
+        fn proactive_idle_survives_disabled_context_sensing() {
+            for awareness in [false, true] {
+                let desktop = desktop_with_idle(false, awareness, || 120);
+                assert_eq!(desktop.idle_seconds, 120, "awareness={awareness}");
+                if !awareness {
+                    assert_eq!(desktop.context, "quiet");
+                }
+            }
+            assert_eq!(desktop_with_idle(false, false, || 0).idle_seconds, 0);
+        }
     }
 
     unsafe extern "system" fn find_codex(hwnd: Hwnd, data: isize) -> i32 {
