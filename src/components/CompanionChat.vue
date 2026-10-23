@@ -3,8 +3,8 @@ import {computed,nextTick,ref} from 'vue'
 import {invoke} from '@tauri-apps/api/core'
 import type {ChatView,SyncView} from '../lib/companionSync'
 import CompanionMind from './CompanionMind.vue'
-const props=defineProps<{native:boolean;view:SyncView|null;session:string}>()
-const emit=defineEmits<{close:[];received:[ChatView];tools:[]}>()
+const props=defineProps<{native:boolean;view:SyncView|null;session:string;allowWorkChat:boolean}>()
+const emit=defineEmits<{close:[];received:[ChatView];tools:[];workChat:[boolean]}>()
 const text=ref(''),busy=ref(false),error=ref(''),info=ref(''),history=ref<HTMLElement>()
 const sessions=ref<{id:string;name:string}[]>([]),selected=ref('')
 const messages=computed(()=>props.view?.document.conversations.filter(m=>m.session===props.session)??[])
@@ -37,7 +37,7 @@ async function read(){if(!selected.value)return;await run(async()=>{emit('receiv
       <label><input type="checkbox" :checked="proactive" :disabled="busy||!native" @change="settings(enabled,($event.target as HTMLInputElement).checked)"/>空闲时主动找我聊聊</label>
       <small>空闲且未忙碌时搭话；当前冷却 {{view?.document.brain?.config.cooldownMinutes??45}} 分钟，每天最多 {{view?.document.brain?.config.dailyLimit??4}} 次。不因未回应减频或暂停。服务器离线时暂停主动搭话。</small>
       <p v-if="view?.history?.outreachError" class="error" role="alert">主动陪伴暂未完成：{{view.history.outreachError}}</p>
-      <CompanionMind :view="view" :native="native" @received="emit('received',$event)"/>
+      <CompanionMind :view="view" :native="native" :allow-work-chat="allowWorkChat" @work-chat="emit('workChat',$event)" @received="emit('received',$event)"/>
       <div class="actions"><button :disabled="busy||!native||!enabled" @click="learn">立即整理下一批</button><button @click="emit('tools')">记忆 / 同步 / 备份</button></div>
       <details><summary>指定一个聊天重点回顾（可选）</summary><small>全部本机会话已自动纳入扫描；也可单独带入一个聊天的近期内容。</small><button :disabled="busy||!native" @click="list">选择历史聊天</button><select v-if="sessions.length" v-model="selected" aria-label="选择历史聊天"><option value="" disabled>请选择</option><option v-for="s in sessions" :key="s.id" :value="s.id">{{s.name}}</option></select><button v-if="sessions.length" :disabled="busy||!selected" @click="read">带入近期内容</button></details>
     </details>

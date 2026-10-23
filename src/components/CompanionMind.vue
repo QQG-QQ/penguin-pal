@@ -1,15 +1,22 @@
 <script setup lang="ts">
-import {computed,ref,watch} from 'vue'
+import {computed,onMounted,onBeforeUnmount,ref,watch} from 'vue'
 import {invoke} from '@tauri-apps/api/core'
 import {mindConfig,emotionLabels,moodFace,type MindConfig} from '../lib/companionMind'
-import type {ChatView,SyncView} from '../lib/companionSync'
-const props=defineProps<{view:SyncView|null|undefined;native:boolean}>()
-const emit=defineEmits<{received:[ChatView]}>()
+import type {ChatRuntime,ChatView,SyncView} from '../lib/companionSync'
+const props=defineProps<{view:SyncView|null|undefined;native:boolean;allowWorkChat:boolean}>()
+const emit=defineEmits<{received:[ChatView];workChat:[boolean]}>()
 const busy=ref(false),error=ref(''),info=ref(''),tab=ref('outreach'),dirty=ref(false)
 const draft=ref(mindConfig());let original=mindConfig()
 watch(()=>props.view?.document.brain?.config,c=>{if(!dirty.value){original={...mindConfig(),...c};draft.value={...original}}},{immediate:true})
 const brain=computed(()=>props.view?.document.brain),face=computed(()=>moodFace(props.view?.document.pet.mood??70))
 const query=ref(''),filter=ref('all'),order=ref('new'),recall=ref<any>(),preview=ref<any>()
+const rehearsing=ref(false),manualPending=ref(false),runtime=ref<ChatRuntime>()
+const taskNames={reply:'回复聊天',manual:'准备手动气泡',interactive:'处理手动请求',automatic:'准备主动气泡',learning:'后台整理记忆'}
+const progress=computed(()=>runtime.value?.cancelling?'已取消，等待当前生成收尾':runtime.value?.queuedManual?`${runtime.value.active?taskNames[runtime.value.active]:'等待调度'}中，手动搭话已排队`:runtime.value?.active?`正在${taskNames[runtime.value.active]}…`:manualPending.value?'手动搭话已提交，等待调度':'')
+let runtimeTimer:ReturnType<typeof setInterval>|undefined,runtimeBusy=false,mounted=false
+async function refreshRuntime(){if(!props.native||runtimeBusy)return;runtimeBusy=true;try{const value=await call('runtime');if(mounted)runtime.value=value}catch{/* The action itself reports errors. */}finally{runtimeBusy=false}}
+onMounted(()=>{mounted=true;void refreshRuntime();runtimeTimer=setInterval(()=>{void refreshRuntime()},500)})
+onBeforeUnmount(()=>{mounted=false;clearInterval(runtimeTimer);if(manualPending.value)void call('cancelOutreach').catch(()=>{})})
 const memories=computed(()=>[...(props.view?.document.memories??[])].filter(m=>!m.deleted&&(!query.value||m.text.includes(query.value))&&(filter.value==='all'||(brain.value?.memories[m.id]?.kind??(m.text.startsWith('【近况】')?'recent':m.text.startsWith('【约定】')?'agreement':'preference'))===filter.value)).sort((a,b)=>order.value==='old'?a.at-b.at:b.at-a.at))
 const selected=ref<string>(),edit=ref({key:'',importance:.5,emotion:0,tags:'',kind:'recent'}),expected=ref('')
 const selectedMemory=computed(()=>props.view?.document.memories.find(m=>m.id===selected.value))
@@ -24,8 +31,9 @@ async function call(action:string,payload:unknown=null){return invoke<any>('comp
 async function run(work:()=>Promise<void>){if(busy.value)return;busy.value=true;error.value='';info.value='';try{await work()}catch(e){error.value=String(e)}finally{busy.value=false}}
 async function action(type:string,data:Record<string,unknown>={}){const value:ChatView=await call('brain',{type,...data});emit('received',value);return value}
 async function save(){await run(async()=>{const patch=Object.fromEntries(Object.entries(draft.value).filter(([k,v])=>v!==original[k as keyof MindConfig]));const value=await action('settings',{config:patch});dirty.value=false;original={...mindConfig(),...value.status.document.brain?.config};draft.value={...original};info.value='设置已保存，并进入现有同步队列。'})}
-async function rehearse(){await run(async()=>{const value:ChatView=await call('rehearse');emit('received',value);preview.value=value.preview;info.value='演练只查看条件、动机和候选记忆；没有调用模型或发送气泡。'})}
-async function outreach(){await run(async()=>{const value:ChatView=await call('outreach');emit('received',value);info.value=value.reply?'已发出一轮气泡对话。':value.status.history?.outreachStatus??'本轮未发出。'})}
+async function rehearse(){if(rehearsing.value)return;rehearsing.value=true;error.value='';try{const value:ChatView=await call('rehearse');emit('received',value);preview.value=value.preview;info.value='演练只查看条件、动机和候选记忆；没有调用模型或发送气泡。'}catch(e){error.value=String(e)}finally{rehearsing.value=false}}
+async function outreach(){await run(async()=>{manualPending.value=true;try{const value:ChatView=await call('outreach');if(mounted){emit('received',value);info.value=value.reply?'已发出一轮气泡对话。':value.status.history?.outreachStatus??'本轮未发出。'}}finally{manualPending.value=false;void refreshRuntime()}})}
+async function cancelOutreach(){try{await call('cancelOutreach');info.value='已请求取消；当前生成收尾前不会启动另一轮。';await refreshRuntime()}catch(e){error.value=String(e)}}
 async function lookup(){await run(async()=>{const value=await call('recall',{text:query.value});recall.value=value.preview.recall.report;emit('received',value)})}
 const report=computed(()=>{if(recall.value)return recall.value;try{return JSON.parse(props.view?.history?.recallReport??'null')}catch{return null}})
 async function editMemory(undo=false){const m=selectedMemory.value;if(!m)return;await run(async()=>{const value=await action(undo?'undoMemory':'editMemory',{id:m.id,expected:expected.value,...(undo?{}:{...edit.value,tags:edit.value.tags.split(/[、,，\n]/).map(t=>t.trim()).filter(Boolean)})});expected.value=value.status.document.memories.find(x=>x.id===m.id)?.text??'';info.value=undo?'已恢复上一版本。':'记忆属性已更新。'})}
@@ -44,8 +52,11 @@ async function applyRefined(){await run(async()=>{if(mode.value==='import'){cons
     <nav><button v-for="item in [{id:'outreach',text:'主动搭话'},{id:'memory',text:'记忆'},{id:'mood',text:'心情'}]" :key="item.id" :class="{selected:tab===item.id}" @click="tab=item.id">{{item.text}}</button></nav>
     <div v-if="tab==='outreach'">
       <p role="status">{{view?.history?.outreachStatus||'等待下一轮检查'}}<br/><small>下一次随机机会：{{date(brain?.nextCheckAt??0)}} · 连续随机未命中 {{brain?.misses??0}} 次</small></p>
-      <div class="buttons"><button :disabled="busy||!native" @click="rehearse">演练一次（不发话）</button><button :disabled="busy||!native" @click="outreach">真发一次（跳过等待）</button></div>
-      <small>真发绕过时间、概率、开关和次数限制，仍检查忙碌、全屏、可见性和共享预约。未回应不会减频或暂停。</small>
+      <div class="buttons"><button :disabled="rehearsing||!native" @click="rehearse">{{rehearsing?'正在演练…':'演练一次（不发话）'}}</button><button :disabled="busy||!native" @click="outreach">{{manualPending?'已提交真发':'真发一次（跳过等待）'}}</button><button v-if="manualPending" @click="cancelOutreach">取消本轮真发</button></div>
+      <p v-if="progress" role="status">{{progress}}</p>
+      <small>演练不受后台整理影响。真发优先于下一批整理，允许 Codex 工作中发话，仍检查拖动、全屏、可见性和共享预约。未回应不会减频或暂停。</small>
+      <label><input type="checkbox" :checked="allowWorkChat" :disabled="!native" @change="emit('workChat',($event.target as HTMLInputElement).checked)"/>Codex 工作时也允许自动搭话（仅本机）</label>
+      <small>默认工作免打扰；开启后仍需满足空闲、安静时段、冷却和每日次数条件。</small>
       <p v-if="preview">演练结果：{{preview.reason}}<br/>起话动机：{{preview.motive}}<br/>候选记忆 {{preview.recall.memories.length}} 条</p>
       <details><summary>最近决策记录</summary><p v-for="(d,i) in [...(brain?.decisions??[])].reverse()" :key="i"><small>{{date(d.at)}}</small>{{d.reason}}<template v-if="d.nextAt"> · 抽到 {{d.roll.toFixed(1)}} / 命中线 {{d.chance.toFixed(1)}}%</template></p></details>
     </div>

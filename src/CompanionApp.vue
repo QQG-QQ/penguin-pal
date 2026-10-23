@@ -29,8 +29,8 @@ let previewTicks=0
 const state = ref(defaultCompanion(Date.now())), activity = ref<Activity>('idle')
 const syncView=ref<SyncView|null>(null),chatOpen=ref(false),chatSession=ref('')
 let chatTimer:number|undefined
-const chatGate=()=>({busy:busy.value||pressed,quiet:state.value.preferences.quiet||menu.value||safeMode.value,fullscreen:fullscreen.value,visible:visible.value&&!dockHidden.value})
-function receiveChat(value:ChatView){receiveSync(value.status);chatSession.value=value.session;if(value.reply)talk(value.reply.length>180?value.reply.slice(0,177)+'…':value.reply)}
+const chatGate=()=>({busy:pressed,working:busy.value&&!state.value.preferences.allowWorkChat,quiet:state.value.preferences.quiet||menu.value||safeMode.value,fullscreen:fullscreen.value,visible:visible.value&&!dockHidden.value})
+function receiveChat(value:ChatView){receiveSync(value.status);chatSession.value=value.session;if(value.reply)talk(value.reply.length>180?value.reply.slice(0,177)+'…':value.reply,value.manual===true)}
 async function chatTick(){if(!native||disposed||previewGreeting.value)return;try{receiveChat(await invoke<ChatView>('companion_chat',{action:'tick',payload:chatGate()}))}catch{/* Manual chat shows connection errors. */}}
 async function openChat(){chatOpen.value=true;tools.value=false;await toggleMenu(true);if(native){try{receiveChat(await invoke<ChatView>('companion_chat',{action:'status',payload:null}))}catch(e){error.value=String(e)}}}
 let syncTimer:number|undefined,syncBusy=false
@@ -132,8 +132,8 @@ const player=new AnimationPlayer()
 let maskSource = '', tapAt = 0,dockHome:{x:number;y:number}|undefined,dockHideAt=0,dockMoving=false,nextLine=Date.now()+180000
 let motionQuery: MediaQueryList, unlisten: UnlistenFn | undefined
 let tickTimer:number|undefined,pollTimer:number|undefined,saveTimer:number|undefined,hitTimer:number|undefined,clearMessageTimer:number|undefined,codexTimer:number|undefined
-const talk = (text:string) => {
-  if (state.value.preferences.quiet || hiddenForFullscreen.value) return
+const talk = (text:string,manual=false) => {
+  if ((!manual&&state.value.preferences.quiet) || hiddenForFullscreen.value) return
   message.value = text; window.clearTimeout(clearMessageTimer)
   clearMessageTimer = window.setTimeout(()=>{message.value=''},4800)
 }
@@ -444,8 +444,8 @@ onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',
       <div v-if="food" class="food-picker"><strong>给企鹅一点小鱼</strong><p>饥饿 {{Math.round(state.hunger)}} · 体力 {{Math.round(state.energy)}}</p><button @click="interact('feed');food=false">喂小鱼</button><button @click="food=false">下次再喂</button></div>
     </div>
     <div v-if="menu" class="panel-host" :style="{left:`${panel.x}px`,top:`${panel.y}px`}" @contextmenu.stop.prevent>
-      <CompanionChat v-if="chatOpen" :native="native" :view="syncView" :session="chatSession" @close="toggleMenu(false)" @received="receiveChat" @tools="openTools"/>
-      <CompanionDiagnostics v-else-if="tools" :native="native" @close="closeTools" @safe="setSafety" @sync="receiveSync" @chat="receiveChat"/>
+      <CompanionChat v-if="chatOpen" :native="native" :view="syncView" :session="chatSession" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="toggleMenu(false)" @received="receiveChat" @tools="openTools"/>
+      <CompanionDiagnostics v-else-if="tools" :native="native" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="closeTools" @safe="setSafety" @sync="receiveSync" @chat="receiveChat"/>
       <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @chat="openChat" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
     </div>
     <p v-if="error" class="notice" role="alert" @click="error=''">{{error}}</p>

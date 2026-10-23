@@ -1,6 +1,6 @@
 export interface Preferences {
   wander: boolean; gravity: boolean; surfaces: boolean; awareness: boolean
-  reducedMotion: boolean; quiet: boolean; codexEvents: boolean
+  reducedMotion: boolean; quiet: boolean; codexEvents: boolean; allowWorkChat: boolean
   movement: 'still' | 'wander' | 'follow'; size: number; rhythm: 'calm' | 'balanced' | 'lively'
   walkSpeed: number; hoverPause: boolean; topmost: boolean; fullscreenHide: boolean
   passthrough: boolean; autostart: boolean; personality: 'gentle' | 'playful' | 'quiet' | 'warm'
@@ -21,7 +21,7 @@ export interface Body { x: number; y: number; vx: number; vy: number; width: num
 export type DockEdge = 'none' | 'left' | 'right' | 'top'
 export const defaultCompanion = (now: number): CompanionState => ({ schema: 1, energy: 80, hunger: 20,
   affection: 65, savedAt: now, x: null, y: null, dock: 'none', preferences: { wander: false, gravity: true,
-    surfaces: true, awareness: false, reducedMotion: false, quiet: false, codexEvents: true,
+    surfaces: true, awareness: false, reducedMotion: false, quiet: false, codexEvents: true, allowWorkChat: false,
     movement: 'still', size: 1, rhythm: 'balanced', walkSpeed: 55, hoverPause: true,
     topmost: true, fullscreenHide: true, passthrough: false, autostart: false, personality: 'gentle',
     edgeDock: true, autoHide: true, notifications: true, animationPack:'builtin',videoAnimations:true,springDrag:true,statusAnimations:true,musicMode:'audio' } })

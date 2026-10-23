@@ -17,17 +17,22 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::WebviewWindow;
+#[path = "companion_scheduler.rs"]
+mod scheduler;
+use scheduler::{Scheduler, Task};
 
 #[derive(Clone, Default)]
 struct Gate {
     busy: bool,
+    working: bool,
     quiet: bool,
     fullscreen: bool,
     visible: bool,
 }
 #[derive(Clone)]
 pub struct ChatService {
-    running: Arc<AtomicBool>,
+    scheduler: Scheduler,
+    tick_running: Arc<AtomicBool>,
     gate: Arc<Mutex<Gate>>,
     started: Instant,
     last_learn: Arc<Mutex<Option<Instant>>>,
@@ -35,7 +40,8 @@ pub struct ChatService {
 impl ChatService {
     pub fn new() -> Self {
         Self {
-            running: Arc::new(AtomicBool::new(false)),
+            scheduler: Scheduler::default(),
+            tick_running: Arc::new(AtomicBool::new(false)),
             gate: Arc::new(Mutex::new(Gate::default())),
             started: Instant::now(),
             last_learn: Arc::new(Mutex::new(None)),
@@ -49,21 +55,6 @@ impl Drop for Running {
     }
 }
 
-fn acquire(running: &Arc<AtomicBool>) -> Result<Running, String> {
-    let started = Instant::now();
-    loop {
-        if running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            return Ok(Running(running.clone()));
-        }
-        if started.elapsed() > Duration::from_secs(95) {
-            return Err("消息已保存，企鹅还在思考，请稍后再聊。".into());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
 fn executable(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")
         .into_iter()
@@ -99,6 +90,9 @@ fn codex() -> Result<PathBuf, String> {
     Err("没有找到系统 Codex，请安装并登录 Codex 后重试。".into())
 }
 fn bridge(service: &Service, mut request: Value) -> Result<Value, String> {
+    // Recall may run alongside inference. Serialize only module installation.
+    static FILES: Mutex<()> = Mutex::new(());
+    let files = FILES.lock().map_err(|_| "气泡程序暂不可用。")?;
     let root = service.chat_root()?.join("bubble-engine");
     fs::create_dir_all(&root).map_err(|_| "无法建立气泡运行目录。")?;
     let engine = root.join("chat-engine.mjs");
@@ -129,6 +123,7 @@ fn bridge(service: &Service, mut request: Value) -> Result<Value, String> {
             fs::write(path, source).map_err(|_| "无法更新气泡运行程序。")?;
         }
     }
+    drop(files);
     if request["action"] != "recall" {
         request["command"] = json!(codex()?);
     }
@@ -282,6 +277,14 @@ fn remember_output(service: &Service, output: &Value, consume: bool) -> Result<(
     }
     Ok(())
 }
+fn recall_preview(service: &Service, chat: &ChatService, data: &Value, proactive: bool) -> Result<Value, String> {
+    let view = service.status()?;
+    let brain = crate::companion_brain::load(&view["document"])?;
+    let recalled = bridge(service, json!({"action":"recall","document":view["document"],"prompt":data["text"].as_str().unwrap_or(""),"proactive":proactive}))?;
+    let mut response = result(service, None)?;
+    response["preview"] = json!({"recall":recalled,"motive":brain.config.motive,"reason":environment_reason(chat,&brain.config,false).unwrap_or("环境允许；实际发送仍需满足共享预约、冷却和概率")});
+    Ok(response)
+}
 fn policy_reason(
     g: &Gate,
     cfg: &crate::companion_brain::Config,
@@ -290,7 +293,7 @@ fn policy_reason(
     idle: u32,
 ) -> Option<&'static str> {
     if g.busy {
-        return Some("你正在忙，暂不打扰");
+        return Some("桌宠正在被拖动，暂不发话");
     }
     if g.fullscreen {
         return Some("正在全屏，暂不打扰");
@@ -300,6 +303,9 @@ fn policy_reason(
     }
     if manual {
         return None;
+    }
+    if g.working {
+        return Some("Codex 正在工作，已开启工作免打扰");
     }
     if g.quiet {
         return Some("安静模式、拖动或面板打开中");
@@ -345,6 +351,7 @@ fn outreach(service: &Service, chat: &ChatService, manual: bool) -> Result<Value
         service.history_note("outreachStatus", reason)?;
         result(service, None)
     };
+    if manual && chat.scheduler.manual_cancelled() { return status("手动搭话已取消"); }
     if !manual && !social(&view)?.proactive {
         return status("主动搭话已关闭；仍可手动真发一次");
     }
@@ -418,6 +425,7 @@ fn outreach(service: &Service, chat: &ChatService, manual: bool) -> Result<Value
         }
     }
     let token = uuid::Uuid::new_v4().to_string();
+    if manual && chat.scheduler.manual_cancelled() { return status("手动搭话已取消"); }
     service.record(
         "social",
         json!({"type":"reserve","token":token,"manual":manual}),
@@ -443,6 +451,7 @@ fn outreach(service: &Service, chat: &ChatService, manual: bool) -> Result<Value
     view = service.status()?;
     let current = crate::companion_brain::load(&view["document"])?;
     if view["pending"] != 0
+        || (manual && chat.scheduler.manual_cancelled())
         || environment_reason(chat, &current.config, manual).is_some()
         || (!manual && current.config.dry_run)
         || view["document"]["social"]["reservation"] != token
@@ -473,8 +482,10 @@ fn outreach(service: &Service, chat: &ChatService, manual: bool) -> Result<Value
         let _ = sync_if_server(service, &view);
         service.history_note("outreachError", "")?;
         service.history_note("outreachStatus", "本轮气泡已发出")?;
-        if environment_reason(chat, &current.config, manual).is_none() {
-            return result(service, output["reply"].as_str());
+        if !(manual && chat.scheduler.manual_cancelled()) && environment_reason(chat, &current.config, manual).is_none() {
+            let mut response = result(service, output["reply"].as_str())?;
+            response["manual"] = json!(manual);
+            return Ok(response);
         }
     }
     status("本轮未显示新气泡；可能话题重复或预约已取消")
@@ -493,10 +504,13 @@ pub async fn companion_chat(
     let chat = chat.inner().clone();
     let service = service.inner().clone();
     let data = payload.unwrap_or(Value::Null);
+    if action == "runtime" { return serde_json::to_value(chat.scheduler.status()?).map_err(|_| "调度状态无效。".into()); }
+    if action == "cancelOutreach" { chat.scheduler.cancel_manual(); return Ok(json!({"ok":true})); }
     if action == "tick" || action == "gate" {
         let mut gate = chat.gate.lock().map_err(|_| "陪伴状态忙。")?;
         *gate = Gate {
             busy: data["busy"].as_bool().unwrap_or(true),
+            working: data["working"].as_bool().unwrap_or(true),
             quiet: data["quiet"].as_bool().unwrap_or(true),
             fullscreen: data["fullscreen"].as_bool().unwrap_or(true),
             visible: data["visible"].as_bool().unwrap_or(false),
@@ -511,33 +525,29 @@ pub async fn companion_chat(
     if action == "send" {
         chat.gate.lock().map_err(|_| "陪伴状态忙。")?.quiet = true;
     }
-    if action != "send" && chat.running.swap(true, Ordering::AcqRel) {
-        return if action == "tick" {
-            result(&service, None)
-        } else {
-            Err("企鹅正在想这句话，请稍等。".into())
-        };
-    }
-    let guard = if action == "send" {
-        None
-    } else {
-        Some(Running(chat.running.clone()))
-    };
+    // Only one scan/tick runs, but manual actions and local previews stay available.
+    let tick_guard = if action == "tick" {
+        if chat.tick_running.swap(true, Ordering::AcqRel) { return result(&service, None); }
+        Some(Running(chat.tick_running.clone()))
+    } else { None };
+    // Register before spawning so even immediate cancellation sees this request.
+    let manual_request = if action == "outreach" { Some(chat.scheduler.reserve(Task::Manual)?) } else { None };
     let report_service = service.clone();
     let report_error = action == "tick" || action == "outreach";
     let outcome = tauri::async_runtime::spawn_blocking(move||{
+        let _tick_guard = tick_guard;
         // Persist a user's response immediately, even while an opener is being generated.
         // This cancels its reservation before waiting for the single inference slot.
         let mut user_source=None;
-        let _guard=if let Some(guard)=guard {guard}else{
+        if action == "send" {
             let prompt=data["text"].as_str().ok_or("请输入内容。")?;
             service.record("social",json!({"type":"user","text":prompt}))?;
             let view=service.status()?;
             let session=pet_session(view["document"]["petId"].as_str().ok_or("宠物身份无效。")?);
             user_source=view["document"]["conversations"].as_array().unwrap().iter().rev().find(|m|m["session"]==session&&m["role"]=="user").cloned();
-            let _=sync_if_server(&service,&view);
-            acquire(&chat.running)?
-        };
+        }
+        let task = match action.as_str() { "send" => Some(Task::Reply), "sessions"|"read"|"learn"|"previewMemories" => Some(Task::Interactive), _ => None };
+        let _inference = if let Some(request)=manual_request { Some(request.wait(Duration::from_secs(150))?) } else { task.map(|task| chat.scheduler.acquire(task, Duration::from_secs(150))).transpose()? };
         let mut view=service.status()?;
         match action.as_str(){
             "settings"=>{service.record("social",json!({"type":"settings","enabled":data["enabled"],"proactive":data["proactive"]}))?;let _=sync_if_server(&service,&view);}
@@ -565,10 +575,7 @@ pub async fn companion_chat(
             "brain"=>{service.record("brain",data)?;let _=sync_if_server(&service,&view);}
             "outreach"=>return outreach(&service,&chat,true),
             "recall"|"rehearse"=>{
-                let brain=crate::companion_brain::load(&view["document"])?;
-                let recalled=bridge(&service,json!({"action":"recall","document":view["document"],"prompt":data["text"].as_str().unwrap_or(""),"proactive":action=="rehearse"}))?;
-                let mut response=result(&service,None)?;
-                response["preview"]=json!({"recall":recalled,"motive":brain.config.motive,"reason":environment_reason(&chat,&brain.config,false).unwrap_or("环境允许；实际发送仍需满足共享预约、冷却和概率")});return Ok(response);
+                return recall_preview(&service,&chat,&data,action=="rehearse");
             }
             "previewMemories"=>{
                 let mut sources:Vec<Value>=serde_json::from_value(data["sources"].clone()).map_err(|_|"资料格式无效。")?;
@@ -595,15 +602,27 @@ pub async fn companion_chat(
                 let _=scan(&service);
                 view=service.status()?;
                 let state=social(&view)?;
+                let mut outreach_error=None;
+                // Give a due opener the next free slot before starting more learning.
+                if let Some(_slot)=chat.scheduler.try_acquire(Task::Automatic) {
+                    match outreach(&service,&chat,false) {
+                        Ok(response) if response["reply"].as_str().is_some_and(|s|!s.is_empty()) => return Ok(response),
+                        Ok(_) => (),
+                        Err(error) => { service.history_note("outreachError",&error)?; outreach_error=Some(error); }
+                    }
+                }
                 let should_learn=state.enabled&&chat.last_learn.lock().map_err(|_|"陪伴状态忙。")?.is_none_or(|t|Instant::now().checked_duration_since(t).is_some_and(|d|d>Duration::from_secs(60)));
-                if should_learn{
+                if let Some(_slot)=should_learn.then(||chat.scheduler.try_acquire(Task::Learning)).flatten(){
                     *chat.last_learn.lock().map_err(|_|"陪伴状态忙。")?=Some(Instant::now());
                     if learn_batch(&service,&view).is_err() {
                         // Persist a visible error and back off inference failures for five minutes.
                         *chat.last_learn.lock().map_err(|_|"陪伴状态忙。")?=Some(Instant::now()+Duration::from_secs(240));
                     }
                 }
-                return outreach(&service,&chat,false);
+                // Recheck after a long learning batch; queued manual work goes first.
+                if let Some(error)=outreach_error { return Err(error); }
+                if let Some(_slot)=chat.scheduler.try_acquire(Task::Automatic) { return outreach(&service,&chat,false); }
+                return result(&service,None);
             }
             _=>return Err("不支持的气泡操作。".into()),
         }
@@ -620,6 +639,31 @@ pub async fn companion_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_manual_opener_bypasses_work_policy_but_not_hidden_or_fullscreen() {
+        let config = crate::companion_brain::Config::default();
+        let gate = Gate { working: true, quiet: true, visible: true, ..Default::default() };
+        assert!(policy_reason(&gate, &config, true, 23, 0).is_none());
+        assert_eq!(policy_reason(&gate, &config, false, 12, 120), Some("Codex 正在工作，已开启工作免打扰"));
+        assert!(policy_reason(&Gate { visible: false, ..gate.clone() }, &config, true, 12, 120).is_some());
+        assert!(policy_reason(&Gate { fullscreen: true, ..gate }, &config, true, 12, 120).is_some());
+    }
+    #[test]
+    #[cfg(windows)]
+    fn local_rehearsal_succeeds_during_learning_without_reservation_or_inference() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(root.path(), json!({})).unwrap();
+        service.record("memory", json!({"id":"local-recall","text":"喜欢看星星","at":1,"deleted":false})).unwrap();
+        let chat = ChatService::new();
+        let _learning = chat.scheduler.try_acquire(Task::Learning).unwrap();
+        let before = service.status().unwrap();
+        let preview = recall_preview(&service, &chat, &Value::Null, true).unwrap();
+        assert_eq!(preview["preview"]["recall"]["memories"].as_array().unwrap().len(), 1);
+        assert!(preview["reply"].is_null());
+        assert_eq!(preview["status"]["document"]["social"], before["document"]["social"]);
+        assert_eq!(preview["status"]["document"]["brain"], before["document"]["brain"]);
+        assert_eq!(serde_json::to_value(chat.scheduler.status().unwrap()).unwrap()["active"], "learning");
+    }
     fn allowed(hour: u32, idle: u32, gate: &Gate) -> bool {
         policy_reason(
             gate,

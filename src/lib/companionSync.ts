@@ -9,6 +9,7 @@ export interface SyncDocument {
   brain?:Brain
   social?:{enabled:boolean;proactive:boolean;analyzed:string[];lastOutreachAt:number;lastResponseAt:number;unanswered:number;lastTopic:string;reservation:string;reservedUntil:number;day:number;sentToday:number}
 }
-export interface ChatView {status:SyncView;session:string;reply:string|null;preview?:any}
+export interface ChatView {status:SyncView;session:string;reply:string|null;manual?:boolean;preview?:any}
+export interface ChatRuntime {active:'reply'|'manual'|'interactive'|'automatic'|'learning'|null;queuedManual:boolean;queued:number;cancelling:boolean}
 export interface HistoryStatus {archived:number;pending:number;processed:number;files:number;pendingFiles:number;pendingDirectories:number;fileErrors:number;lastScan?:string;lastLearn?:string;scanError?:string;learningError?:string;outreachError?:string;outreachStatus?:string;recallReport?:string;invalidLines?:string;oversizedLines?:string}
 export interface SyncView {mode:'local'|'server';server:SyncServer|null;capture:boolean;captureWarning?:boolean;document:SyncDocument;pending:number;message:string;lastSync:number;active:boolean;running:boolean;history?:HistoryStatus}

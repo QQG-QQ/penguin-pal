@@ -3,8 +3,8 @@ import {onBeforeUnmount,onMounted,ref} from 'vue'
 import {invoke} from '@tauri-apps/api/core'
 import type {ChatView,SyncDocument,SyncServer,SyncView} from '../lib/companionSync'
 import CompanionMind from './CompanionMind.vue'
-defineProps<{native:boolean}>()
-const emit=defineEmits<{changed:[SyncView,boolean];chat:[ChatView]}>()
+defineProps<{native:boolean;allowWorkChat:boolean}>()
+const emit=defineEmits<{changed:[SyncView,boolean];chat:[ChatView];workChat:[boolean]}>()
 const view=ref<SyncView>(),host=ref(''),port=ref(22),username=ref(''),password=ref(''),namespace=ref('my-penguin')
 const fingerprint=ref(''),known=ref(false),trusted=ref(false),busy=ref(false),error=ref(''),info=ref(''),memory=ref(''),reason=ref('')
 const preview=ref<{memories:number;conversations:number;mood:number}>()
@@ -67,7 +67,7 @@ onBeforeUnmount(()=>{disposed=true;password.value='';window.clearInterval(timer)
     <div class="buttons"><button :disabled="busy" @click="install">安装 / 更新实时对话联动</button><button :disabled="busy||!view?.capture" @click="backfill">立即扫描下一批历史</button></div>
     <details><summary>已保存 {{view?.document.conversations.length??0}} 条 · 查看最近对话</summary><div class="history"><p v-for="m in view?.document.conversations.slice(-20)" :key="m.id"><b>{{m.role==='user'?'你':'助手'}} · {{new Date(m.at).toLocaleString()}}</b>{{m.text}}</p></div></details>
     <h3>陪伴记忆与心情</h3>
-    <CompanionMind :view="view" :native="native" @received="receiveMind"/>
+    <CompanionMind :view="view" :native="native" :allow-work-chat="allowWorkChat" @work-chat="emit('workChat',$event)" @received="receiveMind"/>
     <textarea v-model="memory" rows="2" maxlength="2000" placeholder="记住一个喜好、约定或共同经历"/>
     <button :disabled="busy||!memory.trim()" @click="addMemory">记下来</button>
     <div class="memories"><div v-for="m in view?.document.memories.filter(m=>!m.deleted).slice(-20)" :key="m.id"><span>{{m.text}}</span><button v-if="sourceOf(m.text)" :disabled="busy" @click="searchArchive(sourceOf(m.text))">查原文</button><button :disabled="busy" @click="action('forget',{id:m.id})">遗忘</button></div></div>
