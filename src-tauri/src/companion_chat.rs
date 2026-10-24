@@ -211,6 +211,13 @@ fn bridge(service: &Service, mut request: Value) -> Result<Value, String> {
             }
         }
     }
+    if matches!(request["action"].as_str(), Some("reply") | Some("opener")) {
+        if let Ok(brain) = crate::companion_brain::load(&request["document"]) {
+            if let Ok(value) = serde_json::to_value(crate::companion_brain::tendency(&request["document"], &brain)) {
+                request["tendency"] = value;
+            }
+        }
+    }
     // Recall may run alongside inference. Serialize only module installation.
     static FILES: Mutex<()> = Mutex::new(());
     let files = FILES.lock().map_err(|_| "气泡程序暂不可用。")?;
@@ -526,7 +533,8 @@ fn outreach(service: &Service, chat: &ChatService, manual: bool) -> Result<Value
         } else {
             1.0
         };
-        let chance = (cfg.probability * factor
+        let tendency = crate::companion_brain::tendency(&view["document"], &brain);
+        let chance = (cfg.probability * factor * tendency.proactive
             + (brain.misses as f64 * cfg.miss_bonus).min(cfg.bonus_cap))
         .min(100.0);
         let random = uuid::Uuid::new_v4();

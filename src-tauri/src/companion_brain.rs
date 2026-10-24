@@ -341,6 +341,78 @@ pub fn load(doc: &Value) -> Result<Brain, String> {
 }
 
 /// 由性格模板、记忆体量和历史情绪沉淀出七维基线。
+/// 由记忆、亲近度与近期情绪推断当前性格倾向，并给出主动性与回复长度系数。
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tendency {
+    pub label: String,
+    pub name: String,
+    pub warmth: f64,
+    pub stress: f64,
+    pub proactive: f64,
+    pub brief: f64,
+}
+
+pub fn tendency(doc: &Value, brain: &Brain) -> Tendency {
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let memories = doc["memories"]
+        .as_array()
+        .map(|list| list.iter().filter(|m| m["deleted"] != true).count())
+        .unwrap_or(0) as f64;
+    let agreements = brain
+        .memories
+        .values()
+        .filter(|meta| meta.kind == "agreement")
+        .count() as f64;
+    let conversations = doc["conversations"].as_array().cloned().unwrap_or_default();
+    let recent = conversations
+        .iter()
+        .filter(|m| m["at"].as_u64().unwrap_or(0) + 7 * 86400_000 >= now)
+        .count() as f64;
+    let affection = doc["pet"]["affection"].as_f64().unwrap_or(0.0);
+    let baseline = brain.config.baseline.max(1.0);
+    let mood = doc["pet"]["mood"].as_f64().unwrap_or(baseline);
+    let mut negative = 0.0;
+    let mut positive = 0.0;
+    let events: Vec<&Event> = brain.timeline.iter().rev().take(60).collect();
+    for event in &events {
+        negative += event.dims.get("worry").copied().unwrap_or(0.0)
+            + event.dims.get("sad").copied().unwrap_or(0.0)
+            + event.dims.get("heartache").copied().unwrap_or(0.0);
+        positive += event.dims.get("happy").copied().unwrap_or(0.0)
+            + event.dims.get("sweet").copied().unwrap_or(0.0)
+            + event.dims.get("calm").copied().unwrap_or(0.0);
+    }
+    let count = events.len().max(1) as f64;
+    let neg = (negative / count / 100.0).clamp(0.0, 1.0);
+    let _ = positive;
+    let warmth = ((memories / 300.0) * 0.3
+        + (agreements / 20.0) * 0.2
+        + (affection / 100.0) * 0.3
+        + (recent / 30.0) * 0.2)
+        .clamp(0.0, 1.0);
+    let stress = (neg * 0.7 + ((baseline - mood).max(0.0) / baseline) * 0.3).clamp(0.0, 1.0);
+    let (label, name, proactive, brief) = if stress >= 0.5 && warmth < 0.5 {
+        ("quiet", "安静", 0.6, 0.7)
+    } else if stress >= 0.5 {
+        ("withdrawn", "低落", 0.45, 0.6)
+    } else if warmth >= 0.65 {
+        ("clingy", "依恋", 1.3, 1.15)
+    } else if warmth >= 0.45 {
+        ("warm", "亲近", 1.15, 1.05)
+    } else {
+        ("gentle", "温和", 1.0, 1.0)
+    };
+    Tendency {
+        label: label.into(),
+        name: name.into(),
+        warmth: (warmth * 100.0).round() / 100.0,
+        stress: (stress * 100.0).round() / 100.0,
+        proactive,
+        brief,
+    }
+}
+
 pub fn derive_traits(doc: &Value, brain: &Brain) -> BTreeMap<String, f64> {
     let personality = doc["pet"]["personality"].as_str().unwrap_or("gentle");
     let template: [(&str, f64); 7] = match personality {

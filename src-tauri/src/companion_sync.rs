@@ -398,8 +398,11 @@ impl Service {
         self.archive_document(&state.disk.document)?;
         let mut visible = serde_json::to_value(&state.disk.document).map_err(|_| "陪伴状态不可用。")?;
         if let Ok(brain) = crate::companion_brain::load(&visible) {
-            if let Ok(value) = serde_json::to_value(brain) {
+            if let Ok(value) = serde_json::to_value(&brain) {
                 visible["brain"] = value;
+            }
+            if let Ok(value) = serde_json::to_value(crate::companion_brain::tendency(&visible, &brain)) {
+                visible["tendency"] = value;
             }
         }
         Ok(
