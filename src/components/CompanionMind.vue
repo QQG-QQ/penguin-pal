@@ -9,6 +9,7 @@ const busy=ref(false),error=ref(''),info=ref(''),tab=ref('outreach'),dirty=ref(f
 const draft=ref(mindConfig());let original=mindConfig()
 watch(()=>props.view?.document.brain?.config,c=>{if(!dirty.value){original={...mindConfig(),...c};draft.value={...original}}},{immediate:true})
 const brain=computed(()=>props.view?.document.brain),face=computed(()=>moodFace(props.view?.document.pet.mood??70))
+const personality=computed(()=>{const raw=(props.view?.document.pet as any)?.personality??'gentle';return ({gentle:'温和',cheerful:'开朗',happy:'开朗',tsundere:'傲娇'} as Record<string,string>)[raw]??raw})
 const query=ref(''),filter=ref('all'),order=ref('new'),recall=ref<any>(),preview=ref<any>()
 const rehearsing=ref(false),manualPending=ref(false),runtime=ref<ChatRuntime>()
 const taskNames={reply:'回复聊天',manual:'准备手动气泡',interactive:'处理手动请求',automatic:'准备主动气泡',learning:'后台整理记忆'}
@@ -75,6 +76,7 @@ async function applyRefined(){await run(async()=>{if(mode.value==='import'){cons
     </div>
     <div v-if="tab==='mood'">
       <p>{{face.icon}} {{face.label}} {{Math.round(view?.document.pet.mood??70)}} · {{view?.document.pet.moodReason||'平稳陪伴'}}</p>
+      <p><small>性格：{{personality}} · 七维基线由性格与记忆沉淀，聊天只在基线上波动</small></p>
       <div class="emotions"><label v-for="(label,key) in emotionLabels" :key="key">{{label}}<meter min="0" max="100" :value="brain?.emotions[key]??0"/>{{(brain?.emotions[key]??0).toFixed(1)}}</label></div>
       <details><summary>心情时间线</summary><p v-for="event in [...(brain?.timeline??[])].reverse()" :key="event.id"><small>{{date(event.at)}} · {{event.source==='speak-up'?'主动找你':'你的消息'}} · 把握 {{event.confidence}}%</small>{{event.delta>0?'+':''}}{{event.delta}}：{{event.reason}}<small>{{Object.entries(event.dims).filter(([,v])=>v>=1).map(([k,v])=>emotionLabels[k]+' '+v.toFixed(1)).join(' · ')}}</small></p><small v-if="!brain?.timeline.length">旧版总分记录仍保留在备份；新增互动将在这里展示细分情绪。</small></details>
       <details><summary>它会听到什么</summary><p>当前方式：{{draft.injectMode==='off'?'不影响回复':draft.injectMode==='state'?'当前状态':'新事件只带入一次'}}</p><p v-if="brain?.event">最新判断：{{brain.event.reason}} · 把握 {{brain.event.confidence}}%<br/>{{brain.event.confidence<draft.confidence?'可信度不足，只留后台':(brain.event.id===brain.consumed||brain.consumedIds?.includes(brain.event.id))?'已经带入过':'等待下一轮带入'}}</p><p v-if="brain?.injection">实际带入（{{date(brain.injectedAt)}}）：{{brain.injection}}</p></details>

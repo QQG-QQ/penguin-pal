@@ -336,6 +336,7 @@ pub fn load(doc: &Value) -> Result<Brain, String> {
     if brain.emotions.values().all(|value| *value <= 0.01) {
         brain.emotions = traits;
     }
+    brain.advance(chrono::Utc::now().timestamp_millis() as u64);
     Ok(brain)
 }
 
