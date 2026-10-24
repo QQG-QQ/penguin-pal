@@ -1,6 +1,6 @@
 [package]
 name = "penguin-pal"
-version = "0.9.9"
+version = "0.9.10"
 description = "AI Desktop Pet Assistant"
 authors = ["PenguinPal Team"]
 edition = "2021"
@@ -48,4 +48,4 @@ custom-protocol = ["tauri/custom-protocol"]
 tempfile = "3.10"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.3", features = ["Foundation", "Win32_Security_Credentials", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_WinRT"] }
+windows = { version = "0.61.3", features = ["Foundation", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_WinRT"] }

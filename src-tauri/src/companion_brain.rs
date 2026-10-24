@@ -211,6 +211,8 @@ pub struct Brain {
     pub injection: String,
     pub injected_at: u64,
     pub timeline: Vec<Event>,
+    pub traits: BTreeMap<String, f64>,
+    pub traits_at: u64,
     pub decisions: Vec<Decision>,
     pub next_check_at: u64,
     pub misses: u32,
@@ -229,6 +231,8 @@ impl Default for Brain {
             injection: String::new(),
             injected_at: 0,
             timeline: vec![],
+            traits: emotions(),
+            traits_at: 0,
             decisions: vec![],
             next_check_at: 0,
             misses: 0,
@@ -314,16 +318,67 @@ impl Brain {
         }
         if self.emotion_at > 0 {
             let minutes = at.saturating_sub(self.emotion_at) as f64 / 60000.0;
-            for v in self.emotions.values_mut() {
-                *v *= 0.5_f64.powf(minutes / self.config.emotion_half_minutes);
+            let factor = 0.5_f64.powf(minutes / self.config.emotion_half_minutes);
+            for (name, value) in self.emotions.iter_mut() {
+                let base = self.traits.get(name).copied().unwrap_or(0.0);
+                *value = base + (*value - base) * factor;
             }
         }
         self.emotion_at = at.max(self.emotion_at);
     }
 }
 pub fn load(doc: &Value) -> Result<Brain, String> {
-    serde_json::from_value(doc.get("brain").cloned().unwrap_or_else(|| json!({})))
-        .map_err(|_| "陪伴扩展数据无效。".into())
+    let mut brain: Brain = serde_json::from_value(doc.get("brain").cloned().unwrap_or_else(|| json!({})))
+        .map_err(|_| String::from("陪伴扩展数据无效。"))?;
+    brain.sanitize();
+    let traits = derive_traits(doc, &brain);
+    brain.traits = traits.clone();
+    if brain.emotions.values().all(|value| *value <= 0.01) {
+        brain.emotions = traits;
+    }
+    Ok(brain)
+}
+
+/// 由性格模板、记忆体量和历史情绪沉淀出七维基线。
+pub fn derive_traits(doc: &Value, brain: &Brain) -> BTreeMap<String, f64> {
+    let personality = doc["pet"]["personality"].as_str().unwrap_or("gentle");
+    let template: [(&str, f64); 7] = match personality {
+        "cheerful" | "happy" => [("happy", 42.0), ("calm", 22.0), ("sweet", 14.0), ("heartache", 5.0), ("worry", 8.0), ("sad", 4.0), ("jealous", 5.0)],
+        "tsundere" => [("happy", 20.0), ("calm", 18.0), ("sweet", 10.0), ("heartache", 8.0), ("worry", 6.0), ("sad", 4.0), ("jealous", 18.0)],
+        _ => [("happy", 30.0), ("calm", 36.0), ("sweet", 12.0), ("heartache", 8.0), ("worry", 10.0), ("sad", 6.0), ("jealous", 5.0)],
+    };
+    let memories = doc["memories"].as_array().map(|list| list.len()).unwrap_or(0) as f64;
+    let volume = (memories / 60.0).min(10.0);
+    let mut history: BTreeMap<&str, (f64, f64)> = BTreeMap::new();
+    for event in brain.timeline.iter().rev().take(60) {
+        for (key, value) in event.dims.iter() {
+            let entry = history.entry(match key.as_str() {
+                "happy" => "happy",
+                "calm" => "calm",
+                "sweet" => "sweet",
+                "heartache" => "heartache",
+                "worry" => "worry",
+                "sad" => "sad",
+                "jealous" => "jealous",
+                _ => continue,
+            }).or_insert((0.0, 0.0));
+            entry.0 += *value;
+            entry.1 += 1.0;
+        }
+    }
+    let mut traits = emotions();
+    for (name, base) in template {
+        let average = history.get(name).map(|(sum, count)| sum / count.max(1.0)).unwrap_or(base);
+        let mut value = base * 0.7 + average * 0.3;
+        if matches!(name, "calm" | "happy") {
+            value += volume * 0.6;
+        }
+        if !brain.config.romance && matches!(name, "sweet" | "jealous") {
+            value = 0.0;
+        }
+        traits.insert(name.to_string(), (value.clamp(0.0, 100.0) * 10.0).round() / 10.0);
+    }
+    traits
 }
 fn save(doc: &mut Value, mut brain: Brain) -> Result<(), String> {
     brain.sanitize();
@@ -626,4 +681,22 @@ pub fn apply(doc: &mut Value, data: &Value, id: &str, at: u64) -> Result<(), Str
     }
     let _ = id;
     save(doc, brain)
+}
+
+#[cfg(test)]
+mod trait_tests {
+    use serde_json::json;
+
+    #[test]
+    fn traits_form_baseline() {
+        let doc = json!({
+            "pet": {"personality": "gentle"},
+            "memories": [{"id": "a", "text": "喜欢咖啡"}, {"id": "b", "text": "喜欢猫"}],
+            "brain": {}
+        });
+        let brain = super::load(&doc).unwrap();
+        assert!(brain.emotions.values().any(|value| *value > 5.0), "{:?}", brain.emotions);
+        assert!(brain.traits["calm"] >= 30.0, "{:?}", brain.traits);
+        assert_eq!(brain.traits["sweet"], 0.0);
+    }
 }

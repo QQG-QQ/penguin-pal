@@ -153,6 +153,7 @@ const localDraft = ref<ProviderConfigInput>(ensureSettingsDraft(cloneDraft(props
 
 const providerOptions: Array<{ label: string; value: ProviderKind }> = [
   { label: 'Codex CLI', value: 'codexCli' },
+  { label: 'DeepSeek', value: 'deepSeek' },
   { label: 'OpenAI', value: 'openAi' },
   { label: 'Anthropic', value: 'anthropic' },
   { label: 'OpenAI-Compatible', value: 'openAiCompatible' },
@@ -530,6 +531,14 @@ const applyProviderRules = () => {
     localDraft.value.oauthTokenUrl = null
     localDraft.value.oauthClientId = null
     localDraft.value.oauthScopes = ''
+  }
+  if (localDraft.value.kind === 'deepSeek') {
+    if (!localDraft.value.model.trim().toLowerCase().startsWith('deepseek')) {
+      localDraft.value.model = 'deepseek-chat'
+    }
+    if (!localDraft.value.baseUrl || !localDraft.value.baseUrl.trim()) {
+      localDraft.value.baseUrl = 'https://api.deepseek.com/v1'
+    }
   }
 }
 

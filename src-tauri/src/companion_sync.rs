@@ -396,9 +396,15 @@ impl Service {
         self.ingest()?;
         let state = self.inner.lock().map_err(|_| "同步状态忙。")?;
         self.archive_document(&state.disk.document)?;
+        let mut visible = serde_json::to_value(&state.disk.document).map_err(|_| "陪伴状态不可用。")?;
+        if let Ok(brain) = crate::companion_brain::load(&visible) {
+            if let Ok(value) = serde_json::to_value(brain) {
+                visible["brain"] = value;
+            }
+        }
         Ok(
             json!({"mode":if state.disk.server.is_some() {"server"}else{"local"}, "server":state.disk.server,
-            "capture":state.disk.capture, "document":state.disk.document, "pending":state.disk.pending.len(), "history":self.history.status()?,
+            "capture":state.disk.capture, "document":visible, "pending":state.disk.pending.len(), "history":self.history.status()?,
             "message":state.status, "lastSync":state.last_sync, "captureWarning":self.root.parent().is_some_and(|p|p.join("conversation-overflow.json").exists()), "active":state.active&&now().saturating_sub(state.last_sync)<45000, "running":self.running.load(Ordering::Relaxed)}),
         )
     }

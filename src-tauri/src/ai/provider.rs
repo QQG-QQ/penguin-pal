@@ -117,6 +117,28 @@ pub async fn respond(
             )
             .await
         }
+        ProviderKind::DeepSeek => {
+            if matches!(provider.auth_mode, AuthMode::OAuth) {
+                return Err("DeepSeek 当前仅支持 API Key 认证。".to_string());
+            }
+            let key = required_key(api_key, "DeepSeek")?;
+            let base_url = provider
+                .base_url
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string());
+
+            call_openai_like(
+                provider,
+                Some(key.as_str()),
+                permission_level,
+                allowed_actions,
+                history,
+                &base_url,
+                "DeepSeek",
+            )
+            .await
+        }
         ProviderKind::Mock | ProviderKind::CodexCli => unreachable!(),
     }
 }
@@ -215,6 +237,27 @@ pub async fn plan_control_request(
                 user_input,
                 &base_url,
                 "OpenAI-Compatible",
+            )
+            .await
+        }
+        ProviderKind::DeepSeek => {
+            if matches!(provider.auth_mode, AuthMode::OAuth) {
+                return Err("DeepSeek 当前仅支持 API Key 认证。".to_string());
+            }
+            let key = required_key(api_key, "DeepSeek")?;
+            let base_url = provider
+                .base_url
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "https://api.deepseek.com/v1".to_string());
+
+            call_openai_like_prompt(
+                provider,
+                Some(key.as_str()),
+                planner_prompt,
+                user_input,
+                &base_url,
+                "DeepSeek",
             )
             .await
         }
@@ -794,11 +837,14 @@ async fn call_openai_like_prompt(
 ) -> Result<String, String> {
     let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let client = Client::new();
-    let payload = json!({
+    let mut payload = json!({
         "model": provider.model,
         "temperature": 0.0,
         "messages": build_openai_messages_from_texts(planner_prompt, user_input),
     });
+    if matches!(provider.kind, ProviderKind::DeepSeek) {
+        payload["response_format"] = json!({"type": "json_object"});
+    }
 
     let mut request = client.post(endpoint).json(&payload);
     if let Some(token) = credential {

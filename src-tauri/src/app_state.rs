@@ -257,6 +257,7 @@ impl Default for PetStatus {
 pub enum ProviderKind {
     Mock,
     CodexCli,
+    DeepSeek,
     OpenAi,
     Anthropic,
     OpenAiCompatible,
@@ -267,6 +268,7 @@ impl ProviderKind {
         match self {
             Self::Mock => "penguin-guardian",
             Self::CodexCli => "gpt-5-codex",
+            Self::DeepSeek => "deepseek-chat",
             Self::OpenAi => "gpt-4.1-mini",
             Self::Anthropic => "claude-3-5-sonnet-latest",
             Self::OpenAiCompatible => "llama3.1",
@@ -277,6 +279,7 @@ impl ProviderKind {
         match self {
             Self::Mock => "Mock",
             Self::CodexCli => "Codex CLI",
+            Self::DeepSeek => "DeepSeek",
             Self::OpenAi => "OpenAI",
             Self::Anthropic => "Anthropic",
             Self::OpenAiCompatible => "OpenAI-Compatible",

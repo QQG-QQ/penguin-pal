@@ -21,7 +21,7 @@ export type PetDockState = 'normal' | 'dockedLeft' | 'dockedRight' | 'dockedTop'
 export type AssistantWindowView = 'pet' | 'settings' | 'bubble' | 'research'
 export type PetMood = 'cheerful' | 'calm' | 'curious' | 'needy' | 'tired'
 
-export type ProviderKind = 'mock' | 'codexCli' | 'openAi' | 'anthropic' | 'openAiCompatible'
+export type ProviderKind = 'mock' | 'codexCli' | 'deepSeek' | 'openAi' | 'anthropic' | 'openAiCompatible'
 export type ProviderAuthMode = 'apiKey' | 'oauth'
 export type VoiceInputMode = 'disabled' | 'continuous' | 'pushToTalk'
 export type OAuthStatus = 'signedOut' | 'pending' | 'authorized' | 'error'

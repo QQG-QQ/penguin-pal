@@ -135,11 +135,11 @@ export function localLine(personality: Preferences['personality'], context: stri
 }
 export function codexPresentation(status: string) {
   switch (status) {
-    case 'working': return { mode: 'thinking' as const, label: 'Codex 正在工作' }
-    case 'waiting': return { mode: 'listening' as const, label: 'Codex 等待你的确认' }
-    case 'ended': return { mode: 'speaking' as const, label: 'Codex 本轮已结束' }
-    case 'interrupted': return { mode: 'idle' as const, label: 'Codex 已中断' }
-    case 'toolError': return {mode:'guarded' as const,label:'Codex 工具出现错误'}
-    default: return { mode: 'idle' as const, label: '打开 Codex 聊天' }
+    case 'working': return { mode: 'thinking' as const, label: '正在工作' }
+    case 'waiting': return { mode: 'listening' as const, label: '等待你的确认' }
+    case 'ended': return { mode: 'speaking' as const, label: '本轮工作已结束' }
+    case 'interrupted': return { mode: 'idle' as const, label: '已中断' }
+    case 'toolError': return {mode:'guarded' as const,label:'工具出现错误'}
+    default: return { mode: 'idle' as const, label: '打开聊天' }
   }
 }

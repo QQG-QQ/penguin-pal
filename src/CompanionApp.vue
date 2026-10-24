@@ -59,6 +59,8 @@ function syncRecord(action:string,payload:unknown){if(native)void invoke<SyncVie
 const menu = ref(false), expanded = ref(false), food = ref(false), message = ref(''), error = ref('')
 const tools=ref(false),safeMode=ref(false),dock=ref<DockEdge>('none'),dockHidden=ref(false)
 const codexStatus = ref('idle'), lastEvent = ref(0), connected = ref(false), visible = ref(true)
+const llmProvider = ref('codex')
+const deepSeek = computed(() => llmProvider.value === 'deepseek')
 const context = ref('quiet'), fullscreen = ref(false), hovered = ref(false), dragging = ref(false), airborne = ref(false), facing = ref(1)
 const img = ref<HTMLElement | null>(null), mask = ref<PetAlphaMask | null>(null), pose = ref('idle')
 const stage = ref({x:0,y:0}), panel = ref({x:296,y:8})
@@ -115,8 +117,8 @@ async function refreshPacks(){if(native)try{packs.value=(await invoke<MediaPack[
 async function importPack(){if(!native||importing.value)return;importing.value=true;try{const pack=await invoke<MediaPack|null>('companion_media_import');if(pack){await refreshPacks();await preferencesChanged({animationPack:pack.id});talk(`已启用 ${pack.name}。`)}}catch(e){error.value=`动画导入失败：${String(e)}`}finally{importing.value=false}}
 async function openPackFolder(){if(native)try{await invoke('companion_media_folder')}catch(e){error.value=String(e)}}
 const hiddenForFullscreen = computed(() => fullscreen.value && state.value.preferences.fullscreenHide && !menu.value)
-const statusLabel = computed(() => busy.value ? presentation.value.label.replace('Codex ','') : musicScene.value.showing?'音乐打碟':({rest:'休息',walk:'散步',eat:'吃鱼',sweep:'扫地',happy:'开心',pat:'摸摸'} as Record<string,string>)[activity.value] ?? '待机')
-const connection = computed(() => !state.value.preferences.codexEvents ? 'Codex 状态已关闭' : lastEvent.value ? '已收到 Codex 状态事件' : connected.value ? '等待事件，首次安装需在 Codex 信任 hooks' : native ? '本地连接中' : '浏览器预览')
+const statusLabel = computed(() => (!deepSeek.value&&busy.value) ? presentation.value.label.replace('Codex ','') : musicScene.value.showing?'音乐打碟':({rest:'休息',walk:'散步',eat:'吃鱼',sweep:'扫地',happy:'开心',pat:'摸摸'} as Record<string,string>)[activity.value] ?? '待机')
+const connection = computed(() => deepSeek.value ? 'DeepSeek 模式：不做工作感知' : !state.value.preferences.codexEvents ? '工作感知已关闭' : lastEvent.value ? '已收到工作状态事件' : connected.value ? '等待事件（Codex 首次安装需在 Codex 中信任 hooks）' : native ? '本地连接中' : '浏览器预览')
 const unit = computed(() => state.value.preferences.size)
 const stageStyle = computed(() => ({left:`${stage.value.x}px`,top:`${stage.value.y}px`,transform:`scale(${unit.value})`}))
 let bounds: Bounds = {left:0,top:0,right:1920,bottom:1080}, workArea = {...bounds}
@@ -304,10 +306,10 @@ async function updateHitTest(){
 async function poll(){
   if(!native||inPoll)return;inPoll=true
   try{
-    const [data,shown]=await Promise.all([invoke<{safeMode:boolean;bridge:{status:string;lastReceived:number};desktop:{surfaces:Surface[];context:string;fullscreen:boolean;leftButtonDown:boolean;idleSeconds:number}}>('companion_poll'),getCurrentWindow().isVisible()])
-    if(disposed)return;const previous=codexStatus.value,wasFullscreen=fullscreen.value,wasVisible=visible.value;connected.value=true;codexStatus.value=data.bridge.status;lastEvent.value=data.bridge.lastReceived;visible.value=shown
+    const [data,shown]=await Promise.all([invoke<{safeMode:boolean;provider?:string;bridge:{status:string;lastReceived:number};desktop:{surfaces:Surface[];context:string;fullscreen:boolean;leftButtonDown:boolean;idleSeconds:number}}>('companion_poll'),getCurrentWindow().isVisible()])
+    if(disposed)return;const previous=codexStatus.value,wasFullscreen=fullscreen.value,wasVisible=visible.value;connected.value=true;codexStatus.value=data.bridge.status;lastEvent.value=data.bridge.lastReceived;visible.value=shown;llmProvider.value=data.provider??'codex'
     await setSafety(data.safeMode)
-    if(previous!==codexStatus.value&&['waiting','ended','interrupted','toolError'].includes(codexStatus.value)&&state.value.preferences.notifications&&!state.value.preferences.quiet){await showDock(false);talk(presentation.value.label);dockHideAt=Date.now()+8000}
+    if(previous!==codexStatus.value&&['waiting','ended','interrupted','toolError'].includes(codexStatus.value)&&state.value.preferences.notifications&&!state.value.preferences.quiet&&!deepSeek.value){await showDock(false);talk(presentation.value.label);dockHideAt=Date.now()+8000}
     surfaces=data.desktop.surfaces;context.value=data.desktop.context;fullscreen.value=data.desktop.fullscreen
     if(wasFullscreen!==fullscreen.value||wasVisible!==shown){
       ignored=undefined
@@ -435,18 +437,18 @@ onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',
   <main class="companion" :class="{still, suppressed:hiddenForFullscreen, dormant:!visible||dockHidden||hiddenForFullscreen}" @contextmenu.prevent="toggleMenu()" @keydown.esc="toggleMenu(false)">
     <div class="pet-stage" :style="stageStyle">
       <div v-if="message" class="speech" role="button" tabindex="0" aria-label="打开气泡聊天" @click="openChat" @keydown.enter="openChat" @keydown.space.prevent="openChat"><span>● 企鹅</span><p>{{message}}</p></div>
-      <button v-else-if="safeMode||busy||codexStatus==='ended'||codexStatus==='interrupted'" class="codex-marker" @click="safeMode?openTools():openCodex"><i :class="codexStatus"></i>{{safeMode?'安全模式 · 查看诊断':presentation.label}}</button>
+      <button v-else-if="!deepSeek&&(safeMode||busy||codexStatus==='ended'||codexStatus==='interrupted')" class="codex-marker" @click="safeMode?openTools():openCodex"><i :class="codexStatus"></i>{{safeMode?'安全模式 · 查看诊断':presentation.label}}</button>
       <div class="pet" :class="[activity,{music:musicScene.showing,dragging:dragging&&moved,held:dragging&&!moved,airborne}]" @pointerdown="pointerDown" @pointerup="release" @pointercancel="release()" @lostpointercapture="release()">
         <div ref="img" class="pet-visual" :style="{opacity:musicScene.opacity}"><CompanionDJ v-if="musicScene.showing" :clock="musicClock" :paused="still||!visible||dockHidden||hiddenForFullscreen" :video-enabled="state.preferences.videoAnimations&&!djFailed" :probe="previewGreeting" @verified="verifyPreview" @failed="djFailed=true"/><CompanionSprite v-else :src="artwork.src" :alt="artwork.alt" :video="video" :request="media?.revision" :loop="media?.clip.loop??true" :paused="still||!visible||dockHidden||hiddenForFullscreen" :probe="previewGreeting" @verified="verifyPreview" @playing="videoPlaying" @ended="videoEnded" @failed="videoFailed" @image-failed="imageFailed"/></div>
       </div>
       <button v-if="moodBadge&&!dockHidden&&!menu&&!pressed" class="mood-marker" @click.stop="openChat" :title="syncView?.document.pet.moodReason">{{moodBadge.icon}} {{moodBadge.label}} {{moodBadge.value}}<span v-if="moodBadge.emotion"> · {{moodBadge.emotion}}</span></button>
-      <div v-if="hovered&&!dockHidden&&!menu&&!pressed&&!state.preferences.passthrough" class="pet-tools"><button @click.stop="openChat" title="和企鹅聊聊">聊聊</button><button @click.stop="openCodex" title="在现有 Codex 中聊天">Codex ↗</button><button @click.stop="toggleMenu(true)" aria-label="打开快速控制">···</button></div>
+      <div v-if="hovered&&!dockHidden&&!menu&&!pressed&&!state.preferences.passthrough" class="pet-tools"><button @click.stop="openChat" title="和企鹅聊聊">聊聊</button><button v-if="!deepSeek" @click.stop="openCodex" title="在现有 Codex 中聊天">Codex ↗</button><button @click.stop="toggleMenu(true)" aria-label="打开快速控制">···</button></div>
       <div v-if="food" class="food-picker"><strong>给企鹅一点小鱼</strong><p>饥饿 {{Math.round(state.hunger)}} · 体力 {{Math.round(state.energy)}}</p><button @click="interact('feed');food=false">喂小鱼</button><button @click="food=false">下次再喂</button></div>
     </div>
     <div v-if="menu" class="panel-host" :style="{left:`${panel.x}px`,top:`${panel.y}px`}" @contextmenu.stop.prevent>
       <CompanionChat v-if="chatOpen" :native="native" :view="syncView" :session="chatSession" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="toggleMenu(false)" @received="receiveChat" @tools="openTools"/>
       <CompanionDiagnostics v-else-if="tools" :native="native" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="closeTools" @safe="setSafety" @sync="receiveSync" @chat="receiveChat"/>
-      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @chat="openChat" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
+      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" :codex-enabled="!deepSeek" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @chat="openChat" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
     </div>
     <p v-if="error" class="notice" role="alert" @click="error=''">{{error}}</p>
   </main>

@@ -150,6 +150,9 @@ pub fn ensure_supported_provider(provider: &ProviderConfig) -> Result<(), String
             "Anthropic 当前未接入 OAuth bearer token，这个版本仅支持 API Key。"
                 .to_string(),
         ),
+        ProviderKind::DeepSeek => Err(
+            "DeepSeek 仅支持 API Key，请在设置中填入 DeepSeek API Key。".to_string(),
+        ),
         ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => Ok(()),
     }
 }

@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import type { MediaPack } from '../lib/companionMedia'
 import type { Activity, CareAction, CompanionState, Preferences } from '../lib/companionCore'
-const props = defineProps<{ state: CompanionState; status: string; connection: string; expanded: boolean; packs:MediaPack[]; native:boolean; importing:boolean; systemReduced:boolean; musicStatus:string }>()
+const props = defineProps<{ state: CompanionState; status: string; connection: string; expanded: boolean; packs:MediaPack[]; native:boolean; importing:boolean; systemReduced:boolean; musicStatus:string; codexEnabled:boolean }>()
 const emit = defineEmits<{
   care: [CareAction]; action: [Activity]; codex: []; chat: []; close: []; hide: []; quit: []; install: []
   preference: [Partial<Preferences>]; expand: [boolean]; snap: []; tools: []; importPack:[]; refreshPacks:[]; packFolder:[]
@@ -43,7 +43,7 @@ const toggles: { key: keyof Preferences; label: string }[] = [
       <button v-for="(label, mode) in { wander: '散步', follow: '跟随', still: '静止' }" :key="mode"
         :class="{ selected: props.state.preferences.movement === mode }" :aria-pressed="props.state.preferences.movement === mode" @click="movement(mode)">{{ label }}</button>
     </div>
-    <div class="panel-footer"><button @click="emit('expand', !expanded)">{{ expanded ? '收起设置' : '更多设置' }}</button><button @click="emit('tools')">工具箱</button><button @click="emit('codex')">Codex ↗</button><button @click="emit('hide')">隐藏</button></div>
+    <div class="panel-footer"><button @click="emit('expand', !expanded)">{{ expanded ? '收起设置' : '更多设置' }}</button><button @click="emit('tools')">工具箱</button><button v-if="codexEnabled" @click="emit('codex')">Codex ↗</button><button @click="emit('hide')">隐藏</button></div>
     <div class="rule"></div><label class="bridge-toggle"><input id="music-mode" type="checkbox" :checked="state.preferences.musicMode!=='off'" @change="patch({musicMode:($event.target as HTMLInputElement).checked?'audio':'off'})" />音乐打碟 · 双彩灯</label>
     <small role="status">{{musicStatus}}</small><small>关闭面板后，自动跟随播放器和浏览器的声音律动；暂停或静音后停止。持续人声、游戏声音也可能触发。</small>
     <div v-if="expanded" class="advanced">
@@ -57,15 +57,15 @@ const toggles: { key: keyof Preferences; label: string }[] = [
       <div class="rule"></div><label class="bridge-toggle"><input type="checkbox" :checked="state.preferences.codexEvents" @change="toggle('codexEvents', $event)" />跟随 Codex 工作状态</label>
       <button class="install" @click="emit('install')">安装 / 更新 Codex 联动</button><small>{{ connection }}</small>
       <div class="utilities"><button @click="emit('snap')">回到屏幕内</button><button @click="privacy = !privacy">隐私</button><button class="danger" @click="emit('quit')">退出</button></div>
-      <p v-if="privacy" class="privacy">聊天与语音沿用 Codex。陪伴记忆和近期对话可在工具箱选择本地保存或服务器同步。场景感知仅使用进程类别、空闲与全屏状态；不读标题、不截图。</p>
+      <p v-if="privacy" class="privacy">聊天与语音沿用 {{ codexEnabled ? 'Codex' : 'DeepSeek' }}。陪伴记忆和近期对话可在工具箱选择本地保存或服务器同步。场景感知仅使用进程类别、空闲与全屏状态；不读标题、不截图。</p>
     </div>
     </template>
     <div v-else-if="tab==='actions'" class="motion-library">
-      <p class="hint">给企鹅换一个动作，任务状态仍由 Codex 提供。</p>
+      <p class="hint">给企鹅换一个动作，任务状态由{{ codexEnabled ? ' Codex ' : '工作感知' }}提供。</p>
       <div class="choices"><button v-for="group in ['互动','生活','表情']" :key="group" :class="{selected:category===group}" @click="category=group">{{group}}</button></div>
       <div class="action-grid"><button v-for="item in actions.filter(a=>a.group===category)" :key="item.label" @click="play(item)"><span aria-hidden="true">{{item.label==='挥手'?'✦':item.label==='小鱼'?'♡':'·'}}</span>{{item.label}}</button></div>
       <p class="hint">14 个动作均配透明短视频<br/>关闭视频可使用帧图；拖动可贴边停靠。</p>
-      <button class="install" @click="emit('codex')">打开 Codex 聊天 ↗</button>
+      <button v-if="codexEnabled" class="install" @click="emit('codex')">打开 Codex 聊天 ↗</button>
     </div>
     <div v-else class="motion-library">
       <p class="hint">使用自己的企鹅素材。动画包可补充 PNG 逐帧或透明 WebM 动作，缺少的动作沿用内置素材。</p>

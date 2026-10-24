@@ -343,7 +343,9 @@ mod windows {
 
 fn classify(name: &str) -> &'static str {
     match name {
-        "code.exe" | "devenv.exe" | "codex.exe" | "chatgpt.exe" => "coding",
+        "code.exe" | "devenv.exe" | "codex.exe" | "chatgpt.exe" | "cursor.exe"
+        | "idea64.exe" | "pycharm64.exe" | "sublime_text.exe" | "notepad++.exe"
+        | "zed.exe" => "coding",
         "winword.exe" | "excel.exe" | "powerpnt.exe" => "document",
         "vlc.exe" | "mpv.exe" | "potplayermini64.exe" => "video",
         // Browsers and sensitive/unknown apps deliberately stay quiet. No title inference.

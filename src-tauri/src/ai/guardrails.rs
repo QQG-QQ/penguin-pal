@@ -198,6 +198,7 @@ pub fn compose_system_prompt(
     let provider_label = match provider.kind {
         ProviderKind::Mock => "Mock",
         ProviderKind::CodexCli => "Codex CLI",
+        ProviderKind::DeepSeek => "DeepSeek",
         ProviderKind::OpenAi => "OpenAI",
         ProviderKind::Anthropic => "Anthropic",
         ProviderKind::OpenAiCompatible => "OpenAI-Compatible",

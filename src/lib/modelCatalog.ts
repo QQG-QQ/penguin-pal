@@ -61,11 +61,21 @@ export const modelCatalog: ModelCatalogEntry[] = [
   {
     id: 'deepseek',
     label: 'DeepSeek',
-    kind: 'openAiCompatible',
+    kind: 'deepSeek',
     model: 'deepseek-chat',
     baseUrl: 'https://api.deepseek.com/v1',
     authMode: 'apiKey',
     aliases: ['deepseek', 'deepseek-chat'],
+    presetVisible: true
+  },
+  {
+    id: 'deepseek-reasoner',
+    label: 'DeepSeek Reasoner',
+    kind: 'deepSeek',
+    model: 'deepseek-reasoner',
+    baseUrl: 'https://api.deepseek.com/v1',
+    authMode: 'apiKey',
+    aliases: ['deepseek-reasoner', 'deepseek r1', 'r1'],
     presetVisible: true
   },
   {

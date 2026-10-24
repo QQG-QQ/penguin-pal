@@ -154,6 +154,7 @@ type CleanUninstallDialogState = {
 const providerDefaults: Record<ProviderKind, string> = {
   mock: 'penguin-guardian',
   codexCli: 'gpt-5-codex',
+  deepSeek: 'deepseek-chat',
   openAi: 'gpt-4.1-mini',
   anthropic: 'claude-3-5-sonnet-latest',
   openAiCompatible: 'llama3.1'
@@ -162,6 +163,7 @@ const providerDefaults: Record<ProviderKind, string> = {
 const providerLabels: Record<ProviderKind, string> = {
   mock: 'Mock',
   codexCli: 'Codex CLI',
+  deepSeek: 'DeepSeek',
   openAi: 'OpenAI',
   anthropic: 'Anthropic',
   openAiCompatible: 'OpenAI-Compatible'

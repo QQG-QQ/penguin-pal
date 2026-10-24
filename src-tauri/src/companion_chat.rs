@@ -89,7 +89,128 @@ fn codex() -> Result<PathBuf, String> {
     }
     Err("没有找到系统 Codex，请安装并登录 Codex 后重试。".into())
 }
+fn day_key(at: u64) -> String {
+    let time = std::time::UNIX_EPOCH + std::time::Duration::from_millis(at);
+    chrono::DateTime::<chrono::Local>::from(time)
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn deepseek_sessions(service: &Service) -> Result<Value, String> {
+    let view = service.status()?;
+    let mut days: Vec<String> = view["document"]["conversations"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["at"].as_u64())
+                .map(day_key)
+                .collect()
+        })
+        .unwrap_or_default();
+    days.sort();
+    days.dedup();
+    days.reverse();
+    let sessions: Vec<Value> = days
+        .iter()
+        .take(30)
+        .map(|day| json!({"id": format!("local-{day}"), "name": format!("本地对话 {day}")}))
+        .collect();
+    Ok(json!({"sessions": sessions}))
+}
+
+fn deepseek_read(service: &Service, thread_id: &str) -> Result<Value, String> {
+    let day = thread_id
+        .strip_prefix("local-")
+        .filter(|value| value.len() == 10)
+        .ok_or("聊天标识无效。")?;
+    let view = service.status()?;
+    let messages: Vec<Value> = view["document"]["conversations"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| item["at"].as_u64().map(|at| day_key(at) == day).unwrap_or(false))
+                .filter_map(|item| {
+                    Some(json!({
+                        "id": item["id"],
+                        "session": thread_id,
+                        "role": item["role"],
+                        "text": item["text"],
+                        "at": item["at"],
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(json!({"messages": messages, "name": format!("本地对话 {day}")}))
+}
+
+async fn deepseek_models(llm: &crate::companion_llm::LlmConfig) -> Result<Value, String> {
+    let fallback = json!({
+        "models": [
+            {"id":"deepseek-chat","model":"deepseek-chat","displayName":"DeepSeek Chat（对话 · 兼容别名）","description":"公开 API 通用别名","isDefault":true,"supportedReasoningEfforts":[]},
+            {"id":"deepseek-reasoner","model":"deepseek-reasoner","displayName":"DeepSeek Reasoner（推理 · 兼容别名）","description":"公开 API 推理别名","isDefault":false,"supportedReasoningEfforts":[]},
+            {"id":"deepseek-flash","model":"deepseek-flash","displayName":"DeepSeek V4.1 Flash","description":"新一代，1M 上下文，需网关支持","isDefault":false,"supportedReasoningEfforts":[]},
+            {"id":"deepseek-v4-pro","model":"deepseek-v4-pro","displayName":"DeepSeek V4 Pro","description":"新一代，纯文本，需网关支持","isDefault":false,"supportedReasoningEfforts":[]}
+        ],
+        "defaultModel": "deepseek-chat",
+        "source": "fallback"
+    });
+    if llm.api_key.trim().is_empty() {
+        return Ok(fallback);
+    }
+    let base = llm.base_url.trim_end_matches('/');
+    let response = reqwest::Client::new()
+        .get(format!("{base}/models"))
+        .bearer_auth(llm.api_key.trim())
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return Ok(fallback);
+    };
+    if !response.status().is_success() {
+        return Ok(fallback);
+    }
+    let value: Value = response.json().await.unwrap_or(Value::Null);
+    let models: Vec<Value> = value["data"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["id"].as_str())
+                .map(|id| {
+                    json!({
+                        "id": id,
+                        "model": id,
+                        "displayName": id,
+                        "description": if id.contains("reasoner") { "推理模型" } else { "DeepSeek 模型" },
+                        "isDefault": id == "deepseek-chat",
+                        "supportedReasoningEfforts": [],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if models.is_empty() {
+        return Ok(fallback);
+    }
+    let default = models
+        .iter()
+        .find(|model| model["isDefault"] == json!(true))
+        .and_then(|model| model["model"].as_str())
+        .unwrap_or("deepseek-chat");
+    Ok(json!({"models": models, "defaultModel": default, "source": "api"}))
+}
+
 fn bridge(service: &Service, mut request: Value) -> Result<Value, String> {
+    if matches!(request["action"].as_str(), Some("reply") | Some("opener")) {
+        if let Ok(root) = service.chat_root() {
+            if let Some(text) = crate::companion_dsh::digest_text(&root, chrono::Utc::now().timestamp_millis() as u64) {
+                request["workDigest"] = json!(text);
+            }
+        }
+    }
     // Recall may run alongside inference. Serialize only module installation.
     static FILES: Mutex<()> = Mutex::new(());
     let files = FILES.lock().map_err(|_| "气泡程序暂不可用。")?;
@@ -125,7 +246,12 @@ fn bridge(service: &Service, mut request: Value) -> Result<Value, String> {
     }
     drop(files);
     if request["action"] != "recall" {
-        request["command"] = json!(codex()?);
+        let llm = crate::companion_llm::load(&service.chat_root()?);
+        if llm.is_deepseek() {
+            request["provider"] = crate::companion_llm::bridge_value(&llm);
+        } else {
+            request["command"] = json!(codex()?);
+        }
     }
     request["cwd"] = json!(root);
     let node = executable("node.exe").ok_or("气泡聊天需要 PATH 中的 Node.js。")?;
@@ -504,6 +630,35 @@ pub async fn companion_chat(
     let chat = chat.inner().clone();
     let service = service.inner().clone();
     let data = payload.unwrap_or(Value::Null);
+    if action == "llmGet" {
+        let llm = crate::companion_llm::load(&service.chat_root()?);
+        return Ok(crate::companion_llm::public_view(&llm));
+    }
+    if action == "llmSet" {
+        let mut llm = crate::companion_llm::load(&service.chat_root()?);
+        if let Some(value) = data["provider"].as_str() { llm.provider = value.to_string(); }
+        if let Some(value) = data["model"].as_str() { llm.model = value.to_string(); }
+        if let Some(value) = data["baseUrl"].as_str() { llm.base_url = value.to_string(); }
+        if let Some(value) = data["apiKey"].as_str() {
+            if !value.trim().is_empty() { llm.api_key = value.to_string(); }
+        }
+        if data["clearKey"].as_bool() == Some(true) { llm.api_key = String::new(); }
+        let saved = crate::companion_llm::save(&service.chat_root()?, &llm)?;
+        service.history_note("learningError", "")?;
+        return Ok(crate::companion_llm::public_view(&saved));
+    }
+    if action == "models" {
+        let llm = crate::companion_llm::load(&service.chat_root()?);
+        if llm.is_deepseek() {
+            return deepseek_models(&llm).await;
+        }
+    }
+    if action == "sessions" {
+        let llm = crate::companion_llm::load(&service.chat_root()?);
+        if llm.is_deepseek() {
+            return deepseek_sessions(&service);
+        }
+    }
     if action == "runtime" { return serde_json::to_value(chat.scheduler.status()?).map_err(|_| "调度状态无效。".into()); }
     if action == "cancelOutreach" { chat.scheduler.cancel_manual(); return Ok(json!({"ok":true})); }
     if action == "tick" || action == "gate" {
@@ -554,11 +709,14 @@ pub async fn companion_chat(
             "sessions"=>return bridge(&service,json!({"action":"sessions"})),
             "models"=>return bridge(&service,json!({"action":"models"})),
             "read"=>{
-                let id=data["threadId"].as_str().ok_or("请选择聊天。")?;let output=bridge(&service,json!({"action":"read","threadId":id}))?;
+                let id=data["threadId"].as_str().ok_or("请选择聊天。")?;
+                let llm = crate::companion_llm::load(&service.chat_root()?);
+                let output=if llm.is_deepseek(){deepseek_read(&service,id)?}else{bridge(&service,json!({"action":"read","threadId":id}))?};
+                let known: std::collections::HashSet<String> = view["document"]["conversations"].as_array().map(|items| items.iter().filter_map(|m| m["id"].as_str().map(|id| id.to_string())).collect()).unwrap_or_default();
                 for m in output["messages"].as_array().ok_or("聊天历史无效。")?{service.record("conversation",m.clone())?;}
                 view=service.status()?;
                 if social(&view)?.enabled {
-                    let items:Vec<Value>=output["messages"].as_array().unwrap().iter().rev().filter(|m|m["role"]=="user").take(8).cloned().collect();
+                    let items:Vec<Value>=output["messages"].as_array().unwrap().iter().rev().filter(|m|m["role"]=="user"&&!known.contains(m["id"].as_str().unwrap_or(""))).take(8).cloned().collect();
                     if !items.is_empty(){let generated=bridge(&service,json!({"action":"analysis","document":view["document"],"sources":items}))?;if social(&service.status()?)?.enabled{learn(&service,&generated,&items,true)?;}}
                 }
                 let _=sync_if_server(&service,&view);

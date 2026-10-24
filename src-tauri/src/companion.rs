@@ -269,6 +269,9 @@ struct Bridge {
     retired: HashMap<String, Vec<String>>,
     last_received: u64,
     rejected: u64,
+    last_file: u64,
+    last_synth: Option<bool>,
+    last_synth_at: u64,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -331,12 +334,41 @@ impl Bridge {
         self.last_received = time;
         self.sessions.insert(event.session.clone(), event);
     }
+    fn codex_idle(&self, time: u64) -> bool {
+        self.last_file == 0 || time.saturating_sub(self.last_file) > 300_000
+    }
+    fn observe(&mut self, working: bool, time: u64) {
+        if self.last_synth == Some(working) && time.saturating_sub(self.last_synth_at) < 60_000 {
+            return;
+        }
+        self.last_synth = Some(working);
+        self.last_synth_at = time;
+        self.accept(
+            HookEvent {
+                event: if working {
+                    EventKind::UserPromptSubmit
+                } else {
+                    EventKind::Stop
+                },
+                session: "666f726567726f756e64".to_string(),
+                turn: format!("{:x}", time / 60_000),
+                at: time,
+                issue: false,
+            },
+            time,
+        );
+    }
     fn poll(&mut self, root: &Path, enabled: bool) -> BridgeSummary {
         self.poll_at(root, enabled, now())
     }
     fn poll_at(&mut self, root: &Path, enabled: bool, time: u64) -> BridgeSummary {
         let mut events = vec![];
-        if let Ok(entries) = fs::read_dir(root.join("events")) {
+        let mut dirs = vec![root.join("events")];
+        if let Some(extra) = extra_event_dir(root) {
+            dirs.push(extra);
+        }
+        for dir in dirs {
+            let Ok(entries) = fs::read_dir(dir) else { continue };
             for entry in entries
                 .flatten()
                 .filter(|entry| entry.path().extension().and_then(|v| v.to_str()) == Some("json"))
@@ -366,6 +398,9 @@ impl Bridge {
             }
         }
         events.sort_by_key(|event| event.at);
+        if let Some(latest) = events.last() {
+            self.last_file = self.last_file.max(latest.at);
+        }
         for event in events {
             self.accept(event, time);
         }
@@ -474,7 +509,14 @@ struct Observation {
     bridge: BridgeSummary,
     desktop: companion_platform::Desktop,
     safe_mode: bool,
+    provider: String,
 }
+fn extra_event_dir(root: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(root.join("dsh-bridge.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("events")?.as_str().map(PathBuf::from)
+}
+
 #[tauri::command]
 fn companion_poll(
     window: WebviewWindow,
@@ -484,13 +526,34 @@ fn companion_poll(
     let mut store = store.lock().map_err(|_| "状态忙")?;
     let root = store.root.clone();
     let prefs = store.state.preferences.clone();
-    let bridge = store.bridge.poll(&root, prefs.codex_events);
-    store.last_bridge = bridge.clone();
     let safe = store.runtime.safe_mode;
+    let desktop = companion_platform::desktop(prefs.surfaces && !safe, prefs.awareness && !safe);
+    let mut bridge = store.bridge.poll(&root, prefs.codex_events);
+    let desk_working =
+        prefs.awareness && matches!(desktop.context, "coding" | "document") && desktop.idle_seconds < 600;
+    static DIGEST_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if now().saturating_sub(DIGEST_AT.load(std::sync::atomic::Ordering::Relaxed)) > 600_000 {
+        DIGEST_AT.store(now(), std::sync::atomic::Ordering::Relaxed);
+        crate::companion_dsh::refresh(&root);
+    }
+    static DSH_IMPORT_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if now().saturating_sub(DSH_IMPORT_AT.load(std::sync::atomic::Ordering::Relaxed)) > 1_800_000 {
+        DSH_IMPORT_AT.store(now(), std::sync::atomic::Ordering::Relaxed);
+        crate::companion_dsh::import_once(&root);
+    }
+    static MIGRATE_LLM: std::sync::Once = std::sync::Once::new();
+    MIGRATE_LLM.call_once(|| crate::companion_llm::migrate(&root));
+    let provider = crate::companion_llm::load(&root).provider;
+    if prefs.codex_events && provider != "deepseek" {
+        store.bridge.observe(desk_working, now());
+        bridge = store.bridge.poll(&root, prefs.codex_events);
+    }
+    store.last_bridge = bridge.clone();
     Ok(Observation {
         bridge,
-        desktop: companion_platform::desktop(prefs.surfaces && !safe, prefs.awareness && !safe),
+        desktop,
         safe_mode: safe,
+        provider,
     })
 }
 #[tauri::command]
