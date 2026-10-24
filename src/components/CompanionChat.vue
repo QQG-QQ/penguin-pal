@@ -12,6 +12,7 @@ async function loadLlm(){try{const value=await call('llmGet');llm.value={provide
 async function switchProvider(provider:string){await run(async()=>{const value=await call('llmSet',{provider,model:llm.value.model,baseUrl:llm.value.baseUrl});llm.value={provider:value.provider,model:value.model,baseUrl:value.baseUrl};info.value=value.provider==='deepseek'?'已切换到 DeepSeek（'+(value.model||'deepseek-chat')+'），聊天与记忆整理都走 DeepSeek。':'已切换到 Codex CLI，需要已登录的 Codex 桌面应用。'})}
 onMounted(()=>{void loadLlm()})
 const messages=computed(()=>props.view?.document.conversations.filter(m=>m.session===props.session)??[])
+const petName=computed(()=>((props.view?.document.brain?.config as any)?.petName||'企鹅').trim()||'企鹅')
 const enabled=computed(()=>props.view?.document.social?.enabled??true)
 const proactive=computed(()=>props.view?.document.social?.proactive??false)
 async function call(action:string,payload:unknown=null){return invoke<any>('companion_chat',{action,payload})}
@@ -24,14 +25,14 @@ async function read(){if(!selected.value)return;await run(async()=>{emit('receiv
 </script>
 
 <template>
-  <section class="bubble-chat" aria-label="和企鹅聊聊">
-    <header><div><strong>和企鹅聊聊</strong><small> · {{llm.provider==='deepseek'?'DeepSeek '+(llm.model||'deepseek-chat'):'Codex CLI'}}</small><select class="provider" :value="llm.provider" :disabled="busy||!native" @change="switchProvider(($event.target as HTMLSelectElement).value)" aria-label="切换模型来源"><option value="codex">Codex</option><option value="deepseek">DeepSeek</option></select><small>{{view?.mode==='server'?'对话与陪伴状态自动同步':'对话与陪伴状态保存在本机'}}</small></div><button aria-label="关闭聊天" @click="emit('close')">×</button></header>
+  <section class="bubble-chat" :aria-label="'和'+petName+'聊聊'">
+    <header><div><strong>和{{petName}}聊聊</strong><small> · {{llm.provider==='deepseek'?'DeepSeek '+(llm.model||'deepseek-chat'):'Codex CLI'}}</small><select class="provider" :value="llm.provider" :disabled="busy||!native" @change="switchProvider(($event.target as HTMLSelectElement).value)" aria-label="切换模型来源"><option value="codex">Codex</option><option value="deepseek">DeepSeek</option></select><small>{{view?.mode==='server'?'对话与陪伴状态自动同步':'对话与陪伴状态保存在本机'}}</small></div><button aria-label="关闭聊天" @click="emit('close')">×</button></header>
     <p class="mood">心情 {{Math.round(view?.document.pet.mood??70)}} · {{view?.document.pet.moodReason||'平稳陪伴'}}<small>心情随互动温和变化，之后慢慢恢复平稳。</small></p>
     <div ref="history" class="history" aria-live="polite">
       <p v-if="!messages.length" class="empty">想聊什么都可以。也可以告诉我你的喜好，或我们的小约定。</p>
-      <article v-for="m in messages.slice(-60)" :key="m.id" :class="m.role"><b>{{m.role==='user'?'你':'企鹅'}}</b><p>{{m.text}}</p></article>
+      <article v-for="m in messages.slice(-60)" :key="m.id" :class="m.role"><b>{{m.role==='user'?'你':petName}}</b><p>{{m.text}}</p></article>
     </div>
-    <form @submit.prevent="send"><textarea v-model="text" aria-label="聊天内容" placeholder="和企鹅说句话…" rows="3" maxlength="3000" :disabled="busy||!native" @keydown.ctrl.enter.prevent="send"/><div class="send"><small>Ctrl + Enter 发送</small><button class="primary" :disabled="busy||!native||!text.trim()">{{busy?'正在想…':'发送'}}</button></div></form>
+    <form @submit.prevent="send"><textarea v-model="text" aria-label="聊天内容" :placeholder="'和'+petName+'说句话…'" rows="3" maxlength="3000" :disabled="busy||!native" @keydown.ctrl.enter.prevent="send"/><div class="send"><small>Ctrl + Enter 发送</small><button class="primary" :disabled="busy||!native||!text.trim()">{{busy?'正在想…':'发送'}}</button></div></form>
     <p v-if="error" class="error" role="alert">{{error}}<small>已保存的消息会保留，输入内容仍可编辑。</small></p><p v-if="info" class="info" role="status">{{info}}</p>
     <details><summary>记忆与主动陪伴</summary>
       <label><input type="checkbox" :checked="enabled" :disabled="busy||!native" @change="settings(($event.target as HTMLInputElement).checked,proactive)"/>自动从所有可读取聊天记住喜好、约定和近况</label>

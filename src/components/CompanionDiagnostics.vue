@@ -37,7 +37,7 @@ onBeforeUnmount(()=>{disposed=true;preview.value='';window.clearInterval(timer)}
 
 <template>
   <section class="diagnostics" aria-label="企鹅设置与诊断">
-    <header><div><strong>企鹅工具箱</strong><small>Companion {{health?.version??'0.3.0'}}</small></div><button class="back" @click="emit('close')">返回</button></header>
+    <header><div><strong>桌宠工具箱</strong><small>Companion {{health?.version??'0.3.0'}}</small></div><button class="back" @click="emit('close')">返回</button></header>
     <nav><button v-for="item in [{id:'status',label:'状态与恢复'},{id:'sync',label:'同步与数据'},{id:'data',label:'旧资料导出'},{id:'updates',label:'软件更新'}] as const" :class="{active:tab===item.id}" @click="chooseTab(item.id)">{{item.label}}</button></nav>
     <p v-if="!native" class="note">浏览器预览。诊断与旧资料操作仅在桌面版可用。</p>
     <div v-if="tab==='status'">

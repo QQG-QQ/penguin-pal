@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import type { MediaPack } from '../lib/companionMedia'
 import type { Activity, CareAction, CompanionState, Preferences } from '../lib/companionCore'
-const props = defineProps<{ state: CompanionState; status: string; connection: string; expanded: boolean; packs:MediaPack[]; native:boolean; importing:boolean; systemReduced:boolean; musicStatus:string; codexEnabled:boolean }>()
+const props = defineProps<{ state: CompanionState; status: string; connection: string; expanded: boolean; packs:MediaPack[]; native:boolean; importing:boolean; systemReduced:boolean; musicStatus:string; codexEnabled:boolean; petName?:string }>()
 const emit = defineEmits<{
   care: [CareAction]; action: [Activity]; codex: []; chat: []; close: []; hide: []; quit: []; install: []
   preference: [Partial<Preferences>]; expand: [boolean]; snap: []; tools: []; importPack:[]; refreshPacks:[]; packFolder:[]
@@ -31,7 +31,7 @@ const toggles: { key: keyof Preferences; label: string }[] = [
 
 <template>
   <section class="control-panel" aria-label="企鹅快速控制">
-    <header><strong>企鹅</strong><span class="state-tag">{{ status }}</span><button class="close" aria-label="关闭控制面板" @click="emit('close')">×</button></header>
+    <header><strong>{{petName||'企鹅'}}</strong><span class="state-tag">{{ status }}</span><button class="close" aria-label="关闭控制面板" @click="emit('close')">×</button></header>
     <nav class="tabs" aria-label="控制分类"><button v-for="(label,key) in {home:'陪伴',actions:'动作',media:'素材'}" :key="key" :class="{selected:tab===key}" @click="showTab(key)">{{label}}</button></nav>
     <template v-if="tab==='home'">
     <div class="quick-actions">
@@ -61,7 +61,7 @@ const toggles: { key: keyof Preferences; label: string }[] = [
     </div>
     </template>
     <div v-else-if="tab==='actions'" class="motion-library">
-      <p class="hint">给企鹅换一个动作，任务状态由{{ codexEnabled ? ' Codex ' : '工作感知' }}提供。</p>
+      <p class="hint">给{{petName||'企鹅'}}换一个动作，任务状态由{{ codexEnabled ? ' Codex ' : '工作感知' }}提供。</p>
       <div class="choices"><button v-for="group in ['互动','生活','表情']" :key="group" :class="{selected:category===group}" @click="category=group">{{group}}</button></div>
       <div class="action-grid"><button v-for="item in actions.filter(a=>a.group===category)" :key="item.label" @click="play(item)"><span aria-hidden="true">{{item.label==='挥手'?'✦':item.label==='小鱼'?'♡':'·'}}</span>{{item.label}}</button></div>
       <p class="hint">14 个动作均配透明短视频<br/>关闭视频可使用帧图；拖动可贴边停靠。</p>
@@ -76,7 +76,7 @@ const toggles: { key: keyof Preferences; label: string }[] = [
       <p v-if="state.preferences.animationPack!=='builtin'&&!packs.some(p=>p.id===state.preferences.animationPack)" class="hint">原动画包暂不可用，当前显示内置企鹅。</p>
       <label class="bridge-toggle media-switch"><input type="checkbox" :checked="state.preferences.videoAnimations" @change="toggle('videoAnimations',$event)"/>播放连续视频</label>
       <small>减少动态或安全模式使用静态预览；隐藏时暂停视频。透明区域点击按预览图判断。</small>
-      <small v-if="systemReduced" class="hint">Windows 界面动画已关闭；企鹅动作仍按桌宠自己的“减少动态”和视频开关播放。</small>
+      <small v-if="systemReduced" class="hint">Windows 界面动画已关闭；{{petName||'企鹅'}}动作仍按桌宠自己的“减少动态”和视频开关播放。</small>
       <div class="pack-controls"><button :disabled="!native||importing" @click="emit('importPack')">{{importing?'正在导入…':'导入动画包'}}</button><button :disabled="!native" @click="emit('refreshPacks')">刷新</button><button :disabled="!native" @click="emit('packFolder')">文件夹</button></div>
       <p class="hint">选择素材目录中的 manifest.json；不直接兼容 dsh-pet 配置。清单与所有素材放在同一目录，PNG 画布为 256 × 256。格式和示例随本版说明提供。</p>
     </div>

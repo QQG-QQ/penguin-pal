@@ -70,6 +70,7 @@ const still = computed(() => state.value.preferences.reducedMotion || safeMode.v
 const physicsEnabled = computed(() => state.value.preferences.gravity && !still.value)
 const busy = computed(() => ['working','waiting','toolError'].includes(codexStatus.value))
 const presentation = computed(() => codexPresentation(codexStatus.value))
+const petName = computed(() => (syncView.value?.document.brain?.config?.petName || '企鹅').trim() || '企鹅')
 const moodBadge=computed(()=>{const pet=syncView.value?.document.pet,brain=syncView.value?.document.brain;if(!pet||brain?.config.badge===false)return null;return {...moodFace(pet.mood),value:Math.round(pet.mood),emotion:dominantEmotion(brain?.emotions)}})
 const packs=ref<MediaPack[]>([]), importing=ref(false), media=ref<ReturnType<MotionSequencer['sample']>>()
 const motionPicker=new MotionSequencer(),trail=new DragTrail(),failedVideos=new Set<string>()
@@ -436,19 +437,19 @@ onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',
 <template>
   <main class="companion" :class="{still, suppressed:hiddenForFullscreen, dormant:!visible||dockHidden||hiddenForFullscreen}" @contextmenu.prevent="toggleMenu()" @keydown.esc="toggleMenu(false)">
     <div class="pet-stage" :style="stageStyle">
-      <div v-if="message" class="speech" role="button" tabindex="0" aria-label="打开气泡聊天" @click="openChat" @keydown.enter="openChat" @keydown.space.prevent="openChat"><span>● 企鹅</span><p>{{message}}</p></div>
+      <div v-if="message" class="speech" role="button" tabindex="0" aria-label="打开气泡聊天" @click="openChat" @keydown.enter="openChat" @keydown.space.prevent="openChat"><span>● {{petName}}</span><p>{{message}}</p></div>
       <button v-else-if="!deepSeek&&(safeMode||busy||codexStatus==='ended'||codexStatus==='interrupted')" class="codex-marker" @click="safeMode?openTools():openCodex"><i :class="codexStatus"></i>{{safeMode?'安全模式 · 查看诊断':presentation.label}}</button>
       <div class="pet" :class="[activity,{music:musicScene.showing,dragging:dragging&&moved,held:dragging&&!moved,airborne}]" @pointerdown="pointerDown" @pointerup="release" @pointercancel="release()" @lostpointercapture="release()">
         <div ref="img" class="pet-visual" :style="{opacity:musicScene.opacity}"><CompanionDJ v-if="musicScene.showing" :clock="musicClock" :paused="still||!visible||dockHidden||hiddenForFullscreen" :video-enabled="state.preferences.videoAnimations&&!djFailed" :probe="previewGreeting" @verified="verifyPreview" @failed="djFailed=true"/><CompanionSprite v-else :src="artwork.src" :alt="artwork.alt" :video="video" :request="media?.revision" :loop="media?.clip.loop??true" :paused="still||!visible||dockHidden||hiddenForFullscreen" :probe="previewGreeting" @verified="verifyPreview" @playing="videoPlaying" @ended="videoEnded" @failed="videoFailed" @image-failed="imageFailed"/></div>
       </div>
       <button v-if="moodBadge&&!dockHidden&&!menu&&!pressed" class="mood-marker" @click.stop="openChat" :title="syncView?.document.pet.moodReason">{{moodBadge.icon}} {{moodBadge.label}} {{moodBadge.value}}<span v-if="moodBadge.emotion"> · {{moodBadge.emotion}}</span></button>
-      <div v-if="hovered&&!dockHidden&&!menu&&!pressed&&!state.preferences.passthrough" class="pet-tools"><button @click.stop="openChat" title="和企鹅聊聊">聊聊</button><button v-if="!deepSeek" @click.stop="openCodex" title="在现有 Codex 中聊天">Codex ↗</button><button @click.stop="toggleMenu(true)" aria-label="打开快速控制">···</button></div>
-      <div v-if="food" class="food-picker"><strong>给企鹅一点小鱼</strong><p>饥饿 {{Math.round(state.hunger)}} · 体力 {{Math.round(state.energy)}}</p><button @click="interact('feed');food=false">喂小鱼</button><button @click="food=false">下次再喂</button></div>
+      <div v-if="hovered&&!dockHidden&&!menu&&!pressed&&!state.preferences.passthrough" class="pet-tools"><button @click.stop="openChat" :title="'和'+petName+'聊聊'">聊聊</button><button v-if="!deepSeek" @click.stop="openCodex" title="在现有 Codex 中聊天">Codex ↗</button><button @click.stop="toggleMenu(true)" aria-label="打开快速控制">···</button></div>
+      <div v-if="food" class="food-picker"><strong>给{{petName}}一点小鱼</strong><p>饥饿 {{Math.round(state.hunger)}} · 体力 {{Math.round(state.energy)}}</p><button @click="interact('feed');food=false">喂小鱼</button><button @click="food=false">下次再喂</button></div>
     </div>
     <div v-if="menu" class="panel-host" :style="{left:`${panel.x}px`,top:`${panel.y}px`}" @contextmenu.stop.prevent>
       <CompanionChat v-if="chatOpen" :native="native" :view="syncView" :session="chatSession" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="toggleMenu(false)" @received="receiveChat" @tools="openTools"/>
       <CompanionDiagnostics v-else-if="tools" :native="native" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="closeTools" @safe="setSafety" @sync="receiveSync" @chat="receiveChat"/>
-      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" :codex-enabled="!deepSeek" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @chat="openChat" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
+      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" :codex-enabled="!deepSeek" :pet-name="petName" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @chat="openChat" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
     </div>
     <p v-if="error" class="notice" role="alert" @click="error=''">{{error}}</p>
   </main>
