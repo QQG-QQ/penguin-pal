@@ -546,12 +546,13 @@ pub async fn companion_chat(
             let session=pet_session(view["document"]["petId"].as_str().ok_or("宠物身份无效。")?);
             user_source=view["document"]["conversations"].as_array().unwrap().iter().rev().find(|m|m["session"]==session&&m["role"]=="user").cloned();
         }
-        let task = match action.as_str() { "send" => Some(Task::Reply), "sessions"|"read"|"learn"|"previewMemories" => Some(Task::Interactive), _ => None };
+        let task = match action.as_str() { "send" => Some(Task::Reply), "sessions"|"models"|"read"|"learn"|"previewMemories" => Some(Task::Interactive), _ => None };
         let _inference = if let Some(request)=manual_request { Some(request.wait(Duration::from_secs(150))?) } else { task.map(|task| chat.scheduler.acquire(task, Duration::from_secs(150))).transpose()? };
         let mut view=service.status()?;
         match action.as_str(){
             "settings"=>{service.record("social",json!({"type":"settings","enabled":data["enabled"],"proactive":data["proactive"]}))?;let _=sync_if_server(&service,&view);}
             "sessions"=>return bridge(&service,json!({"action":"sessions"})),
+            "models"=>return bridge(&service,json!({"action":"models"})),
             "read"=>{
                 let id=data["threadId"].as_str().ok_or("请选择聊天。")?;let output=bridge(&service,json!({"action":"read","threadId":id}))?;
                 for m in output["messages"].as_array().ok_or("聊天历史无效。")?{service.record("conversation",m.clone())?;}

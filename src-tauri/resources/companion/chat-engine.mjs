@@ -67,11 +67,16 @@ export async function run(request,{factory}={}){
   const args=['app-server',...disabled.flatMap(x=>['-c',`features.${x}=false`]),'-c','web_search="disabled"']
   const rpc=factory?factory():new Rpc(request.command,args)
   try{
-    await rpc.request('initialize',{clientInfo:{name:'penguinpal_companion',title:'PenguinPal Bubble',version:'0.9.7'}})
+    await rpc.request('initialize',{clientInfo:{name:'penguinpal_companion',title:'PenguinPal Bubble',version:'0.9.9'}})
     rpc.notify({method:'initialized',params:{}})
     if(request.action==='sessions'){
       const result=await rpc.request('thread/list',{limit:50,sortKey:'updated_at',modelProviders:[]})
       return {sessions:(result.data??[]).map(t=>({id:t.id,name:redact(t.name||t.preview||'未命名聊天',100)}))}
+    }
+    if(request.action==='models'){
+      const result=await rpc.request('model/list',{})
+      const models=(result.data??[]).filter(m=>m&&!m.hidden&&typeof m.model==='string').map(m=>({id:m.id??m.model,model:m.model,displayName:m.displayName??m.model,description:redact(m.description??'',240),isDefault:m.isDefault===true,supportedReasoningEfforts:m.supportedReasoningEfforts??[]}))
+      return {models,defaultModel:models.find(m=>m.isDefault)?.model??models[0]?.model??'gpt-6.1-sol'}
     }
     if(request.action==='read'){
       if(!/^[a-zA-Z0-9_-]{1,80}$/.test(request.threadId??''))throw Error('聊天标识无效')
@@ -93,7 +98,9 @@ export async function run(request,{factory}={}){
     const configResult=await rpc.request('config/read',{includeLayers:false})
     const mcp=Object.fromEntries(Object.keys(configResult.config?.mcp_servers??{}).map(name=>[name,{enabled:false}]))
     const extra='context.knownFacts列出已有事实键：同一属性必须沿用已有键，不另造同义键；键只写对象和属性，不含具体值，饮食口味用 food.flavor，不要 light_fish。记忆叙述使用context.names.pronoun代称用户，但原话quote保持原样。每条记忆还要给 importance/情绪重要性 emotion（0到1），以及至多12个具体检索 tags，补充同义说法，避免普通泛词。区分长期属性与独立事件，近况 key 要具体到这件事。每条 analyses 给七维 dims（开心 happy、踏实 calm、甜蜜 sweet、心疼 heartache、担心 worry、难过 sad、吃醋 jealous）变化 -6到6、confidence 0到100。低把握用0变化。心情下降只能来自担心、心疼或难过，不因用户忙碌或工作降分。romance=false 时 sweet、jealous 恒为0。尊重 context.names 的称呼。selfMood 只判断自己主动开口这一轮的感受，不当成被安排干活；非opener时全0。selfMood.quote留空。analysis模式不改变当下心情，各情绪全0。旧档案只记录资料明确属于用户的事实，不把作者/第三人称/助手言论当用户喜好。'
-    const model=request.action==='analysis'?request.document?.brain?.config?.model?.trim():''
+    // ChatGPT accounts no longer accept the old gpt-5.4 default. Keep the
+    // companion usable when the user has not selected a model explicitly.
+    const model=request.document?.brain?.config?.model?.trim()||'gpt-6.1-sol'
     const {thread}=await rpc.request('thread/start',{ephemeral:true,cwd:request.cwd,approvalPolicy:'never',sandbox:'read-only',baseInstructions:instruction+'\n'+extra,developerInstructions:instruction+'\n'+extra,config:{mcp_servers:mcp},...(model?{model}:{})})
     let resolveTurn,rejectTurn
     const completed=new Promise((resolve,reject)=>{resolveTurn=resolve;rejectTurn=reject})
@@ -105,7 +112,10 @@ export async function run(request,{factory}={}){
       if(p.threadId&&p.threadId!==thread.id)return
       if(msg.method==='item/started'&&['commandExecution','fileChange','mcpToolCall','dynamicToolCall','webSearch','collabAgentToolCall'].includes(p.item?.type))return rejectTurn(Error('陪伴生成尝试调用工具，已停止'))
       if(msg.method==='item/completed'&&p.item?.type==='agentMessage'&&(!p.item.phase||p.item.phase==='final_answer'))replies.push(p.item.text)
-      if(msg.method==='turn/completed')p.turn?.status==='completed'?resolveTurn():rejectTurn(Error('Codex 未完成本轮回复'))
+      if(msg.method==='turn/completed'){
+        if(p.turn?.status==='completed')resolveTurn()
+        else rejectTurn(Error(redact(p.turn?.error?.message||'Codex 未完成本轮回复',200)))
+      }
     }
     rpc.listeners.add(listener)
     try{

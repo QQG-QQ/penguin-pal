@@ -29,7 +29,7 @@ test('bubble reply, learning and opener use ephemeral inference and preserve sel
     await run({action,sources:action==='opener'?[]:[source],document:{},prompt:'小鱼'}, {factory:()=>rpc})
     const start=rpc.calls.find(x=>x.method==='thread/start').params
     assert.equal(start.ephemeral,true);assert.equal(start.approvalPolicy,'never');assert.equal(start.sandbox,'read-only')
-    assert.equal('model' in start,false);assert.deepEqual(start.config.mcp_servers,{privateServer:{enabled:false}})
+    assert.equal(start.model,'gpt-6.1-sol');assert.deepEqual(start.config.mcp_servers,{privateServer:{enabled:false}})
     assert.ok(!JSON.stringify(rpc.calls).includes('never-copy'))
     assert.ok(!rpc.calls.some(x=>x.method==='thread/resume'));assert.equal(rpc.closed,true)
   }
