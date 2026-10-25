@@ -1,6 +1,6 @@
 import {MotionPicker,type MediaPack,type MediaSegment} from './companionMedia'
 type Candidate=NonNullable<ReturnType<MotionPicker['sample']>>
-interface Playback {video:boolean;paused?:boolean;immediate?:boolean;reduced?:boolean}
+interface Playback {video:boolean;paused?:boolean;immediate?:boolean;reduced?:boolean;forcedId?:string}
 /** Optional media phases. Old imported packs retain the original direct player. */
 export class MotionSequencer {
   private picker=new MotionPicker()
@@ -29,7 +29,7 @@ export class MotionSequencer {
   sample(pack:MediaPack|undefined,slot:string,now:number,random:number,options:Playback={video:true}){
     if(options.paused){this.suspended??=now;now=this.suspended}
     else if(this.suspended!==undefined){const pause=now-this.suspended;this.at+=pause;this.previous+=pause;this.suspended=undefined}
-    const request=this.picker.sample(pack,slot,now,random)
+    const request=this.picker.sample(pack,slot,now,random,options.forcedId)
     if(!request){this.active=undefined;return undefined}
     const changed=this.identity(request)!==this.key
     if(!this.active||(changed&&(options.immediate||options.reduced||!this.active.clip.exit||this.phase==='hold'))){this.begin(request,now,options.reduced)}

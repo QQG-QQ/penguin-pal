@@ -24,14 +24,15 @@ export class MotionPicker {
   private key=''; private selected:MediaClip|undefined; private started=0
   private revision=0
   private last=new Map<string,string>()
-  sample(pack:MediaPack|undefined,slot:string,now:number,random:number){
-    const key=`${pack?.id??''}:${slot}`
+  sample(pack:MediaPack|undefined,slot:string,now:number,random:number,forcedId?:string){
+    const key=`${pack?.id??''}:${slot}:${forcedId??''}`
     // Rotate only when another idle candidate exists; keep singleton loops running.
     const rotate=slot==='idle'&&now-this.started>12000&&(pack?.clips.filter(c=>c.slot===slot&&c.weight>0).length??0)>1
     if(key!==this.key||rotate){
       this.key=key;this.started=now
       this.revision++
-      this.selected=pack?pickMotion(pack.clips,slot,this.last.get(key),random):undefined
+      const forced=forcedId?pack?.clips.find(c=>c.slot===slot&&c.id===forcedId&&c.weight>0):undefined
+      this.selected=forced??(pack?pickMotion(pack.clips,slot,this.last.get(key),random):undefined)
       if(this.selected)this.last.set(key,this.selected.id)
     }
     const c=this.selected

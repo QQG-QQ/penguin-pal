@@ -59,6 +59,36 @@ def key_frame(frame):
     alpha[0:44, 0:160] = 0
     alpha[650:720, 560:720] = 0
     alpha = remove_enclosed_ground(frame, alpha)
+    # White costume areas can be connected to the light background by a tiny
+    # compression gap. Recover large, color-different regions that touch the
+    # existing silhouette, while ignoring isolated background texture.
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    candidate = ((hsv[:, :, 1] > 7) | (hsv[:, :, 2] < 210)).astype(np.uint8)
+    near_silhouette = cv2.dilate(alpha, np.ones((31, 31), np.uint8), iterations=1)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+    for index in range(1, count):
+        component = labels == index
+        if stats[index, cv2.CC_STAT_AREA] > 300 and (component & (near_silhouette > 0)).any():
+            alpha[component] = 255
+    # Generated white particles and corner text can be enclosed by glow
+    # effects, so border flood fill alone cannot remove them. Keep the main
+    # character region protected, then discard near-white low-saturation pixels
+    # outside it; cyan hologram pixels remain saturated and are preserved.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(alpha, 8)
+    if count > 1:
+        main = max(range(1, count), key=lambda index: stats[index, cv2.CC_STAT_AREA])
+        x, y, width, height = stats[main, :4]
+        protected = np.zeros_like(alpha)
+        frame_height, frame_width = frame.shape[:2]
+        protected[max(0, y - 50):min(frame_height, y + height + 50), max(0, x - 50):min(frame_width, x + width + 50)] = 1
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        white_particle = (hsv[:, :, 1] < 7) & (hsv[:, :, 2] > 210) & (protected == 0)
+        alpha[white_particle] = 0
+    # The generated close-up has tiny anti-aliased gaps in the dark outline.
+    # Flood fill can enter through those gaps and erase the white belly and
+    # sleeves in the later hologram frames. Close only small gaps before the
+    # final edge cleanup so the full performance keeps the character opaque.
+    alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=1)
     # Slight erosion removes the compressed 1px background fringe.
     alpha = cv2.erode(alpha, np.ones((2, 2), np.uint8), iterations=1)
     alpha = cv2.GaussianBlur(alpha, (3, 3), 0)

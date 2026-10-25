@@ -73,6 +73,7 @@ const presentation = computed(() => codexPresentation(codexStatus.value))
 const petName = computed(() => (syncView.value?.document.brain?.config?.petName || '企鹅').trim() || '企鹅')
 const moodBadge=computed(()=>{const pet=syncView.value?.document.pet,brain=syncView.value?.document.brain;if(!pet||brain?.config.badge===false)return null;return {...moodFace(pet.mood),value:Math.round(pet.mood),emotion:dominantEmotion(brain?.emotions)}})
 const packs=ref<MediaPack[]>([]), importing=ref(false), media=ref<ReturnType<MotionSequencer['sample']>>()
+const forcedPerformance=ref<string>()
 const motionPicker=new MotionSequencer(),trail=new DragTrail(),failedVideos=new Set<string>()
 const music=ref<MusicSnapshot>(silentMusic()),musicClock=ref(new MusicClock()),musicScene=ref(new MusicScene()),djFailed=ref(false)
 let musicReceived=0,inMusic=false,musicTimer:number|undefined
@@ -140,7 +141,7 @@ const talk = (text:string,manual=false) => {
   message.value = text; window.clearTimeout(clearMessageTimer)
   clearMessageTimer = window.setTimeout(()=>{message.value=''},4800)
 }
-const updateActivity = (next:Activity,duration=3000,manual=false) => {activity.value=next;actionUntil=Date.now()+motionDuration(motionPackForSlot(selectedPack.value,builtinMotionPack,next),next,duration);if(manual)manualUntil=actionUntil;motionPicker.reset();player.reset()}
+const updateActivity = (next:Activity,duration=3000,manual=false) => {if(next!=='perform')forcedPerformance.value=undefined;activity.value=next;actionUntil=Date.now()+motionDuration(motionPackForSlot(selectedPack.value,builtinMotionPack,next),next,duration);if(manual)manualUntil=actionUntil;motionPicker.reset();player.reset()}
 // Every built-in action video is eligible for a random idle performance.
 const performanceSlots:Activity[]=['greet','happy','pat','poke','tail','eat','rest','wake','sweep','think','look','blink','talk','annoyed','perform']
 function availablePerformanceSlots(){
@@ -154,7 +155,8 @@ function playRandomPerformance(){
   nextActivity=Date.now()+15000
   return true
 }
-function requestAction(next:Activity){retryMotion();if(next==='perform'){if(playRandomPerformance())nextRandomAction=Date.now()+30000+Math.random()*45000;return}updateActivity(next,next==='sweep'?6500:3500,true)}
+function requestPerformance(id:string){retryMotion();forcedPerformance.value=id;updateActivity('perform',15000,true);nextActivity=Date.now()+15000}
+function requestAction(next:Activity){retryMotion();if(next==='perform'){forcedPerformance.value=undefined;if(playRandomPerformance())nextRandomAction=Date.now()+30000+Math.random()*45000;return}updateActivity(next,next==='sweep'?6500:3500,true)}
 async function save() {
   if (!initialized || !native) return
   if (saving) {saveAgain=true;return}
@@ -362,7 +364,8 @@ async function frame(){
     if(wasMusic!==musicScene.value.showing){motionPicker.reset(true);player.reset();if(musicScene.value.showing)musicClock.value.elapsed=0}
     const clip=selectClip(activity.value,state.value.preferences.statusAnimations?codexStatus.value:'idle',dragging.value&&moved,airborne.value,facing.value,Date.now()<manualUntil)
     pose.value=player.sample(clip,now,still.value)
-    media.value=motionPicker.sample(motionPackForSlot(selectedPack.value,builtinMotionPack,clip.slot??'idle'),clip.slot??'idle',now,Math.random(),{video:state.value.preferences.videoAnimations&&!still.value&&!(media.value?.clip.video&&failedVideos.has(resolveMedia(media.value.clip.video))),paused:!visible.value||dockHidden.value||hiddenForFullscreen.value,immediate:['drag','fall','land','dizzy'].includes(clip.slot??''),reduced:still.value})
+    const motionPack=forcedPerformance.value&&clip.slot==='perform'?builtinMotionPack:motionPackForSlot(selectedPack.value,builtinMotionPack,clip.slot??'idle')
+    media.value=motionPicker.sample(motionPack,clip.slot??'idle',now,Math.random(),{video:state.value.preferences.videoAnimations&&!still.value&&!(media.value?.clip.video&&failedVideos.has(resolveMedia(media.value.clip.video))),paused:!visible.value||dockHidden.value||hiddenForFullscreen.value,immediate:['drag','fall','land','dizzy'].includes(clip.slot??''),reduced:still.value,forcedId:clip.slot==='perform'?forcedPerformance.value:undefined})
     // Perform clips are one-shot. A shared slot can contain clips of different
     // lengths (the holo disc is about 5s, while the lion dance is about 10s),
     // so the generic action timeout cannot be used to hold the shorter clip.
@@ -476,7 +479,7 @@ onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',
     <div v-if="menu" class="panel-host" :style="{left:`${panel.x}px`,top:`${panel.y}px`}" @contextmenu.stop.prevent>
       <CompanionChat v-if="chatOpen" :native="native" :view="syncView" :session="chatSession" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="toggleMenu(false)" @received="receiveChat" @tools="openTools"/>
       <CompanionDiagnostics v-else-if="tools" :native="native" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="closeTools" @safe="setSafety" @sync="receiveSync" @chat="receiveChat"/>
-      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" :codex-enabled="!deepSeek" :pet-name="petName" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @codex="openCodex" @chat="openChat" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
+      <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" :codex-enabled="!deepSeek" :pet-name="petName" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @performance="requestPerformance" @codex="openCodex" @chat="openChat" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
     </div>
     <p v-if="error" class="notice" role="alert" @click="error=''">{{error}}</p>
   </main>
