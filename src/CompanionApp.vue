@@ -363,6 +363,13 @@ async function frame(){
     const clip=selectClip(activity.value,state.value.preferences.statusAnimations?codexStatus.value:'idle',dragging.value&&moved,airborne.value,facing.value,Date.now()<manualUntil)
     pose.value=player.sample(clip,now,still.value)
     media.value=motionPicker.sample(motionPackForSlot(selectedPack.value,builtinMotionPack,clip.slot??'idle'),clip.slot??'idle',now,Math.random(),{video:state.value.preferences.videoAnimations&&!still.value&&!(media.value?.clip.video&&failedVideos.has(resolveMedia(media.value.clip.video))),paused:!visible.value||dockHidden.value||hiddenForFullscreen.value,immediate:['drag','fall','land','dizzy'].includes(clip.slot??''),reduced:still.value})
+    // Perform clips are one-shot. A shared slot can contain clips of different
+    // lengths (the holo disc is about 5s, while the lion dance is about 10s),
+    // so the generic action timeout cannot be used to hold the shorter clip.
+    // Return to idle as soon as either perform clip reaches its terminal frame.
+    if(activity.value==='perform'&&media.value?.phase==='hold'&&!media.value.queued){
+      updateActivity('idle',3000)
+    }
     // A requested action gets its full duration after the preceding exit finishes.
     if(media.value?.queued){actionUntil+=elapsed*1000;manualUntil+=elapsed*1000}
     if(still.value&&media.value)media.value={...media.value,frame:media.value.clip.poster}
