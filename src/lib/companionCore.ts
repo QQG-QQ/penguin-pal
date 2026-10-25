@@ -14,7 +14,7 @@ export interface CompanionState {
   dock: DockEdge
 }
 export type CareAction = 'pat' | 'poke' | 'tail' | 'feed' | 'rest'
-export type Activity = 'idle' | 'blink' | 'look' | 'think' | 'walk' | 'rest' | 'happy' | 'greet' | 'pat' | 'poke' | 'tail' | 'eat' | 'sweep' | 'wake' | 'talk' | 'annoyed' | 'dizzy' | 'land'
+export type Activity = 'idle' | 'blink' | 'look' | 'think' | 'walk' | 'rest' | 'happy' | 'greet' | 'pat' | 'poke' | 'tail' | 'eat' | 'sweep' | 'wake' | 'talk' | 'annoyed' | 'dizzy' | 'land' | 'perform'
 export interface Surface { id: number; left: number; right: number; top: number; bottom: number }
 export interface Bounds { left: number; right: number; top: number; bottom: number }
 export interface Body { x: number; y: number; vx: number; vy: number; width: number; height: number }

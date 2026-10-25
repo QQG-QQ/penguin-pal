@@ -118,7 +118,7 @@ async function refreshPacks(){if(native)try{packs.value=(await invoke<MediaPack[
 async function importPack(){if(!native||importing.value)return;importing.value=true;try{const pack=await invoke<MediaPack|null>('companion_media_import');if(pack){await refreshPacks();await preferencesChanged({animationPack:pack.id});talk(`已启用 ${pack.name}。`)}}catch(e){error.value=`动画导入失败：${String(e)}`}finally{importing.value=false}}
 async function openPackFolder(){if(native)try{await invoke('companion_media_folder')}catch(e){error.value=String(e)}}
 const hiddenForFullscreen = computed(() => fullscreen.value && state.value.preferences.fullscreenHide && !menu.value)
-const statusLabel = computed(() => (!deepSeek.value&&busy.value) ? presentation.value.label.replace('Codex ','') : musicScene.value.showing?'音乐打碟':({rest:'休息',walk:'散步',eat:'吃鱼',sweep:'扫地',happy:'开心',pat:'摸摸'} as Record<string,string>)[activity.value] ?? '待机')
+const statusLabel = computed(() => (!deepSeek.value&&busy.value) ? presentation.value.label.replace('Codex ','') : musicScene.value.showing?'音乐打碟':({greet:'挥手',happy:'开心',pat:'摸摸',poke:'戳戳',tail:'尾巴',eat:'吃鱼',rest:'休息',wake:'醒来',sweep:'扫地',think:'发呆',look:'张望',blink:'眨眼',talk:'说话',annoyed:'小脾气',perform:'表演',walk:'散步'} as Record<string,string>)[activity.value] ?? '待机')
 const connection = computed(() => deepSeek.value ? 'DeepSeek 模式：不做工作感知' : !state.value.preferences.codexEvents ? '工作感知已关闭' : lastEvent.value ? '已收到工作状态事件' : connected.value ? '等待事件（Codex 首次安装需在 Codex 中信任 hooks）' : native ? '本地连接中' : '浏览器预览')
 const unit = computed(() => state.value.preferences.size)
 const stageStyle = computed(() => ({left:`${stage.value.x}px`,top:`${stage.value.y}px`,transform:`scale(${unit.value})`}))
@@ -127,7 +127,7 @@ let surfaces: Surface[] = [], attached: Surface | undefined
 let body: Body = {x:200,y:200,vx:0,vy:0,width:160,height:220}, offset = {x:70,y:60}, scale = 1
 let windowOrigin = {x:0,y:0}, pointerOffset = {x:0,y:0}, pressed = false, moved = false, heldAt = 0, patAt = 0, heldPat = false
 let releasing=false,dragMove:Promise<void>|undefined,dragOrigin={x:0,y:0}
-let previousCursor = {x:0,y:0,at:0}, lastFrame = performance.now(), actionUntil = 0, manualUntil=0, nextActivity = Date.now()+12000, nextMicro = Date.now()+5000
+let previousCursor = {x:0,y:0,at:0}, lastFrame = performance.now(), actionUntil = 0, manualUntil=0, nextActivity = Date.now()+12000, nextMicro = Date.now()+5000, nextRandomAction = Date.now()+20000+Math.random()*20000
 let recent: {action:CareAction;at:number}[] = [], inFrame = false, inPoll = false, inHit = false
 let ignored:boolean|undefined=false
 let initialized = false, saving = false, saveAgain = false, disposed = false, layingOut = false, lastContext = 'quiet', nextContext = 0
@@ -141,7 +141,20 @@ const talk = (text:string,manual=false) => {
   clearMessageTimer = window.setTimeout(()=>{message.value=''},4800)
 }
 const updateActivity = (next:Activity,duration=3000,manual=false) => {activity.value=next;actionUntil=Date.now()+motionDuration(motionPackForSlot(selectedPack.value,builtinMotionPack,next),next,duration);if(manual)manualUntil=actionUntil;motionPicker.reset();player.reset()}
-function requestAction(next:Activity){retryMotion();updateActivity(next,next==='sweep'?6500:3500,true)}
+// Every built-in action video is eligible for a random idle performance.
+const performanceSlots:Activity[]=['greet','happy','pat','poke','tail','eat','rest','wake','sweep','think','look','blink','talk','annoyed','perform']
+function availablePerformanceSlots(){
+  const pack=selectedPack.value??builtinMotionPack
+  return performanceSlots.filter(slot=>pack.clips.some(c=>c.slot===slot&&c.weight>0))
+}
+function playRandomPerformance(){
+  const slots=availablePerformanceSlots()
+  if(!slots.length)return false
+  updateActivity(slots[Math.floor(Math.random()*slots.length)],600,true)
+  nextActivity=Date.now()+15000
+  return true
+}
+function requestAction(next:Activity){retryMotion();if(next==='perform'){if(playRandomPerformance())nextRandomAction=Date.now()+30000+Math.random()*45000;return}updateActivity(next,next==='sweep'?6500:3500,true)}
 async function save() {
   if (!initialized || !native) return
   if (saving) {saveAgain=true;return}
@@ -159,8 +172,10 @@ function interact(action:CareAction) {
   if(syncView.value?.mode==='server')syncRecord('care',{action})
 }
 async function openCodex() {
+  // DeepSeek 模式没有 Codex 入口：单击桌宠只保留本地互动，不能再弹“请先打开 Codex”的提示。
+  if (deepSeek.value) return
   if (!native){talk('桌面版会打开你现有的 Codex 聊天界面。');return}
-  try {await invoke('companion_open_codex');await toggleMenu(false);food.value=false;error.value=''}catch(e){error.value=String(e)}
+  try {await invoke('companion_open_codex');await toggleMenu(false);food.value=false;error.value=''}catch(e){if(!deepSeek.value)error.value=String(e)}
 }
 async function hidePet(){await toggleMenu(false);await save();if(native)await getCurrentWindow().hide()}
 async function quit(){await save();if(native)await invoke('companion_quit')}
@@ -270,7 +285,7 @@ async function release(e?:PointerEvent){
   if(!moved&&e&&img.value){
     if(Date.now()-heldAt<400){
       if(Date.now()-tapAt<330){window.clearTimeout(codexTimer);food.value=true;tapAt=0;return}
-      tapAt=Date.now();codexTimer=window.setTimeout(()=>{void openCodex()},330)
+      tapAt=Date.now();if(!deepSeek.value)codexTimer=window.setTimeout(()=>{void openCodex()},330)
     }
     if(!heldPat){const m=computePetLayoutMetrics(img.value.getBoundingClientRect(),artwork.value);interact(e.clientX>m.petLeft+(m.petRight-m.petLeft)*.88&&e.clientY>m.petTop+(m.petBottom-m.petTop)*.5?'tail':Date.now()-heldAt>400?'pat':hitRegion(e.clientY,m.petTop,m.petBottom))}
   }else if(moved){
@@ -391,6 +406,11 @@ async function frame(){
     }
     if(Date.now()>actionUntil&&activity.value!=='idle')updateActivity(activity.value==='rest'?'wake':'idle',activity.value==='rest'?1200:3000)
     if(Date.now()>nextMicro&&!wantsMusic&&!musicScene.value.showing&&activity.value==='idle'&&!pressed&&!menu.value&&!busy.value&&!still.value){updateActivity(Math.random()<.65?'blink':'look',500);nextMicro=Date.now()+4500+Math.random()*8000}
+    const performPack=selectedPack.value??builtinMotionPack
+    if(Date.now()>nextRandomAction&&activity.value==='idle'&&!pressed&&!menu.value&&!food.value&&!airborne.value&&!busy.value&&!still.value&&!state.value.preferences.quiet&&!dockHidden.value&&!hiddenForFullscreen.value&&!musicScene.value.showing&&!wantsMusic&&!(hovered.value&&state.value.preferences.hoverPause)&&performPack.clips.some(c=>c.weight>0)){
+      if(playRandomPerformance())nextRandomAction=Date.now()+30000+Math.random()*45000
+      else nextRandomAction=Date.now()+60000
+    }
     if(Date.now()>nextActivity&&!wantsMusic&&!musicScene.value.showing&&!pressed&&!menu.value&&!food.value&&!airborne.value&&!(hovered.value&&state.value.preferences.hoverPause)){
       const next=chooseActivity(state.value,Math.random(),busy.value||hiddenForFullscreen.value||still.value||context.value==='video'||dock.value!=='none')
       updateActivity(next,next==='rest'?45000:next==='walk'?5000:next==='sweep'?6500:3000)
@@ -398,7 +418,7 @@ async function frame(){
       nextActivity=Date.now()+(25000+Math.random()*30000)*rhythm
     }
     if(!syncView.value?.document.social?.proactive&&Date.now()>nextLine&&!busy.value&&!pressed&&!menu.value&&!dockHidden.value&&!fullscreen.value&&(syncView.value?.mode!=='server'||(syncView.value.active&&Date.now()-syncView.value.lastSync<45000))){talk(state.value.hunger>75?'小鱼可以留一点给我吗？':localLine(state.value.preferences.personality,context.value,Math.random()));nextLine=Date.now()+300000+Math.random()*600000}
-  }catch{cancelDrag();attached=undefined;updateActivity('idle');nextActivity=Date.now()+60000;error.value='移动已暂停，仍可打开 Codex。'}finally{inFrame=false}
+  }catch{cancelDrag();attached=undefined;updateActivity('idle');nextActivity=Date.now()+60000;error.value=deepSeek.value?'移动已暂停，稍后会自动恢复。':'移动已暂停，仍可打开 Codex。'}finally{inFrame=false}
 }
 async function tick(){await frame();if(!disposed)tickTimer=window.setTimeout(()=>{void tick()},frameDelay(!visible.value||hiddenForFullscreen.value||dockHidden.value,dragging.value||airborne.value||activity.value==='walk'||!!attached||musicScene.value.showing,activity.value!=='idle'||busy.value))}
 async function pollTick(){await poll();if(!disposed)pollTimer=window.setTimeout(()=>{void pollTick()},visible.value?1000:2500)}
@@ -420,7 +440,7 @@ onMounted(async()=>{
       if(state.value.x!==null&&state.value.y!==null)await win.setPosition(new PhysicalPosition(state.value.x,state.value.y))
       const savedDock=state.value.dock;await snap();state.value.dock=savedDock;unlisten=await listen('companion-panel',()=>{void toggleMenu(true)})
     }
-    initialized=true;await poll();if(native&&state.value.dock!=='none'&&state.value.preferences.edgeDock&&!safeMode.value)await setDock(state.value.dock);if(previewGreeting.value&&!previewPlan.some(p=>p==='music'||p==='motion')){updateActivity('greet',600000);await toggleMenu(true)}void tick();void pollTick();void musicTick();runPreviewPlan()
+    initialized=true;await poll();if(native&&state.value.dock!=='none'&&state.value.preferences.edgeDock&&!safeMode.value)await setDock(state.value.dock);if(previewGreeting.value&&!previewPlan.some(p=>p==='music'||p==='motion'||p==='perform')){updateActivity('greet',600000);await toggleMenu(true)}void tick();void pollTick();void musicTick();runPreviewPlan()
     if(native&&previewGreeting.value&&!previewSuite.value)window.setTimeout(()=>{
       const videos=Array.from(document.querySelectorAll('video')),v=videos.find(v=>v.style.visibility==='visible')??videos.find(v=>v.hasAttribute('src'))??videos[0]
       if(!v)return

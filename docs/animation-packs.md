@@ -34,7 +34,7 @@
 - 最多 32 个包，每包 64 个动作、每动作 120 帧；清单最多 128 KiB，单素材 32 MiB，单包 200 MiB。只接受同目录素材，不接受 URL、绝对路径、子目录、符号链接、压缩包或脚本。导入先检查文件头；实际可解码性由播放器进一步检查。
 - 刷新会重新读取清单；已缓存的同名文件内容可能仍由 WebView2 缓存，修改素材后建议使用新文件名/id 再导入。删除不使用的包可在文件夹中手动进行，再刷新；内置素材不受影响。
 
-支持 slot：`idle blink look think walk-left walk-right rest happy greet pat poke tail eat sweep wake talk annoyed dizzy land drag fall working waiting ended interrupted toolError`。
+支持 slot：`idle blink look think walk-left walk-right rest happy greet pat poke tail eat sweep wake talk annoyed dizzy land drag fall working waiting ended interrupted toolError perform`。内置企鹅待机时会从全部动作 slot（含 `perform` 的舞狮、全息圆盘两段约 10 秒表演）中随机挑一个播放；外部包中存在的动作 slot 参与随机，缺少的 slot 自动跳过。
 
 `working/waiting/ended/interrupted/toolError` 跟随现有 Codex 状态；可关闭「任务动作」保留文字状态。结束表示本轮结束，不声明任务成功。不会连接第二个模型，也不会读写 Codex 聊天或长期记忆。
 

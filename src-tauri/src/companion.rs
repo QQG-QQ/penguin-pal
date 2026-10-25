@@ -640,6 +640,7 @@ fn companion_preview_plan(window: WebviewWindow) -> Result<Vec<&'static str>, St
     main_only(&window)?;
     if std::env::args().any(|a| a=="--smoke") && std::env::args().any(|a| a=="--smoke-preview") && std::env::args().any(|a| a=="--smoke-motion") {return Ok(vec!["motion"]);}
     if std::env::args().any(|a| a=="--smoke") && std::env::args().any(|a| a=="--smoke-preview") && std::env::args().any(|a| a=="--smoke-music") {return Ok(vec!["music"]);}
+    if std::env::args().any(|a| a=="--smoke") && std::env::args().any(|a| a=="--smoke-preview") && std::env::args().any(|a| a=="--smoke-perform") {return Ok(vec!["perform"]);}
     if std::env::args().any(|a| a == "--smoke")
         && std::env::args().any(|a| a == "--smoke-preview")
         && std::env::args().any(|a| a == "--smoke-actions")
@@ -1113,6 +1114,13 @@ pub fn run() {
                 state.preferences.music_mode=MusicMode::Off;
             }
             if smoke_preview && std::env::args().any(|a|a=="--smoke-music") {state.preferences.music_mode=MusicMode::Audio;}
+            if smoke_preview && std::env::args().any(|a|a=="--smoke-perform") {
+                state.preferences.movement=Movement::Still;
+                state.preferences.wander=false;
+                state.preferences.fullscreen_hide=false;
+                state.preferences.edge_dock=false;
+                state.preferences.music_mode=MusicMode::Off;
+            }
             if let Ok(enabled) = app.autolaunch().is_enabled() {
                 state.preferences.autostart = enabled;
             }

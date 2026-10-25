@@ -2,7 +2,7 @@ import manifest from '../../penguin/companion-v4/artwork.json'
 import rows from '../../penguin/companion-v4/motions.json'
 import type { PetArtworkDescriptor } from './petArtwork'
 import type { MediaPack, MediaClip, MediaSegment, MotionSlot } from './companionMedia'
-const assets=import.meta.glob(['../../penguin/companion-v4/*.png','../../penguin/companion-v4/*.webm'],{eager:true,query:'?url',import:'default'}) as Record<string,string>
+const assets=import.meta.glob(['../../penguin/companion-v4/*.png','../../penguin/companion-v4/*.webm','../../penguin/companion-v4/*.webp'],{eager:true,query:'?url',import:'default'}) as Record<string,string>
 const url=(file:string)=>assets[`../../penguin/companion-v4/${file}`]
 export function companionArtwork(key:string):PetArtworkDescriptor {
   const frame=manifest[key in manifest?key as keyof typeof manifest:'idle']

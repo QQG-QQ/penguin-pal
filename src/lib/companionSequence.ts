@@ -39,8 +39,9 @@ export class MotionSequencer {
     if(options.reduced){this.pending=undefined;this.phase='body'}
     const c=this.active!,duration=this.duration(),elapsed=Math.max(0,now-this.at)
     // Native videos advance on their own ended event, including disabling loop to
-    // finish the current cycle. The clock path is used only by PNG fallback.
-    if(!options.video&&!options.paused&&!options.reduced&&this.phase!=='hold'){
+    // finish the current cycle. The clock path is used only by PNG/WebP fallback.
+    const nativeVideo=!!this.active?.clip.video
+    if(!(options.video&&nativeVideo)&&!options.paused&&!options.reduced&&this.phase!=='hold'){
       const crossedCycle=this.phase==='body'&&c.clip.loop&&this.pending&&Math.floor(elapsed/duration)>Math.floor(Math.max(0,this.previous-this.at)/duration)
       if(crossedCycle||(elapsed>=duration&&(this.phase!=='body'||!c.clip.loop)))this.advance(now)
     }

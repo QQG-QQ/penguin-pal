@@ -1,5 +1,5 @@
 /** Local declarative media only. Pack files are validated and copied by the native importer. */
-export const motionSlots = ['idle','blink','look','think','walk-left','walk-right','rest','happy','greet','pat','poke','tail','eat','sweep','wake','talk','annoyed','dizzy','land','drag','fall','working','waiting','ended','interrupted','toolError'] as const
+export const motionSlots = ['idle','blink','look','think','walk-left','walk-right','rest','happy','greet','pat','poke','tail','eat','sweep','wake','talk','annoyed','dizzy','land','drag','fall','working','waiting','ended','interrupted','toolError','perform'] as const
 export type MotionSlot = typeof motionSlots[number]
 export interface MediaSegment {
   poster:string; frames:string[]; video?:string; durationMs?:number
@@ -39,7 +39,7 @@ export class MotionPicker {
     const index=Math.max(0,Math.floor((now-this.started)/c.frameMs))
     return {clip:c,revision:this.revision,directory:pack?.directory,frame:c.frames.length?c.frames[c.loop?index%c.frames.length:Math.min(index,c.frames.length-1)]:c.poster}
   }
-  reset(){this.key='';this.selected=undefined}
+  reset(){this.key='';this.selected=undefined;this.last.clear()}
 }
 
 export interface PointerSample {x:number;y:number;at:number}
