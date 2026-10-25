@@ -10,7 +10,7 @@ const emit = defineEmits<{
 const privacy = ref(false),tab=ref<'home'|'actions'|'media'>('home'),category=ref('互动')
 function showTab(value:'home'|'actions'|'media'){tab.value=value;emit('expand',value!=='home')}
 const actions:{group:string;label:string;activity?:Activity;care?:CareAction;performance?:string}[]=[
-  {group:'互动',label:'挥手',activity:'greet'},{group:'互动',label:'开心',activity:'happy'},{group:'互动',label:'摸摸',care:'pat'},{group:'互动',label:'戳戳',care:'poke'},{group:'互动',label:'尾巴',care:'tail'},{group:'互动',label:'舞狮',performance:'idle-lion-dance'},{group:'互动',label:'全息圆盘',performance:'idle-holo-disc'},{group:'互动',label:'随机表演',activity:'perform'},
+  {group:'互动',label:'挥手',activity:'greet'},{group:'互动',label:'开心',activity:'happy'},{group:'互动',label:'摸摸',care:'pat'},{group:'互动',label:'戳戳',care:'poke'},{group:'互动',label:'尾巴',care:'tail'},{group:'互动',label:'随机表演',activity:'perform'},
   {group:'生活',label:'小鱼',care:'feed'},{group:'生活',label:'休息',care:'rest'},{group:'生活',label:'醒来',activity:'wake'},{group:'生活',label:'扫地',activity:'sweep'},
   {group:'表情',label:'发呆',activity:'think'},{group:'表情',label:'张望',activity:'look'},{group:'表情',label:'眨眼',activity:'blink'},{group:'表情',label:'说话',activity:'talk'},{group:'表情',label:'小脾气',activity:'annoyed'}]
 function play(item:typeof actions[number]){if(item.care)emit('care',item.care);else if(item.performance)emit('performance',item.performance);else if(item.activity)emit('action',item.activity)}
