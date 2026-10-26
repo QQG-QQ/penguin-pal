@@ -61,6 +61,7 @@ const tools=ref(false),safeMode=ref(false),dock=ref<DockEdge>('none'),dockHidden
 const codexStatus = ref('idle'), lastEvent = ref(0), connected = ref(false), visible = ref(true)
 const llmProvider = ref('codex')
 const deepSeek = computed(() => llmProvider.value === 'deepseek')
+const activeCodexStatus = computed(() => deepSeek.value ? 'idle' : codexStatus.value)
 const context = ref('quiet'), fullscreen = ref(false), hovered = ref(false), dragging = ref(false), airborne = ref(false), facing = ref(1)
 const img = ref<HTMLElement | null>(null), mask = ref<PetAlphaMask | null>(null), pose = ref('idle')
 const stage = ref({x:0,y:0}), panel = ref({x:296,y:8})
@@ -68,7 +69,9 @@ const reduce = ref(window.matchMedia('(prefers-reduced-motion: reduce)').matches
 // Pet motion follows its own controls, independently of Windows interface animations.
 const still = computed(() => state.value.preferences.reducedMotion || safeMode.value)
 const physicsEnabled = computed(() => state.value.preferences.gravity && !still.value)
-const busy = computed(() => ['working','waiting','toolError'].includes(codexStatus.value))
+// DeepSeek does not use Codex hook state. Keep stale Codex events from
+// forcing the pet into the working/think animation or blocking idle actions.
+const busy = computed(() => ['working','waiting','toolError'].includes(activeCodexStatus.value))
 const presentation = computed(() => codexPresentation(codexStatus.value))
 const petName = computed(() => (syncView.value?.document.brain?.config?.petName || '企鹅').trim() || '企鹅')
 const moodBadge=computed(()=>{const pet=syncView.value?.document.pet,brain=syncView.value?.document.brain;if(!pet||brain?.config.badge===false)return null;return {...moodFace(pet.mood),value:Math.round(pet.mood),emotion:dominantEmotion(brain?.emotions)}})
@@ -78,7 +81,7 @@ const motionPicker=new MotionSequencer(),trail=new DragTrail(),failedVideos=new 
 const music=ref<MusicSnapshot>(silentMusic()),musicClock=ref(new MusicClock()),musicScene=ref(new MusicScene()),djFailed=ref(false)
 let musicReceived=0,inMusic=false,musicTimer:number|undefined
 const musicEnabled=computed(()=>state.value.preferences.musicMode!=='off'&&!still.value&&!state.value.preferences.quiet&&visible.value&&!dockHidden.value&&!hiddenForFullscreen.value)
-const musicEligible=()=>musicAllowed({enabled:musicEnabled.value,reduced:still.value,quiet:state.value.preferences.quiet,visible:visible.value,hidden:hiddenForFullscreen.value||dockHidden.value,codex:codexStatus.value,pressed:dragging.value,falling:airborne.value,panel:menu.value||food.value,manual:Date.now()<manualUntil,activity:activity.value})
+const musicEligible=()=>musicAllowed({enabled:musicEnabled.value,reduced:still.value,quiet:state.value.preferences.quiet,visible:visible.value,hidden:hiddenForFullscreen.value||dockHidden.value,codex:activeCodexStatus.value,pressed:dragging.value,falling:airborne.value,panel:menu.value||food.value,manual:Date.now()<manualUntil,activity:activity.value})
 const musicLabel=computed(()=>state.value.preferences.musicMode==='off'?'音乐打碟已关闭':still.value?'减少动态已开启，音乐打碟暂停':state.value.preferences.quiet?'安静陪伴中，音乐打碟暂停':music.value.issue||(!musicEligible()?'互动或 Codex 状态优先，打碟暂停':music.value.active?`正在跟随${music.value.confidence>=.3?` · ${Math.round(music.value.bpm)} BPM`:''}`:music.value.source||'等待音乐播放'))
 const resolveMedia=(file:string)=>media.value?.directory?convertFileSrc(`${media.value.directory}/${file}`):file
 const selectedPack=computed(()=>state.value.preferences.animationPack==='builtin'?builtinMotionPack:packs.value.find(p=>p.id===state.value.preferences.animationPack))
@@ -362,7 +365,8 @@ async function frame(){
     musicClock.value.step(music.value,elapsed,!musicScene.value.showing)
     musicScene.value.sample(wantsMusic,now,!eligible)
     if(wasMusic!==musicScene.value.showing){motionPicker.reset(true);player.reset();if(musicScene.value.showing)musicClock.value.elapsed=0}
-    const clip=selectClip(activity.value,state.value.preferences.statusAnimations?codexStatus.value:'idle',dragging.value&&moved,airborne.value,facing.value,Date.now()<manualUntil)
+    const statusAnimation = state.value.preferences.statusAnimations ? activeCodexStatus.value : 'idle'
+    const clip=selectClip(activity.value,statusAnimation,dragging.value&&moved,airborne.value,facing.value,Date.now()<manualUntil)
     pose.value=player.sample(clip,now,still.value)
     const motionPack=forcedPerformance.value&&clip.slot==='perform'?builtinMotionPack:motionPackForSlot(selectedPack.value,builtinMotionPack,clip.slot??'idle')
     media.value=motionPicker.sample(motionPack,clip.slot??'idle',now,Math.random(),{video:state.value.preferences.videoAnimations&&!still.value&&!(media.value?.clip.video&&failedVideos.has(resolveMedia(media.value.clip.video))),paused:!visible.value||dockHidden.value||hiddenForFullscreen.value,immediate:['drag','fall','land','dizzy'].includes(clip.slot??''),reduced:still.value,forcedId:clip.slot==='perform'?forcedPerformance.value:undefined})

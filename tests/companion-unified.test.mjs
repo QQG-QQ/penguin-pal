@@ -23,9 +23,11 @@ test('long actions finish their builtin video, unknown and invalid durations kee
  for(const durationMs of [NaN,Infinity,-1,0])assert.equal(media.motionDuration({clips:[{slot:'greet',durationMs}]},'greet'),3500)
  assert.equal(media.motionDuration({clips:[{slot:'greet',durationMs:999999}]},'greet'),15000)
 })
-test('single builtin provides every activity and Codex alias with real local media',()=>{
+test('single builtin provides standard activities and Codex aliases with real local media',()=>{
  assert.equal(pack.id,'builtin');assert.equal(pack.name,'内置企鹅');assert.equal(new Set(pack.clips.map(c=>c.slot)).size,26)
- for(const slot of media.motionSlots){const c=pack.clips.find(c=>c.slot===slot);assert.ok(c,slot);for(const s of [c,c.enter,c.exit].filter(Boolean)){assert.ok(s.frames.length>0);for(const name of [s.poster,s.video,...s.frames]){assert.match(name,/^[a-z0-9-]+\.(png|webm)$/);assert.ok(existsSync(new URL('../penguin/companion-v4/'+name,import.meta.url)),name)}}}
+ // Custom packs may still provide perform clips; the removed built-in videos are optional.
+ assert.ok(media.motionSlots.includes('perform'))
+ for(const slot of media.motionSlots.filter(slot=>slot!=='perform')){const c=pack.clips.find(c=>c.slot===slot);assert.ok(c,slot);for(const s of [c,c.enter,c.exit].filter(Boolean)){assert.ok(s.frames.length>0);for(const name of [s.poster,s.video,...s.frames]){assert.match(name,/^[a-z0-9-]+\.(png|webm)$/);assert.ok(existsSync(new URL('../penguin/companion-v4/'+name,import.meta.url)),name)}}}
  for(const [alias,slot] of [['working','think'],['waiting','look'],['ended','happy'],['interrupted','look'],['toolError','annoyed']])assert.equal(pack.clips.find(c=>c.slot===alias).video,pack.clips.find(c=>c.slot===slot).video)
  assert.equal(pack.clips.find(c=>c.slot==='blink').loop,false);assert.equal(pack.clips.find(c=>c.slot==='rest').loop,true)
 })

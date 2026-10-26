@@ -27,7 +27,7 @@ function app(preferences={},pack={id:'builtin',clips:[]},systemReduced=false){
   invoke,listen:async()=>()=>{},convertFileSrc:p=>p,cursorPosition:async()=>({...cursor}),currentMonitor:async()=>({workArea:{position:{x:0,y:0},size:{width:1920,height:1040}}}),primaryMonitor:async()=>null,getCurrentWindow:()=>win,
   PhysicalPosition:class{constructor(x,y){this.x=x;this.y=y}},PhysicalSize:class{},computePetLayoutMetrics:()=>metrics,isPetOpaqueHit:(_a,_r,_m,x,y)=>x>=0&&x<=160&&y>=0&&y<=220,loadPetAlphaMask:async()=>null,
   builtinMotionPack:pack,companionArtwork:()=>({src:'poster.png'})}
- const run=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;\n${js}\ninitialized=true;img.value={getBoundingClientRect:()=>({left:0,top:0,width:160,height:220})};return {state,activity,airborne,dragging,pointerDown,release,frame,poll,error,musicScene,codexStatus,media,pose,facing,still,musicEnabled,video,videoFailed,setSafety,preferencesChanged,motionChanged,requestAction,refreshGeometry,updateHitTest,setSurfaces(value){surfaces=value},setFullscreen(value){fullscreen.value=value},setMusic(sample){music.value=sample;musicReceived=performance.now()},cancel:()=>{return ${cancelled.endsWith('()')?cancelled:cancelled+'()'}},age(){heldAt=Date.now()-2000},getBody:()=>({...body}),getBounds:()=>({...bounds})};`)(deps)
+ const run=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;\n${js}\ninitialized=true;img.value={getBoundingClientRect:()=>({left:0,top:0,width:160,height:220})};return {state,activity,airborne,dragging,pointerDown,release,frame,poll,error,musicScene,codexStatus,llmProvider,media,pose,facing,still,musicEnabled,video,videoFailed,setSafety,preferencesChanged,motionChanged,requestAction,refreshGeometry,updateHitTest,setSurfaces(value){surfaces=value},setFullscreen(value){fullscreen.value=value},setMusic(sample){music.value=sample;musicReceived=performance.now()},cancel:()=>{return ${cancelled.endsWith('()')?cancelled:cancelled+'()'}},age(){heldAt=Date.now()-2000},getBody:()=>({...body}),getBounds:()=>({...bounds})};`)(deps)
  Object.assign(run.state.value.preferences,{gravity:true,edgeDock:false,springDrag:false,wander:false,movement:'still',...preferences})
  const press=()=>run.pointerDown({button:0,pointerId:1,clientX:80,clientY:100,currentTarget:{setPointerCapture(){}}})
  const frame=async(ms=33)=>{clock+=ms;await run.frame()}
@@ -131,6 +131,33 @@ test('active music immediately yields to dragging, throwing and Codex working fe
  await drag(a);assert.equal(a.musicScene.value.showing,false);await a.release();assert.equal(a.airborne.value,true)
  const b=app();b.setMusic(audio);await b.frame();await b.frame(150);assert.equal(b.musicScene.value.showing,true)
  b.codexStatus.value='working';await b.frame();assert.equal(b.musicScene.value.showing,false);assert.equal(b.error.value,'')
+})
+
+test('DeepSeek mode ignores stale Codex working state and keeps idle scheduling',async()=>{
+ for(const status of ['working','waiting','toolError']){
+  const a=app({musicMode:'off',videoAnimations:false,hoverPause:false,rhythm:'lively'},builtinPack)
+  a.llmProvider.value='deepseek';a.codexStatus.value=status
+  const slots=new Set(),activities=new Set()
+  for(let i=0;i<720;i++){await a.frame(250);slots.add(a.media.value.clip.slot);activities.add(a.activity.value)}
+  for(const blocked of ['working','waiting','toolError'])assert.equal(slots.has(blocked),false,`${status}: stale status must not select ${blocked}`)
+  assert.ok(activities.has('happy'),`${status}: scheduled random performance must start`)
+  assert.ok(slots.has('happy'),`${status}: scheduled performance must actually play`)
+  assert.ok(slots.has('idle'),`${status}: playback must return to idle`)
+  assert.equal(a.error.value,'')
+ }
+})
+
+test('DeepSeek music ignores stale hooks and switching back to Codex restores work priority',async()=>{
+ const a=app({},builtinPack),audio={...musicModule.silentMusic(),active:true,bpm:120,confidence:1,level:.5}
+ a.llmProvider.value='deepseek';a.codexStatus.value='working'
+ a.setMusic(audio);await a.frame();await a.frame(150)
+ assert.equal(a.musicScene.value.showing,true)
+ a.llmProvider.value='codex';await a.frame()
+ assert.equal(a.musicScene.value.showing,false)
+ assert.equal(a.media.value.clip.slot,'working')
+ a.llmProvider.value='deepseek';await a.frame();await a.frame(150)
+ assert.equal(a.musicScene.value.showing,true)
+ assert.equal(a.error.value,'')
 })
 
 test('following keeps one walk playback request alive across whole video and PNG cycles',async()=>{

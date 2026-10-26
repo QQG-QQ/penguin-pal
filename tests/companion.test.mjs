@@ -68,7 +68,7 @@ export const cases = [
   } },
   { id: 'codex-presentation', suite: 'companion', feature: 'codex', tags: ['transition'], run() {
     assert.equal(core.codexPresentation('waiting').mode, 'listening')
-    assert.equal(core.codexPresentation('ended').label, 'Codex 本轮已结束')
+    assert.equal(core.codexPresentation('ended').label, '本轮工作已结束')
     assert.equal(core.codexPresentation('unknown').mode, 'idle')
   } },
   { id:'dock-negative-monitor-and-reveal',suite:'companion',feature:'dock',tags:['boundary','transition'],run(){
