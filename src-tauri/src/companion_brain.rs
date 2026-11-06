@@ -255,6 +255,12 @@ impl Brain {
                     .get(*k)
                     .is_some_and(|n| in_range(*n, 0.0, 100.0))
             })
+            && self.traits.len() == 7
+            && EMOTIONS.iter().all(|k| {
+                self.traits
+                    .get(*k)
+                    .is_some_and(|n| in_range(*n, 0.0, 100.0))
+            })
             && self.misses <= 1000
             && self.injection.chars().count() <= 600
             && (self.consumed.is_empty() || valid_id(&self.consumed))
@@ -328,6 +334,9 @@ impl Brain {
     }
 }
 pub fn load(doc: &Value) -> Result<Brain, String> {
+    load_at(doc, chrono::Utc::now().timestamp_millis().max(0) as u64)
+}
+pub(crate) fn load_at(doc: &Value, at: u64) -> Result<Brain, String> {
     let mut brain: Brain = serde_json::from_value(doc.get("brain").cloned().unwrap_or_else(|| json!({})))
         .map_err(|_| String::from("陪伴扩展数据无效。"))?;
     brain.sanitize();
@@ -336,7 +345,7 @@ pub fn load(doc: &Value) -> Result<Brain, String> {
     if brain.emotions.values().all(|value| *value <= 0.01) {
         brain.emotions = traits;
     }
-    brain.advance(chrono::Utc::now().timestamp_millis() as u64);
+    brain.advance(at);
     Ok(brain)
 }
 
@@ -471,7 +480,7 @@ pub fn remember(
     at: u64,
     historical: bool,
 ) -> Result<bool, String> {
-    let mut brain = load(doc)?;
+    let mut brain = load_at(doc, at)?;
     if memory.get("tags").is_some_and(|v| {
         v.as_array().is_none_or(|a| {
             a.len() > 12
@@ -550,7 +559,7 @@ pub fn remember(
     Ok(true)
 }
 pub fn mood(doc: &mut Value, data: &Value, id: &str, at: u64, source: &str) -> Result<(), String> {
-    let mut brain = load(doc)?;
+    let mut brain = load_at(doc, at)?;
     if !brain.config.mood_enabled {
         return Ok(());
     }
@@ -626,7 +635,7 @@ pub fn mood(doc: &mut Value, data: &Value, id: &str, at: u64, source: &str) -> R
     save(doc, brain)
 }
 pub fn apply(doc: &mut Value, data: &Value, id: &str, at: u64) -> Result<(), String> {
-    let mut brain = load(doc)?;
+    let mut brain = load_at(doc, at)?;
     match data["type"].as_str().unwrap_or("") {
         "settings" => {
             let mut cfg = serde_json::to_value(&brain.config).unwrap();
@@ -642,6 +651,7 @@ pub fn apply(doc: &mut Value, data: &Value, id: &str, at: u64) -> Result<(), Str
             if !brain.config.romance {
                 for k in ["sweet", "jealous"] {
                     brain.emotions.insert(k.into(), 0.0);
+                    brain.traits.insert(k.into(), 0.0);
                 }
             }
         }
@@ -771,5 +781,44 @@ mod trait_tests {
         assert!(brain.emotions.values().any(|value| *value > 5.0), "{:?}", brain.emotions);
         assert!(brain.traits["calm"] >= 30.0, "{:?}", brain.traits);
         assert_eq!(brain.traits["sweet"], 0.0);
+    }
+    #[test]
+    fn logical_clock_and_legacy_defaults_keep_traits_bounded() {
+        let mut brain = super::Brain::default();
+        brain.emotions.insert("happy".into(), 50.0);
+        brain.emotion_at = 1000;
+        let mut wire = serde_json::to_value(&brain).unwrap();
+        wire.as_object_mut().unwrap().remove("traits");
+        wire.as_object_mut().unwrap().remove("traitsAt");
+        let legacy: super::Brain = serde_json::from_value(wire.clone()).unwrap();
+        assert!(legacy.valid());
+        let doc = json!({"pet":{"personality":"gentle"},"memories":[],"brain":wire});
+        let loaded = super::load_at(&doc, 1000 + 90 * 60000).unwrap();
+        assert_eq!(loaded.emotions["happy"], 40.0);
+        assert_eq!(loaded.emotion_at, 1000 + 90 * 60000);
+        let earlier = super::load_at(&doc, 0).unwrap();
+        assert_eq!(earlier.emotions["happy"], 50.0);
+        assert_eq!(earlier.emotion_at, 1000);
+        for invalid in [f64::NAN, f64::INFINITY, -1.0, 101.0] {
+            brain.traits.insert("happy".into(), invalid);
+            assert!(!brain.valid());
+        }
+        brain.traits.insert("happy".into(), 100.0);
+        assert!(brain.valid());
+        brain.traits.remove("calm");
+        assert!(!brain.valid());
+    }
+    #[test]
+    fn disabling_romance_does_not_restore_old_traits_during_decay() {
+        let mut doc = json!({"pet":{"personality":"gentle"},"memories":[]});
+        super::apply(&mut doc, &json!({"type":"settings","config":{"romance":true}}), "on", 1000).unwrap();
+        super::apply(&mut doc, &json!({"type":"settings","config":{"romance":false}}), "off", 1000).unwrap();
+        let mut brain: super::Brain = serde_json::from_value(doc["brain"].clone()).unwrap();
+        brain.emotion_at = 1000;
+        brain.advance(1000 + 90 * 60000);
+        for key in ["sweet", "jealous"] {
+            assert_eq!(brain.traits[key], 0.0);
+            assert_eq!(brain.emotions[key], 0.0);
+        }
     }
 }

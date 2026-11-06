@@ -9,7 +9,7 @@ const busy=ref(false),error=ref(''),info=ref(''),tab=ref('outreach'),dirty=ref(f
 const draft=ref(mindConfig());let original=mindConfig()
 watch(()=>props.view?.document.brain?.config,c=>{if(!dirty.value){original={...mindConfig(),...c};draft.value={...original}}},{immediate:true})
 const brain=computed(()=>props.view?.document.brain),face=computed(()=>moodFace(props.view?.document.pet.mood??70))
-const tendency=computed(()=>((props.view?.document as any)?.tendency??null))
+const tendency=computed(()=>props.view?.tendency??null)
 const personality=computed(()=>{const raw=(props.view?.document.pet as any)?.personality??'gentle';return ({gentle:'温和',cheerful:'开朗',happy:'开朗',tsundere:'傲娇'} as Record<string,string>)[raw]??raw})
 const query=ref(''),filter=ref('all'),order=ref('new'),recall=ref<any>(),preview=ref<any>()
 const rehearsing=ref(false),manualPending=ref(false),runtime=ref<ChatRuntime>()

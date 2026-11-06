@@ -133,7 +133,7 @@ fn unseal(stored: &str) -> String {
 }
 
 #[cfg(windows)]
-mod dpapi {
+pub(crate) mod dpapi {
     use base64::Engine as _;
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{
@@ -181,7 +181,7 @@ mod dpapi {
 }
 
 #[cfg(not(windows))]
-mod dpapi {
+pub(crate) mod dpapi {
     pub fn protect(_plain: &[u8]) -> Option<Vec<u8>> {
         None
     }

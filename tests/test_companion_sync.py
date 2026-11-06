@@ -242,13 +242,46 @@ class BrainScenarios(unittest.TestCase):
         doc = self.sync(operations=[op("analysis", "social", **data)])["document"]
         other = self.sync("B")["document"]
         self.assertEqual(doc, other)
-        self.assertEqual(other["brain"]["emotions"]["happy"], 4)
+        self.assertEqual(other["brain"]["emotions"]["happy"], 34)
         self.assertEqual(other["brain"]["emotions"]["jealous"], 0)
         self.assertEqual(other["brain"]["event"]["source"], "user")
         self.sync("B", [op("consumed", "brain", type="consume", eventId="analysis", text="被感谢")])
-        self.assertEqual(self.sync()["document"]["brain"]["consumed"], "analysis")
+        consumed = self.sync()["document"]["brain"]
+        self.assertEqual(consumed["consumed"], "analysis")
         later = self.sync(now=NOW+90*60000)["document"]
-        self.assertAlmostEqual(later["brain"]["emotions"]["happy"], 2)
+        baseline = consumed["traits"]["happy"]
+        self.assertAlmostEqual(later["brain"]["emotions"]["happy"], baseline + (34-baseline)*0.5)
+
+    def test_legacy_traits_migrate_and_invalid_dimensions_stay_rejected(self):
+        document = server.initial({}, NOW)
+        document["brain"] = server.brain_default()
+        del document["brain"]["traits"]
+        del document["brain"]["traitsAt"]
+        restored = self.sync(seed=document)["document"]
+        self.assertEqual(restored["brain"]["traits"], {key: 0 for key in server.EMOTIONS})
+        server.validate(restored)
+        for value in [None, {}, {**restored["brain"]["traits"], "happy": 101},
+                      {**restored["brain"]["traits"], "happy": True},
+                      {**restored["brain"]["traits"], "extra": 1}]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                invalid = json.loads(json.dumps(restored))
+                invalid["brain"]["traits"] = value
+                self.sync(operations=[op("invalid-traits", "restore", document=invalid)])
+        invalid = json.loads(json.dumps(restored))
+        invalid["brain"]["unknown"] = 0
+        with self.assertRaises(ValueError):
+            server.validate(invalid)
+        self.assertEqual(self.sync()["document"], restored)
+
+    def test_disabling_romance_clears_the_decay_baseline(self):
+        self.sync(operations=[op("romance-on", "brain", type="settings", config={"romance": True})])
+        before = self.sync(operations=[op("romance-ready", "brain", type="log", reason="test")])["document"]
+        self.assertGreater(before["brain"]["traits"]["sweet"], 0)
+        self.sync(operations=[op("romance-off", "brain", type="settings", config={"romance": False})])
+        later = self.sync(now=NOW+90*60000)["document"]["brain"]
+        for key in ["sweet", "jealous"]:
+            self.assertEqual(later["traits"][key], 0)
+            self.assertEqual(later["emotions"][key], 0)
 
     def test_memory_versions_undo_and_tombstones_erase_version_content(self):
         def learn(n, text):

@@ -9,7 +9,8 @@ server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
 value = json.loads(sys.stdin.buffer.read())
 document = value["document"]
-for operation in value["operations"]:
-    server.apply(document, operation, value["now"])
+times = value.get("times", [value["now"]] * len(value["operations"]))
+for operation, at in zip(value["operations"], times, strict=True):
+    server.apply(document, operation, at)
 server.validate(document)
 sys.stdout.buffer.write(json.dumps(document, ensure_ascii=False).encode("utf-8"))

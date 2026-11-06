@@ -188,7 +188,7 @@ pub fn apply(doc: &mut Value, data: &Value, op_id: &str, at: u64) -> Result<(), 
                     }
                     .as_bytes(),
                 );
-                let brain = crate::companion_brain::load(doc)?;
+                let brain = crate::companion_brain::load_at(doc, at)?;
                 let id = brain
                     .memories
                     .iter()
@@ -283,7 +283,7 @@ pub fn apply(doc: &mut Value, data: &Value, op_id: &str, at: u64) -> Result<(), 
             if !valid_id(&token) {
                 return Err("搭话标识无效。".into());
             }
-            let brain = crate::companion_brain::load(doc)?;
+            let brain = crate::companion_brain::load_at(doc, at)?;
             let manual = data["manual"].as_bool().unwrap_or(false);
             if (manual && social.reserved_until <= at) || social.can_send_with(at, &brain.config) {
                 social.reservation = token;
@@ -300,7 +300,7 @@ pub fn apply(doc: &mut Value, data: &Value, op_id: &str, at: u64) -> Result<(), 
             }
         }
         "commit" => {
-            let brain = crate::companion_brain::load(doc)?;
+            let brain = crate::companion_brain::load_at(doc, at)?;
             if (!social.proactive && !brain.manual)
                 || data["token"] != social.reservation
                 || social.reservation.is_empty()

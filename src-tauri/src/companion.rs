@@ -1237,6 +1237,7 @@ pub fn run() {
         .expect("PenguinPal companion failed");
     application.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            crate::companion_comfy::shutdown();
             if let Some(music) = app.try_state::<MusicService>() { music.stop(); }
             if let Some(store) = app.try_state::<Mutex<Store>>() {
                 if let Ok(store) = store.lock() {

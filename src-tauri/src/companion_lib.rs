@@ -26,6 +26,10 @@ mod companion_sync_transport;
 mod companion_social;
 #[cfg(not(feature = "legacy-assistant"))]
 mod companion_chat;
+#[cfg(not(feature = "legacy-assistant"))]
+mod companion_visual;
+#[cfg(not(feature = "legacy-assistant"))]
+mod companion_comfy;
 mod companion_dsh;
 mod companion_llm;
 #[cfg(not(feature = "legacy-assistant"))]

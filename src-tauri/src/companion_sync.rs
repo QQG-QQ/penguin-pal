@@ -397,17 +397,18 @@ impl Service {
         let state = self.inner.lock().map_err(|_| "同步状态忙。")?;
         self.archive_document(&state.disk.document)?;
         let mut visible = serde_json::to_value(&state.disk.document).map_err(|_| "陪伴状态不可用。")?;
+        let mut tendency = Value::Null;
         if let Ok(brain) = crate::companion_brain::load(&visible) {
             if let Ok(value) = serde_json::to_value(&brain) {
                 visible["brain"] = value;
             }
             if let Ok(value) = serde_json::to_value(crate::companion_brain::tendency(&visible, &brain)) {
-                visible["tendency"] = value;
+                tendency = value;
             }
         }
         Ok(
             json!({"mode":if state.disk.server.is_some() {"server"}else{"local"}, "server":state.disk.server,
-            "capture":state.disk.capture, "document":visible, "pending":state.disk.pending.len(), "history":self.history.status()?,
+            "capture":state.disk.capture, "document":visible, "tendency":tendency, "pending":state.disk.pending.len(), "history":self.history.status()?,
             "message":state.status, "lastSync":state.last_sync, "captureWarning":self.root.parent().is_some_and(|p|p.join("conversation-overflow.json").exists()), "active":state.active&&now().saturating_sub(state.last_sync)<45000, "running":self.running.load(Ordering::Relaxed)}),
         )
     }
@@ -1068,13 +1069,15 @@ mod tests {
             json!({"id":"decision","kind":"brain","data":{"type":"decision","chance":60,"roll":80,"reason":"随机未命中"}}),
         ];
         let mut actual = initial.clone();
-        for op in &operations {
+        let mut times = vec![at; operations.len()];
+        *times.last_mut().unwrap() += 90 * 60000;
+        for (op, at) in operations.iter().zip(&times) {
             if op["kind"] == "brain" {
                 crate::companion_brain::apply(
                     &mut actual,
                     &op["data"],
                     op["id"].as_str().unwrap(),
-                    at,
+                    *at,
                 )
                 .unwrap();
             } else {
@@ -1082,7 +1085,7 @@ mod tests {
                     &mut actual,
                     &op["data"],
                     op["id"].as_str().unwrap(),
-                    at,
+                    *at,
                 )
                 .unwrap();
             }
@@ -1101,7 +1104,7 @@ mod tests {
             .take()
             .unwrap()
             .write_all(
-                &serde_json::to_vec(&json!({"document":initial,"operations":operations,"now":at}))
+                &serde_json::to_vec(&json!({"document":initial,"operations":operations,"now":at,"times":times}))
                     .unwrap(),
             )
             .unwrap();
@@ -1190,6 +1193,20 @@ mod tests {
         let restored = b.status().unwrap()["document"]["petId"].clone();
         assert_ne!(restored, original);
         assert_eq!(restored, exported["petId"]);
+    }
+    #[test]
+    fn status_keeps_presentation_outside_the_strict_document() {
+        let (_dir, service) = service();
+        let status = service.status().unwrap();
+        assert!(status["tendency"]["name"].is_string());
+        assert!(status["document"].get("tendency").is_none());
+        let document: Document = serde_json::from_value(status["document"].clone()).unwrap();
+        document.validate().unwrap();
+        assert!(decode_backup(&serde_json::to_vec(&backup(&document)).unwrap()).is_ok());
+        let mut unknown = status["document"].clone();
+        unknown["credentials"] = json!({"password":"synthetic-test-only"});
+        assert!(service.record("restore", json!({"document":unknown})).is_err());
+        assert_eq!(service.status().unwrap()["document"]["petId"], document.pet_id);
     }
     #[test]
     fn corrupt_storage_fails_closed() {

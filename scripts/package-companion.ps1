@@ -4,7 +4,9 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $repo
 try {
-  $binary = Join-Path $repo 'src-tauri/target/release/penguin-pal.exe'
+  $targetDirectory = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $repo) } else { Join-Path $repo 'src-tauri/target' }
+  $releaseDirectory = Join-Path $targetDirectory 'release'
+  $binary = Join-Path $releaseDirectory 'penguin-pal.exe'
   if (!(Test-Path -LiteralPath $binary -PathType Leaf)) {
     throw 'Build the companion release first: npm exec tauri build -- --no-bundle --config src-tauri/tauri.companion-installer.conf.json'
   }
@@ -36,7 +38,7 @@ try {
       [IO.File]::WriteAllBytes($binary, $originalBytes)
     }
   }
-  $installers = @(Get-ChildItem -LiteralPath (Join-Path $repo 'src-tauri/target/release/bundle/nsis') -Filter "*_$($version)_x64-setup.exe")
+  $installers = @(Get-ChildItem -LiteralPath (Join-Path $releaseDirectory 'bundle/nsis') -Filter "*_$($version)_x64-setup.exe")
   if ($installers.Count -ne 1) { throw "Expected one installer for $version, found $($installers.Count)" }
   if ($OutputDirectory) {
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null

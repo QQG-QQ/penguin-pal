@@ -305,11 +305,12 @@ def apply_social(doc, data, key, now):
         social["analyzed"] = (social["analyzed"] + [source_id])[-500:]
     elif kind == "reserve":
         token = ident(data.get("token"))
-        brain = doc.setdefault("brain", brain_default())
+        brain = load_brain(doc, now)
         manual = data.get("manual", False) is True
         if (manual and social["reservedUntil"] <= now) or can_send(social, now, brain["config"]):
             social["reservation"], social["reservedUntil"] = token, now + 180000
             brain["manual"] = manual
+            doc["brain"] = brain
     elif kind == "release":
         if data.get("token") == social["reservation"]:
             social["reservation"], social["reservedUntil"] = "", 0
@@ -349,7 +350,8 @@ def brain_default():
         "moodHalfHours": 12.0, "emotionHalfMinutes": 90.0, "romance": False, "model": "",
         "animations": True, "badge": True}, "memories": {}, "emotions": {k: 0.0 for k in EMOTIONS},
         "emotionAt": 0, "event": None, "consumed": "", "consumedIds": [], "injection": "", "injectedAt": 0,
-        "timeline": [], "decisions": [], "nextCheckAt": 0, "misses": 0, "manual": False}
+        "timeline": [], "traits": {k: 0.0 for k in EMOTIONS}, "traitsAt": 0,
+        "decisions": [], "nextCheckAt": 0, "misses": 0, "manual": False}
 
 
 def meta_default():
@@ -359,8 +361,12 @@ def meta_default():
 
 def validate_brain(brain):
     default = brain_default()
-    if not isinstance(brain, dict) or set(brain) != set(default):
+    optional = {"traits", "traitsAt"}
+    if not isinstance(brain, dict) or set(brain) - optional != set(default) - optional:
         raise ValueError("invalid companion extension")
+    # Older server documents predate these fields; reject every other unknown key.
+    for key in optional:
+        brain.setdefault(key, default[key])
     cfg = brain["config"]
     if not isinstance(cfg, dict) or set(cfg) != set(default["config"]):
         raise ValueError("invalid companion configuration")
@@ -387,11 +393,12 @@ def validate_brain(brain):
     clean(cfg["motive"], 400); clean(cfg["model"], 100)
     if cfg["injectMode"] not in {"off", "state", "event"}:
         raise ValueError("invalid injection mode")
-    if set(brain["emotions"]) != set(EMOTIONS):
-        raise ValueError("invalid emotion dimensions")
-    for value in brain["emotions"].values():
-        number(value)
-    for key in ["emotionAt", "injectedAt", "nextCheckAt"]:
+    for field in ["emotions", "traits"]:
+        if not isinstance(brain[field], dict) or set(brain[field]) != set(EMOTIONS):
+            raise ValueError("invalid emotion dimensions")
+        for value in brain[field].values():
+            number(value)
+    for key in ["emotionAt", "injectedAt", "nextCheckAt", "traitsAt"]:
         number(brain[key], 0, 1e16)
     number(brain["misses"], 0, 1000); clean(brain["injection"], 600)
     if brain["consumed"]:
@@ -458,12 +465,41 @@ def advance_brain(brain, now):
         return
     if brain["emotionAt"]:
         minutes = max(0, now - brain["emotionAt"]) / 60000
-        brain["emotions"] = {k: v * 0.5 ** (minutes / brain["config"]["emotionHalfMinutes"]) for k, v in brain["emotions"].items()}
+        factor = 0.5 ** (minutes / brain["config"]["emotionHalfMinutes"])
+        brain["emotions"] = {k: brain["traits"][k] + (v - brain["traits"][k]) * factor
+                             for k, v in brain["emotions"].items()}
     brain["emotionAt"] = max(now, brain["emotionAt"])
 
 
+def load_brain(doc, now):
+    """Mirror Rust load_at: derive the baseline at the operation's logical time."""
+    brain = json.loads(json.dumps(doc.get("brain", brain_default())))
+    validate_brain(brain)
+    sanitize_brain(brain)
+    personality = doc["pet"]["personality"]
+    template = [30, 36, 12, 8, 10, 6, 5]
+    if personality in {"cheerful", "happy"}:
+        template = [42, 22, 14, 5, 8, 4, 5]
+    elif personality == "tsundere":
+        template = [20, 18, 10, 8, 6, 4, 18]
+    volume = min(len(doc["memories"]) / 60, 10)
+    for name, base in zip(EMOTIONS, template):
+        history = [event["dims"][name] for event in reversed(brain["timeline"][-60:]) if name in event["dims"]]
+        average = sum(history) / len(history) if history else base
+        value = base * 0.7 + average * 0.3
+        if name in {"calm", "happy"}:
+            value += volume * 0.6
+        if not brain["config"]["romance"] and name in {"sweet", "jealous"}:
+            value = 0
+        brain["traits"][name] = math.floor(min(100, max(0, value)) * 10 + 0.5) / 10
+    if all(value <= 0.01 for value in brain["emotions"].values()):
+        brain["emotions"] = brain["traits"].copy()
+    advance_brain(brain, now)
+    return brain
+
+
 def remember_brain(doc, key, memory, old, source_at, now, historical):
-    brain = doc.setdefault("brain", brain_default())
+    brain = load_brain(doc, now)
     if not historical and key not in brain["memories"] and sum(not m["historical"] and m["createdAt"] // 86400000 == now // 86400000 for m in brain["memories"].values()) >= brain["config"]["dailyMemories"]:
         return False
     meta = brain["memories"].setdefault(key, meta_default())
@@ -480,11 +516,12 @@ def remember_brain(doc, key, memory, old, source_at, now, historical):
     if meta["createdAt"] == 0:
         meta.update(createdAt=now, historical=historical)
     validate_brain(brain); sanitize_brain(brain)
+    doc["brain"] = brain
     return True
 
 
 def mood_brain(doc, data, key, now, source):
-    brain = doc.setdefault("brain", brain_default())
+    brain = load_brain(doc, now)
     cfg = brain["config"]
     if not cfg["moodEnabled"]:
         return
@@ -511,10 +548,11 @@ def mood_brain(doc, data, key, now, source):
     brain["timeline"] = (brain["timeline"] + [event])[-200:]
     doc["moodHistory"] = (doc["moodHistory"] + [dict(id=key, value=pet["mood"], reason=reason, at=now)])[-200:]
     validate_brain(brain)
+    doc["brain"] = brain
 
 
 def apply_brain(doc, data, key, now):
-    brain = doc.setdefault("brain", brain_default())
+    brain = load_brain(doc, now)
     kind = data.get("type")
     if kind == "settings":
         patch = data.get("config")
@@ -524,6 +562,7 @@ def apply_brain(doc, data, key, now):
         if not brain["config"]["romance"]:
             for name in ["sweet", "jealous"]:
                 brain["emotions"][name] = 0
+                brain["traits"][name] = 0
     elif kind == "consume":
         if any(e["id"] == data.get("eventId") for e in brain["timeline"]) and data.get("eventId") not in brain["consumedIds"]:
             brain.update(consumed=data["eventId"], injection=clean(data.get("text", ""), 600), injectedAt=now)
@@ -562,6 +601,7 @@ def apply_brain(doc, data, key, now):
     else:
         raise ValueError("unknown companion operation")
     validate_brain(brain); sanitize_brain(brain)
+    doc["brain"] = brain
 
 
 def sync(root, request, now=None):

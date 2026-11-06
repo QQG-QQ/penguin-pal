@@ -14,6 +14,7 @@ import { MotionSequencer } from './lib/companionSequence'
 import CompanionDiagnostics from './components/CompanionDiagnostics.vue'
 import CompanionChat from './components/CompanionChat.vue'
 import type {ChatView,SyncView} from './lib/companionSync'
+import type {VisualBoard} from './lib/companionVisual'
 import {moodFace,moodMotion,dominantEmotion} from './lib/companionMind'
 import { computePetLayoutMetrics, isPetOpaqueHit, loadPetAlphaMask, type PetAlphaMask } from './lib/petArtwork'
 import { builtinMotionPack, companionArtwork } from './lib/companionArtwork'
@@ -28,7 +29,16 @@ let previewTimer:number|undefined
 let previewTicks=0
 const state = ref(defaultCompanion(Date.now())), activity = ref<Activity>('idle')
 const syncView=ref<SyncView|null>(null),chatOpen=ref(false),chatSession=ref('')
-let chatTimer:number|undefined
+let chatTimer:number|undefined,visualTimer:number|undefined,visualBusy=false
+const visualBoard=ref<VisualBoard|null>(null)
+function receiveVisual(value:VisualBoard){visualBoard.value=value}
+async function visualTick(){
+  if(!native||disposed||previewGreeting.value||visualBusy)return
+  visualBusy=true
+  try{const result=await invoke<{visual:VisualBoard;chat?:ChatView}>('companion_chat',{action:'visualTick',payload:null});if(disposed)return;receiveVisual(result.visual);if(result.chat)receiveChat(result.chat)}
+  catch{/* Settings and the chat panel surface actionable service errors. */}
+  finally{visualBusy=false}
+}
 const chatGate=()=>({busy:pressed,working:busy.value&&!state.value.preferences.allowWorkChat,quiet:state.value.preferences.quiet||menu.value||safeMode.value,fullscreen:fullscreen.value,visible:visible.value&&!dockHidden.value})
 function receiveChat(value:ChatView){receiveSync(value.status);chatSession.value=value.session;if(value.reply)talk(value.reply.length>180?value.reply.slice(0,177)+'…':value.reply,value.manual===true)}
 async function chatTick(){if(!native||disposed||previewGreeting.value)return;try{receiveChat(await invoke<ChatView>('companion_chat',{action:'tick',payload:chatGate()}))}catch{/* Manual chat shows connection errors. */}}
@@ -446,6 +456,7 @@ onMounted(async()=>{
       receiveSync(await invoke<SyncView>('companion_sync',{action:'status',payload:null}))
       void syncTick();syncTimer=window.setInterval(()=>{void syncTick()},15000)
       chatTimer=window.setInterval(()=>{void chatTick()},15000)
+      if(!previewGreeting.value){void visualTick();visualTimer=window.setInterval(()=>{void visualTick()},2500)}
       if(loaded.preferences.animationPack!==state.value.preferences.animationPack)await invoke('companion_save',{state:JSON.parse(JSON.stringify(state.value))});
       await refreshPacks();const win=getCurrentWindow()
       if(previewGreeting.value)await win.show()
@@ -465,7 +476,7 @@ onMounted(async()=>{
     saveTimer=window.setInterval(()=>{void save()},30000);hitTimer=window.setInterval(()=>{void updateHitTest()},100)
   }catch(e){error.value=`初始化失败：${String(e)}`}
 })
-onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',{enabled:false}).catch(()=>{});cancelDrag();[tickTimer,pollTimer,saveTimer,hitTimer,musicTimer,syncTimer,chatTimer].forEach(t=>window.clearTimeout(t));window.clearTimeout(clearMessageTimer);window.clearTimeout(codexTimer);window.clearTimeout(previewTimer);motionQuery?.removeEventListener('change',motionChanged);unlisten?.()})
+onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',{enabled:false}).catch(()=>{});cancelDrag();[tickTimer,pollTimer,saveTimer,hitTimer,musicTimer,syncTimer,chatTimer,visualTimer].forEach(t=>window.clearTimeout(t));window.clearTimeout(clearMessageTimer);window.clearTimeout(codexTimer);window.clearTimeout(previewTimer);motionQuery?.removeEventListener('change',motionChanged);unlisten?.()})
 </script>
 
 <template>
@@ -481,7 +492,7 @@ onBeforeUnmount(()=>{disposed=true;if(native)void invoke('companion_music_poll',
       <div v-if="food" class="food-picker"><strong>给{{petName}}一点小鱼</strong><p>饥饿 {{Math.round(state.hunger)}} · 体力 {{Math.round(state.energy)}}</p><button @click="interact('feed');food=false">喂小鱼</button><button @click="food=false">下次再喂</button></div>
     </div>
     <div v-if="menu" class="panel-host" :style="{left:`${panel.x}px`,top:`${panel.y}px`}" @contextmenu.stop.prevent>
-      <CompanionChat v-if="chatOpen" :native="native" :view="syncView" :session="chatSession" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="toggleMenu(false)" @received="receiveChat" @tools="openTools"/>
+      <CompanionChat v-if="chatOpen" :native="native" :view="syncView" :session="chatSession" :visual="visualBoard" :reference="companionArtwork('idle').src" @visual="receiveVisual" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="toggleMenu(false)" @received="receiveChat" @tools="openTools"/>
       <CompanionDiagnostics v-else-if="tools" :native="native" :allow-work-chat="state.preferences.allowWorkChat" @work-chat="preferencesChanged({allowWorkChat:$event})" @close="closeTools" @safe="setSafety" @sync="receiveSync" @chat="receiveChat"/>
       <CompanionPanel v-else :state="state" :packs="packs" :native="native" :importing="importing" :system-reduced="reduce" :codex-enabled="!deepSeek" :pet-name="petName" @import-pack="importPack" @refresh-packs="refreshPacks" @pack-folder="openPackFolder" :music-status="musicLabel" :status="statusLabel" :connection="`${relationship(state.affection)} · ${connection}`" :expanded="expanded" @close="toggleMenu(false)" @expand="expandPanel" @care="interact" @action="requestAction" @performance="requestPerformance" @codex="openCodex" @chat="openChat" @preference="preferencesChanged" @hide="hidePet" @quit="quit" @install="installHooks" @snap="snap" @tools="openTools"/>
     </div>

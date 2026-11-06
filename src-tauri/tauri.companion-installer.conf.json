@@ -2,7 +2,7 @@
   "productName": "PenguinPal 企鹅桌宠",
   "bundle": {
     "targets": ["nsis"],
-    "resources": [],
+    "resources": ["resources/companion/qrcode-LICENSE.txt", "resources/companion/wechat-LICENSE.txt"],
     "shortDescription": "PenguinPal 桌面企鹅与 Codex 任务状态伴侣",
     "windows": {
       "nsis": {

@@ -204,6 +204,7 @@ async fn deepseek_models(llm: &crate::companion_llm::LlmConfig) -> Result<Value,
 }
 
 fn bridge(service: &Service, mut request: Value) -> Result<Value, String> {
+    if matches!(request["action"].as_str(), Some("reply") | Some("opener")) { request["visualContext"] = crate::companion_visual::context(service); }
     if matches!(request["action"].as_str(), Some("reply") | Some("opener")) {
         if let Ok(root) = service.chat_root() {
             if let Some(text) = crate::companion_dsh::digest_text(&root, chrono::Utc::now().timestamp_millis() as u64) {
@@ -233,6 +234,10 @@ fn bridge(service: &Service, mut request: Value) -> Result<Value, String> {
         (
             &helper,
             include_bytes!("../resources/companion/conversation-events.mjs").as_slice(),
+        ),
+        (
+            &root.join("visual-engine.mjs"),
+            include_bytes!("../resources/companion/visual-engine.mjs").as_slice(),
         ),
         (
             &root.join("memory-engine.mjs"),
@@ -619,10 +624,36 @@ fn outreach(service: &Service, chat: &ChatService, manual: bool) -> Result<Value
         if !(manual && chat.scheduler.manual_cancelled()) && environment_reason(chat, &current.config, manual).is_none() {
             let mut response = result(service, output["reply"].as_str())?;
             response["manual"] = json!(manual);
+            let document=response["status"]["document"].clone();
+            let id=document["conversations"].as_array().and_then(|items|items.iter().rev().find(|m|m["role"]=="assistant")).map(|m|m["id"].clone()).unwrap_or(Value::Null);
+            crate::companion_visual::schedule(service,&cfg.motive,&json!({"visual":output["visual"],"messageId":id,"visualDocument":document}),None);
             return Ok(response);
         }
     }
     status("本轮未显示新气泡；可能话题重复或预约已取消")
+}
+pub(crate) fn reply_text(service: &Service, chat: &ChatService, prompt: &str, queue_visual: bool) -> Result<Value, String> {
+    if prompt.trim().is_empty() || prompt.chars().count() > 3000 { return Err("请输入 1 至 3000 字的聊天内容。".into()); }
+    let _slot=chat.scheduler.acquire(Task::Reply, Duration::from_secs(150))?;
+    service.record("social",json!({"type":"user","text":prompt}))?;
+    let initial=service.status()?;
+    let session=pet_session(initial["document"]["petId"].as_str().ok_or("宠物身份无效。")?);
+    let source=initial["document"]["conversations"].as_array().and_then(|items|items.iter().rev().find(|m|m["session"]==session&&m["role"]=="user")).cloned().ok_or("用户消息未保存。")?;
+    let _=sync_if_server(service,&initial);
+    let view=service.status()?;
+    let output=bridge(service,json!({"action":"reply","document":view["document"],"prompt":scrub(prompt,3000),"sources":[source.clone()]}))?;
+    learn(service,&output,&[source],false)?;
+    let reply=output["reply"].as_str().filter(|s|!s.trim().is_empty()).ok_or("回复为空。")?;
+    service.record("social",json!({"type":"reply","text":reply}))?;
+    remember_output(service,&output,true)?;
+    let _=sync_if_server(service,&view);
+    let mut response=result(service,Some(reply))?;
+    let document=response["status"]["document"].clone();
+    let message_id=document["conversations"].as_array().and_then(|items|items.iter().rev().find(|m|m["role"]=="assistant"&&m["session"]==session)).map(|m|m["id"].clone()).unwrap_or(Value::Null);
+    let intent=json!({"visual":output["visual"],"messageId":message_id,"visualDocument":document});
+    if queue_visual { crate::companion_visual::schedule(service,prompt,&intent,None); }
+    else { response["visualIntent"]=intent; }
+    Ok(response)
 }
 #[tauri::command]
 pub async fn companion_chat(
@@ -638,6 +669,13 @@ pub async fn companion_chat(
     let chat = chat.inner().clone();
     let service = service.inner().clone();
     let data = payload.unwrap_or(Value::Null);
+    if action.starts_with("visual") { return crate::companion_visual::dispatch(service,chat,action,data).await; }
+    if action == "send" {
+        chat.gate.lock().map_err(|_| "陪伴状态忙。")?.quiet = true;
+        let prompt=data["text"].as_str().ok_or("请输入内容。")?.to_string();
+        return tauri::async_runtime::spawn_blocking(move||reply_text(&service,&chat,&prompt,true)).await.map_err(|_|"聊天后台中断。".to_string())?;
+    }
+
     if action == "llmGet" {
         let llm = crate::companion_llm::load(&service.chat_root()?);
         return Ok(crate::companion_llm::public_view(&llm));
@@ -685,9 +723,6 @@ pub async fn companion_chat(
     if action == "status" {
         return result(&service, None);
     }
-    if action == "send" {
-        chat.gate.lock().map_err(|_| "陪伴状态忙。")?.quiet = true;
-    }
     // Only one scan/tick runs, but manual actions and local previews stay available.
     let tick_guard = if action == "tick" {
         if chat.tick_running.swap(true, Ordering::AcqRel) { return result(&service, None); }
@@ -699,17 +734,7 @@ pub async fn companion_chat(
     let report_error = action == "tick" || action == "outreach";
     let outcome = tauri::async_runtime::spawn_blocking(move||{
         let _tick_guard = tick_guard;
-        // Persist a user's response immediately, even while an opener is being generated.
-        // This cancels its reservation before waiting for the single inference slot.
-        let mut user_source=None;
-        if action == "send" {
-            let prompt=data["text"].as_str().ok_or("请输入内容。")?;
-            service.record("social",json!({"type":"user","text":prompt}))?;
-            let view=service.status()?;
-            let session=pet_session(view["document"]["petId"].as_str().ok_or("宠物身份无效。")?);
-            user_source=view["document"]["conversations"].as_array().unwrap().iter().rev().find(|m|m["session"]==session&&m["role"]=="user").cloned();
-        }
-        let task = match action.as_str() { "send" => Some(Task::Reply), "sessions"|"models"|"read"|"learn"|"previewMemories" => Some(Task::Interactive), _ => None };
+        let task = match action.as_str() { "sessions"|"models"|"read"|"learn"|"previewMemories" => Some(Task::Interactive), _ => None };
         let _inference = if let Some(request)=manual_request { Some(request.wait(Duration::from_secs(150))?) } else { task.map(|task| chat.scheduler.acquire(task, Duration::from_secs(150))).transpose()? };
         let mut view=service.status()?;
         match action.as_str(){
@@ -728,16 +753,6 @@ pub async fn companion_chat(
                     if !items.is_empty(){let generated=bridge(&service,json!({"action":"analysis","document":view["document"],"sources":items}))?;if social(&service.status()?)?.enabled{learn(&service,&generated,&items,true)?;}}
                 }
                 let _=sync_if_server(&service,&view);
-            }
-            "send"=>{
-                let prompt=data["text"].as_str().ok_or("请输入内容。")?;
-                let _=sync_if_server(&service,&view);
-                view=service.status()?;
-                let source=user_source.ok_or("用户消息未保存。")?;
-                let output=bridge(&service,json!({"action":"reply","document":view["document"],"prompt":scrub(prompt,3000),"sources":[source.clone()]}))?;
-                learn(&service,&output,&[source],false)?;
-                let reply=output["reply"].as_str().filter(|s|!s.trim().is_empty()).ok_or("回复为空。")?;
-                service.record("social",json!({"type":"reply","text":reply}))?;remember_output(&service,&output,true)?;let _=sync_if_server(&service,&view);return result(&service,Some(reply));
             }
             "brain"=>{service.record("brain",data)?;let _=sync_if_server(&service,&view);}
             "outreach"=>return outreach(&service,&chat,true),

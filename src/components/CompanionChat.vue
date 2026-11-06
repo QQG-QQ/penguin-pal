@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import {computed,nextTick,onMounted,ref} from 'vue'
-import {invoke} from '@tauri-apps/api/core'
+import {computed,nextTick,onMounted,ref,watch} from 'vue'
+import {convertFileSrc,invoke} from '@tauri-apps/api/core'
 import type {ChatView,SyncView} from '../lib/companionSync'
 import CompanionMind from './CompanionMind.vue'
-const props=defineProps<{native:boolean;view:SyncView|null;session:string;allowWorkChat:boolean}>()
-const emit=defineEmits<{close:[];received:[ChatView];tools:[];workChat:[boolean]}>()
+import CompanionVisual from './CompanionVisual.vue'
+import {visualLabel,type VisualBoard} from '../lib/companionVisual'
+const props=defineProps<{native:boolean;view:SyncView|null;session:string;allowWorkChat:boolean;visual:VisualBoard|null;reference:string}>()
+const emit=defineEmits<{close:[];received:[ChatView];tools:[];workChat:[boolean];visual:[VisualBoard]}>()
 const text=ref(''),busy=ref(false),error=ref(''),info=ref(''),history=ref<HTMLElement>()
+const broken=ref<string[]>([])
+const attachments=(id:string)=>props.visual?.entries.filter(x=>x.messageId===id)??[]
+watch(()=>props.visual?.entries.length,async()=>{await nextTick();history.value?.scrollTo({top:history.value.scrollHeight})})
 const sessions=ref<{id:string;name:string}[]>([]),selected=ref('')
 const llm=ref({provider:'codex',model:'',baseUrl:''})
 async function loadLlm(){try{const value=await call('llmGet');llm.value={provider:value.provider,model:value.model,baseUrl:value.baseUrl}}catch{/* 保持默认显示 */}}
@@ -30,10 +35,13 @@ async function read(){if(!selected.value)return;await run(async()=>{emit('receiv
     <p class="mood">心情 {{Math.round(view?.document.pet.mood??70)}} · {{view?.document.pet.moodReason||'平稳陪伴'}}<small>心情随互动温和变化，之后慢慢恢复平稳。</small></p>
     <div ref="history" class="history" aria-live="polite">
       <p v-if="!messages.length" class="empty">想聊什么都可以。也可以告诉我你的喜好，或我们的小约定。</p>
-      <article v-for="m in messages.slice(-60)" :key="m.id" :class="m.role"><b>{{m.role==='user'?'你':petName}}</b><p>{{m.text}}</p></article>
+      <article v-for="m in messages.slice(-60)" :key="m.id" :class="m.role"><b>{{m.role==='user'?'你':petName}}</b><p>{{m.text}}</p><figure v-for="image in attachments(m.id)" :key="image.id" class="chat-image"><img v-if="!broken.includes(image.id)" :src="convertFileSrc(image.path)" :alt="image.caption||visualLabel(image.kind)" loading="lazy" @error="broken.push(image.id)"/><small v-else>这张图片已清理，可重新让企鹅画一张。</small><figcaption>{{image.kind==='mood_card'?new Date(image.at).toLocaleDateString('zh-CN')+' · ':''}}{{image.caption||visualLabel(image.kind)}}<small>心情 {{Math.round(image.mood)}} · {{image.reused?'收藏的表情':'企鹅画的'}}</small></figcaption></figure></article>
     </div>
+    <p v-if="visual?.job.state==='drawing'" class="info" role="status">企鹅正在画{{visualLabel(visual.job.kind??'sticker')}}…文字聊天可以继续。</p>
+    <p v-if="visual?.error" class="error" role="status">图片 / 微信：{{visual.error}}<small>文字聊天和已经保存的图片仍可使用。</small></p>
     <form @submit.prevent="send"><textarea v-model="text" aria-label="聊天内容" :placeholder="'和'+petName+'说句话…'" rows="3" maxlength="3000" :disabled="busy||!native" @keydown.ctrl.enter.prevent="send"/><div class="send"><small>Ctrl + Enter 发送</small><button class="primary" :disabled="busy||!native||!text.trim()">{{busy?'正在想…':'发送'}}</button></div></form>
     <p v-if="error" class="error" role="alert">{{error}}<small>已保存的消息会保留，输入内容仍可编辑。</small></p><p v-if="info" class="info" role="status">{{info}}</p>
+    <CompanionVisual :native="native" :board="visual" :reference="reference" @changed="emit('visual',$event)"/>
     <details><summary>记忆与主动陪伴</summary>
       <label><input type="checkbox" :checked="enabled" :disabled="busy||!native" @change="settings(($event.target as HTMLInputElement).checked,proactive)"/>自动从所有可读取聊天记住喜好、约定和近况</label>
       <small>{{llm.provider==='deepseek'?'启动后整理宠物自己记录下来的对话，持续分批补记忆；不会扫描 Codex 会话。历史只补记忆，气泡实时互动才改变心情。采集开关在同步设置中。':'启动后自动扫描本机 Codex 项目内外及归档会话，持续分批整理。历史只补记忆，气泡实时互动才改变心情。采集开关在同步设置中。'}}</small>
@@ -49,5 +57,7 @@ async function read(){if(!selected.value)return;await run(async()=>{emit('receiv
   </section>
 </template>
 <style scoped>
+.chat-image{margin:9px 0 0}.chat-image img{display:block;max-width:100%;max-height:240px;border-radius:11px;object-fit:contain;background:#edf6fb}.chat-image figcaption{margin-top:5px;font-size:11px;line-height:1.5;color:#40677e}
+
 .bubble-chat{width:420px;max-height:calc(100vh - 20px);height:710px;display:flex;flex-direction:column;gap:10px;padding:18px;border:1px solid #b5d5e6;border-radius:20px;background:#f0f9fffa;box-shadow:0 8px 28px #0b304533;user-select:text;overflow:auto}header{display:flex;justify-content:space-between;align-items:center}header strong{font-size:17px}small{display:block;color:#53758a;font-size:11px;line-height:1.6}button{border:1px solid #b3cfde;border-radius:10px;background:#fff;color:#234b63;padding:7px 11px}header button{font-size:18px;padding:2px 9px}.mood{margin:0;padding:9px 11px;background:#e2f1fa;border-radius:12px;font-size:11px;line-height:1.6;overflow-wrap:anywhere}.history{min-height:120px;flex:1;overflow:auto;padding:2px 6px}.empty{color:#638298;line-height:1.8;padding:20px 10px}article{max-width:92%;border-radius:13px;padding:10px 12px;margin-bottom:10px;background:#fff;border:1px solid #d7e6ef}article.user{margin-left:auto;background:#dceffb}article b{font-size:10px;color:#4a7891}article p{white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0 0;line-height:1.7}textarea,select{font:inherit;width:100%;border:1px solid #b3cfde;background:#fff;border-radius:11px;padding:10px;resize:vertical;color:#173c56}textarea{min-height:64px;max-height:140px}.send{display:flex;justify-content:space-between;align-items:center;margin-top:6px}.primary{background:#237da4;color:#fff;border-color:#237da4}button:disabled{opacity:.5;cursor:default}details{font-size:11px;line-height:1.7}summary{cursor:pointer;font-weight:600}label{display:flex;align-items:flex-start;gap:5px;margin:8px 0}.actions{display:flex;gap:6px;margin:9px 0}details details{padding-top:6px}details small{margin:5px 0}.error,.info{margin:0;padding:8px 10px;border-radius:10px;line-height:1.6;overflow-wrap:anywhere}.error{background:#fff0e5;color:#8d4a28}.info{background:#e2f4ef;color:#286650}
 </style>
