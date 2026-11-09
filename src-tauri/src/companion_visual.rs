@@ -62,8 +62,35 @@ fn defaults() -> Value {
     json!({"enabled":false,"automatic":true,"managedRuntime":false,"baseUrl":"http://127.0.0.1:8188","workflow":"","character":"2D chibi anime reaction sticker, crisp dark contour lines, simple flat color fills, cel animation frame, oversized head and tiny body, exaggerated readable comic expression, one animal or cartoon subject, plain white background, no collage, no text or watermark",
         "referenceDenoise":0.2,"referenceStyle":"","referenceNegative":"","cooldownMinutes":30,"dailyLimit":4,"timeoutSeconds":180,"wechatEnabled":false,"epoch":0})
 }
+const LEGACY_VISUAL_STYLE: &str = "expressive everyday chat reaction meme, freely choose a funny animal, cartoon face or simple everyday subject to match the conversation";
+fn legacy_visual_workflow(model: &str) -> Value {
+    json!({
+        "1":{"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":model}},
+        "2":{"class_type":"CLIPTextEncode","inputs":{"text":"{{prompt}}","clip":["1",1]}},
+        "3":{"class_type":"CLIPTextEncode","inputs":{"text":"text, watermark, logo, blurry, deformed, extra limbs","clip":["1",1]}},
+        "4":{"class_type":"EmptyLatentImage","inputs":{"width":512,"height":512,"batch_size":1}},
+        "5":{"class_type":"KSampler","inputs":{"seed":"{{seed}}","steps":6,"cfg":1.5,"sampler_name":"lcm","scheduler":"normal","denoise":1,"model":["1",0],"positive":["2",0],"negative":["3",0],"latent_image":["4",0]}},
+        "6":{"class_type":"VAEDecode","inputs":{"samples":["5",0],"vae":["1",2]}},
+        "7":{"class_type":"SaveImage","inputs":{"filename_prefix":"PenguinPal","images":["6",0]}}
+    })
+}
 fn settings(path: &Path) -> Result<Value, String> {
-    read(&path.join("settings.json"), defaults())
+    let mut cfg = read(&path.join("settings.json"), defaults())?;
+    // Project the exact old built-in defaults without rewriting user data on read.
+    if cfg["character"].as_str() == Some(LEGACY_VISUAL_STYLE) {
+        if let Ok(mut graph) = serde_json::from_str::<Value>(cfg["workflow"].as_str().unwrap_or("")) {
+            if let Some(model) = graph["1"]["inputs"]["ckpt_name"].as_str() {
+                if !model.trim().is_empty() && graph == legacy_visual_workflow(model) {
+                    graph["5"]["inputs"]["steps"] = json!(8);
+                    graph["5"]["inputs"]["cfg"] = json!(2);
+                    graph["3"]["inputs"]["text"] = json!("text, watermark, logo, blurry, deformed, extra limbs, 3D render, photorealistic, photograph, plastic toy, realistic doll, CGI, glossy vinyl, detailed fur, realistic fur, individual hair strands, realistic lighting, volumetric shading, soft edges, detailed texture");
+                    cfg["character"] = defaults()["character"].clone();
+                    cfg["workflow"] = json!(graph.to_string());
+                }
+            }
+        }
+    }
+    Ok(cfg)
 }
 fn gallery(path: &Path) -> Result<Value, String> {
     read(
@@ -837,6 +864,40 @@ mod tests {
             assert!(image_path(root, bad).is_err());
         }
         assert!(image_path(root, &format!("{}.png", uuid::Uuid::new_v4())).is_ok());
+    }
+    #[test]
+    fn legacy_builtin_visual_defaults_upgrade_in_memory_and_preserve_saved_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut original = defaults();
+        original["character"] = json!(LEGACY_VISUAL_STYLE);
+        original["workflow"] = json!(legacy_visual_workflow("DreamShaper8_LCM.safetensors").to_string());
+        original["enabled"] = json!(true); original["wechatEnabled"] = json!(true);
+        original["epoch"] = json!(7); original["cooldownMinutes"] = json!(15);
+        write(&dir.path().join("settings.json"), &original).unwrap();
+        let bytes = fs::read(dir.path().join("settings.json")).unwrap();
+        let upgraded = settings(dir.path()).unwrap();
+        assert_eq!(fs::read(dir.path().join("settings.json")).unwrap(), bytes);
+        assert_eq!(upgraded["character"], defaults()["character"]);
+        for key in ["enabled", "wechatEnabled", "epoch", "cooldownMinutes", "baseUrl", "managedRuntime"] { assert_eq!(upgraded[key], original[key]); }
+        let graph: Value = serde_json::from_str(upgraded["workflow"].as_str().unwrap()).unwrap();
+        assert_eq!(graph["5"]["inputs"]["steps"], 8); assert_eq!(graph["5"]["inputs"]["cfg"], 2);
+        assert_eq!(graph["1"]["inputs"]["ckpt_name"], "DreamShaper8_LCM.safetensors");
+        let plan = run_node(dir.path(), false, json!({"action":"plan","settings":upgraded,"prompt":"按参考图画桌宠","visual":{"kind":"none"},"referenceKey":"a".repeat(64)})).unwrap();
+        assert_eq!(plan["useReference"], true);
+        write(&dir.path().join("settings.json"), &upgraded).unwrap();
+        assert_eq!(settings(dir.path()).unwrap(), upgraded);
+    }
+    #[test]
+    fn legacy_visual_projection_preserves_custom_workflows_styles_and_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut old = defaults(); old["character"] = json!(LEGACY_VISUAL_STYLE);
+        old["workflow"] = json!(legacy_visual_workflow("custom-lcm.safetensors").to_string());
+        let mut custom_graph = legacy_visual_workflow("custom-lcm.safetensors"); custom_graph["5"]["inputs"]["steps"] = json!(9);
+        for (style, workflow) in [("my own drawing style", old["workflow"].as_str().unwrap().to_string()), (LEGACY_VISUAL_STYLE, custom_graph.to_string()), (LEGACY_VISUAL_STYLE, "{invalid".into())] {
+            let mut cfg = old.clone(); cfg["character"] = json!(style); cfg["workflow"] = json!(workflow);
+            write(&dir.path().join("settings.json"), &cfg).unwrap();
+            assert_eq!(settings(dir.path()).unwrap(), cfg);
+        }
     }
     #[test]
     fn settings_default_to_no_connections() {
