@@ -1,6 +1,6 @@
 # Windows 安装与启动
 
-从 [GitHub Releases](https://github.com/QQG-QQ/penguin-pal/releases/latest) 下载 `PenguinPal-Companion-0.9.20-windows-x64-setup.exe`，双击并按向导完成安装。安装到当前用户；提供桌面快捷方式、开始菜单入口和卸载程序。全新安装通常不需要管理员权限；迁移机器级旧版 MSI 或安装缺少的 WebView2 时可能需要管理员确认。
+从 [GitHub Releases](https://github.com/QQG-QQ/penguin-pal/releases/latest) 下载 `PenguinPal-Companion-0.9.21-windows-x64-setup.exe`，双击并按向导完成安装。安装到当前用户；提供桌面快捷方式、开始菜单入口和卸载程序。全新安装通常不需要管理员权限；迁移机器级旧版 MSI 或安装缺少的 WebView2 时可能需要管理员确认。
 
 安装后双击桌面“PenguinPal 企鹅桌宠”即可启动，无需源码、Rust 或开发服务器。企鹅本身可以独立运行；气泡模型聊天与自动整理记忆需要本机安装并登录 Codex，同时 PATH 中有 Node.js，沿用当前 Codex 模型配置。无需为桌宠手动建立可见 Codex 会话。同步、记忆及主动搭话的设置和数据范围见 [同步与数据说明](companion-sync.md)。
 
@@ -28,4 +28,4 @@ pwsh -NoProfile -File ./scripts/package-companion.ps1 -OutputDirectory ./outputs
 
 此命令仅适用于默认 companion 构建。安装包包含已构建的应用和内置动画；私有独立助手模式的 Codex/MCP 运行时不打入此安装包。Windows 缺少 WebView2 时，安装向导会使用 Tauri 默认引导方式安装所需运行时。
 
-0.9.20 的本机绘图与微信适配需要 Node.js 22.17.1 或更新版本。ComfyUI、独立 Python 与模型通过桌宠设置按需安装，不包含在安装包内；已安装的组件和绑定信息沿用本机原目录。详见[微信与心情绘图](wechat-mood-art.md)。
+0.9.21 的本机绘图与微信适配需要 Node.js 22.17.1 或更新版本。ComfyUI、独立 Python 与模型通过桌宠设置按需安装，不包含在安装包内；已安装的组件和绑定信息沿用本机原目录。详见[微信与心情绘图](wechat-mood-art.md)。
