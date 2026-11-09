@@ -5,7 +5,7 @@ import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {spawn} from 'node:child_process'
-import {normalizeSettings,localBase,validateVisual,prepareWorkflow,planVisual,generateImage,imageType,visualContext} from '../src-tauri/resources/companion/visual-engine.mjs'
+import {normalizeSettings,localBase,validateVisual,prepareWorkflow,planVisual,generateImage,imageType,visualContext,referenceDirective,referenceWorkflow} from '../src-tauri/resources/companion/visual-engine.mjs'
 import {createWechat,trustedWechat,inboundMessages,splitText,parseWechatJson} from '../src-tauri/resources/companion/wechat-engine.mjs'
 import {createDecipheriv} from 'node:crypto'
 import ts from 'typescript'
@@ -18,6 +18,88 @@ const doc={pet:{mood:92,personality:'playful',moodReason:'private details must n
 const plan=(extra={})=>planVisual({settings:cfg(),document:doc,visual,catalog:[],now:1000000000,...extra})
 const json=x=>new Response(JSON.stringify(x),{headers:{'content-type':'application/json'}})
 const account={token:'synthetic-token',owner:'test-owner',baseUrl:'https://ilinkai.weixin.qq.com/'}
+async function builtinWorkflow(){
+  const source=await readFile(new URL('../src/lib/companionVisual.ts',import.meta.url),'utf8')
+  const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText
+  return (await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)).managedWorkflow()
+}
+
+test('built-in workflow derives reference latent with alpha compositing only on request',async()=>{
+  const raw=await builtinWorkflow(),routed=referenceWorkflow(raw,true),g=prepareWorkflow(routed,'same character smiling',1,'uploaded/pet.png')
+  assert.equal(referenceWorkflow(raw,false),raw)
+  assert.equal(g['4'].class_type,'LoadImage');assert.equal(g['4'].inputs.image,'uploaded/pet.png')
+  assert.equal(g['8'].inputs.color,0xffffff);assert.deepEqual(g['9'].inputs.mask,['4',1])
+  assert.equal(g['10'].inputs.resize_source,true);assert.deepEqual(g['10'].inputs.mask,['9',0])
+  assert.equal(g['11'].class_type,'VAEEncode');assert.deepEqual(g['5'].inputs.latent_image,['11',0])
+  assert.equal(g['5'].inputs.denoise,0.2);assert.equal(g['5'].inputs.steps,6)
+  const styled=JSON.parse(referenceWorkflow(raw,true,{referenceDenoise:0.1,referenceNegative:'3D render, plastic toy'}))
+  assert.equal(styled['5'].inputs.denoise,0.1);assert.match(styled['3'].inputs.text,/3D render, plastic toy/)
+  for(const referenceDenoise of [0,0.9,'0.2',NaN])assert.throws(()=>normalizeSettings({referenceDenoise}),/重绘幅度/)
+  assert.equal(referenceWorkflow(JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(raw)).reverse())),true),routed)
+  const legacy=JSON.parse(raw);Object.assign(legacy['5'].inputs,{steps:6,cfg:1.5});legacy['3'].inputs.text='text, watermark, logo, blurry, deformed, extra limbs'
+  assert.equal(JSON.parse(referenceWorkflow(JSON.stringify(legacy),true))['5'].inputs.denoise,0.2)
+  const custom=JSON.parse(raw);custom['5'].inputs.steps=9
+  assert.throws(()=>referenceWorkflow(JSON.stringify(custom),true),/自定义工作流/)
+  const explicit=JSON.stringify({...graph,3:{class_type:'LoadImage',inputs:{image:'{{image}}'}}})
+  assert.equal(referenceWorkflow(explicit,true),explicit)
+})
+
+test('role and reference requests use uploaded image while ordinary memes remain free',async()=>{
+  const workflow=await builtinWorkflow(),settings=cfg({workflow}),referenceKey='a'.repeat(64)
+  for(const prompt of ['按参考图生成一个图让我看看','画桌宠本人','给我画一张你开心的图','给我画张咕嘎的表情包']){
+    const p=plan({settings,referenceKey,prompt,document:{...doc,brain:{config:{petName:'咕嘎'}}},visual:{kind:'none'}})
+    assert.equal(p.useReference,true);assert.equal(p.referenceKey,referenceKey);assert.match(p.prompt,/same character/)
+    assert.doesNotMatch(p.prompt,/freely choose/)
+  }
+  assert.equal(plan({settings,referenceKey,prompt:'给我画张猫咪表情包'}).useReference,false)
+  assert.equal(plan({settings,referenceKey,prompt:'不要使用参考图，给我画张猫咪表情包',visual:{...visual,useReference:true}}).useReference,false)
+  assert.equal(referenceDirective('不需要表情包，只聊聊天'),null)
+  assert.equal(plan({settings,referenceKey,prompt:'不需要参考图，给我画张猫咪表情包',visual:{...visual,useReference:true}}).useReference,false)
+  assert.equal(referenceDirective('咕嘎，给我画张猫咪表情包','咕嘎'),null)
+  assert.equal(validateVisual({...visual,useReference:'true'}).useReference,false)
+  assert.throws(()=>plan({settings,prompt:'按参考图画桌宠'}),/上传桌宠参考图/)
+  assert.equal(plan({settings,visual:{...visual,useReference:true}}),null)
+})
+
+test('everyday WeChat meme profile remains editable and separate from character reference',async()=>{
+  const source=await readFile(new URL('../src/lib/companionVisual.ts',import.meta.url),'utf8')
+  const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText
+  const {wechatMemeStyle}=await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+  const settings=cfg({workflow:await builtinWorkflow(),character:wechatMemeStyle}),referenceKey='a'.repeat(64)
+  const ordinary=plan({settings,referenceKey})
+  assert.equal(ordinary.useReference,false);assert.equal(ordinary.referenceKey,'')
+  assert.match(ordinary.prompt,/2D chibi anime reaction sticker/);assert.match(ordinary.prompt,/simple flat color fills/);assert.match(ordinary.prompt,/no collage/)
+  assert.equal(visualContext(settings,doc).style,wechatMemeStyle)
+  const role=plan({settings,referenceKey,prompt:'给我画张桌宠表情包'})
+  assert.equal(role.useReference,true);assert.doesNotMatch(role.prompt,/a single animal or chibi cartoon subject/)
+  assert.equal(cfg({character:'my custom style'}).character,'my custom style')
+})
+
+test('reference cache requires same image digest and never mixes with free pictures',async()=>{
+  const settings=cfg({workflow:await builtinWorkflow()}),referenceKey='a'.repeat(64)
+  const {referenceProfile,styleKey}=plan({settings,referenceKey,visual:{...visual,useReference:true}})
+  const old={...visual,id:'old-ref',file:'ref.png',useReference:true,referenceKey,referenceProfile,styleKey,emotion:'happy',personality:'playful',at:1}
+  const ordinary={...old,id:'free',file:'free.png',useReference:false,referenceKey:'',styleKey:plan({settings}).styleKey}
+  const catalog=[old,ordinary,{file:'last.png'}]
+  assert.equal(plan({settings,referenceKey,catalog,visual:{...visual,useReference:true,reuseId:'free'}}).reuseId,'old-ref')
+  assert.equal(plan({settings,referenceKey:'b'.repeat(64),catalog,visual:{...visual,useReference:true,reuseId:'old-ref'}}).reuseId,'')
+  assert.equal(plan({settings:cfg({...settings,referenceStyle:'2D anime'}),referenceKey,catalog,visual:{...visual,useReference:true,reuseId:'old-ref'}}).reuseId,'')
+  assert.equal(plan({settings,referenceKey,catalog,visual:{...visual,reuseId:'old-ref'}}).reuseId,'free')
+})
+
+test('anime reference preset keeps style separate, applies negative prompt and invalidates old profile',async()=>{
+  const source=await readFile(new URL('../src/lib/companionVisual.ts',import.meta.url),'utf8')
+  const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText
+  const {animeReferenceStyle}=await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+  const settings=cfg({workflow:await builtinWorkflow(),...animeReferenceStyle}),referenceKey='a'.repeat(64)
+  const role=plan({settings,referenceKey,prompt:'给我画张桌宠表情包'})
+  assert.match(role.prompt,/2D anime illustration/);assert.match(role.prompt,/original illustration style/)
+  const g=JSON.parse(referenceWorkflow(settings.workflow,true,settings))
+  assert.equal(g['5'].inputs.denoise,0.2);assert.match(g['3'].inputs.text,/3D render/)
+  assert.doesNotMatch(plan({settings,referenceKey}).prompt,/2D anime illustration/)
+  const catalog=[{...role,id:'old',file:'old.png',referenceProfile:'old-3d-profile'}]
+  assert.equal(plan({settings,referenceKey,catalog,visual:{...visual,useReference:true,reuseId:'old'}}).reuseId,'')
+})
 
 test('managed low-step workflow generates ordinary memes without a reference',async()=>{
   const source=await readFile(new URL('../src/lib/companionVisual.ts',import.meta.url),'utf8')
@@ -27,9 +109,10 @@ test('managed low-step workflow generates ordinary memes without a reference',as
   assert.equal(graph['1'].inputs.ckpt_name,'DreamShaper8_LCM.safetensors')
   assert.equal(graph['4'].class_type,'EmptyLatentImage')
   assert.equal(graph['5'].inputs.sampler_name,'lcm')
-  assert.equal(graph['5'].inputs.steps,6)
+  assert.equal(graph['5'].inputs.steps,8);assert.equal(graph['5'].inputs.cfg,2)
   assert.deepEqual(graph['5'].inputs.latent_image,['4',0])
   assert.equal(graph['5'].inputs.denoise,1)
+  assert.match(graph['3'].inputs.text,/3D render, photorealistic, photograph/)
   assert.equal(Object.values(graph).some(x=>x.class_type==='LoadImage'),false)
   assert.doesNotMatch(defaultVisualSettings().character,/penguin|reference|same character/i)
   assert.equal(defaultVisualSettings().character,normalizeSettings().character)
@@ -64,10 +147,12 @@ test('automatic quotas and cooldown apply to both new and reused pictures',()=>{
   assert.equal(plan({catalog:[{auto:true,at:999999999}]}),null)
   assert.equal(plan({catalog:Array.from({length:4},(_,n)=>({auto:true,at:950000000+n,reused:false}))}),null)
   assert.equal(plan({catalog:Array.from({length:12},(_,n)=>({auto:true,at:950000000+n,reused:true}))}),null)
-  const old={...visual,id:'cached',file:'cached.png',emotion:'happy',personality:'playful',at:1}
+  const old={...visual,id:'cached',file:'cached.png',styleKey:plan().styleKey,emotion:'happy',personality:'playful',at:1}
   const catalog=[old,{file:'other.png',at:2}]
   assert.equal(plan({catalog}).reuseId,'cached')
   assert.equal(plan({catalog,visual:{...visual,reuseId:'invented'}}).reuseId,'cached')
+  assert.equal(plan({catalog,settings:cfg({character:'different 2D style'})}).reuseId,'')
+  assert.equal(plan({catalog:[{...old,styleKey:undefined}]}).reuseId,'')
   assert.equal(plan({catalog:[{...old,kind:'scene'}],visual:{...visual,kind:'scene'}}).reuseId,'')
 })
 test('workflow accepts API graphs, injects only input values and requires a prompt',()=>{
@@ -108,6 +193,18 @@ test('real local HTTP workflow uploads reference, submits API prompt, polls and 
     assert.equal(getPrompt().prompt[3].inputs.image,'pet/reference.png');assert.equal(getPrompt().prompt[1].inputs.text,'happy penguin')
     assert.match(calls[0].body,/penguin-reference.png/);assert.ok(calls.some(x=>x.path.startsWith('/view?')))
   })
+})
+
+test('local HTTP built-in routing uploads only for role drawings and fails closed without reference',async()=>{
+  const workflow=await builtinWorkflow()
+  for(const useReference of [false,true])await fakeComfy(async(baseUrl,calls,getPrompt)=>{
+    const result=await generateImage({settings:cfg({baseUrl,workflow}),prompt:'smiling',reference:png.toString('base64'),useReference},{pollMs:1})
+    assert.equal(result.mediaType,'image/png')
+    assert.equal(calls.some(x=>x.path==='/upload/image'),useReference)
+    assert.equal(getPrompt().prompt['4'].class_type,useReference?'LoadImage':'EmptyLatentImage')
+    if(useReference)assert.equal(getPrompt().prompt['4'].inputs.image,'pet/reference.png')
+  })
+  await assert.rejects(generateImage({settings:cfg({workflow}),prompt:'same character',useReference:true},{fetchImpl:async()=>{throw Error('must not request')}}),/上传桌宠参考图/)
 })
 test('workflow errors, absent images, redirects and oversized responses fail without fabricated pictures',async()=>{
   for(const history of [{status:{status_str:'error'}},{status:{completed:true},outputs:{}}]){

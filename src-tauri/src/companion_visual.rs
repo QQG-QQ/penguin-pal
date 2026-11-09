@@ -5,6 +5,7 @@ use crate::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Write},
@@ -58,8 +59,8 @@ fn write(path: &Path, value: &Value) -> Result<(), String> {
     fs::rename(&temp, path).map_err(|_| "无法替换图片设置。".into())
 }
 fn defaults() -> Value {
-    json!({"enabled":false,"automatic":true,"managedRuntime":false,"baseUrl":"http://127.0.0.1:8188","workflow":"","character":"expressive everyday chat reaction meme, freely choose a funny animal, cartoon face or simple everyday subject to match the conversation",
-        "cooldownMinutes":30,"dailyLimit":4,"timeoutSeconds":180,"wechatEnabled":false,"epoch":0})
+    json!({"enabled":false,"automatic":true,"managedRuntime":false,"baseUrl":"http://127.0.0.1:8188","workflow":"","character":"2D chibi anime reaction sticker, crisp dark contour lines, simple flat color fills, cel animation frame, oversized head and tiny body, exaggerated readable comic expression, one animal or cartoon subject, plain white background, no collage, no text or watermark",
+        "referenceDenoise":0.2,"referenceStyle":"","referenceNegative":"","cooldownMinutes":30,"dailyLimit":4,"timeoutSeconds":180,"wechatEnabled":false,"epoch":0})
 }
 fn settings(path: &Path) -> Result<Value, String> {
     read(&path.join("settings.json"), defaults())
@@ -227,8 +228,8 @@ pub fn context(service: &Service) -> Value {
         return json!({"enabled":false});
     };
     let items = gallery(&path).unwrap_or_else(|_| json!({}));
-    let catalog:Vec<Value>=items["entries"].as_array().into_iter().flatten().rev().take(20).map(|x|json!({"id":x["id"],"kind":x["kind"],"caption":x["caption"],"emotion":x["emotion"]})).collect();
-    json!({"enabled":cfg["enabled"],"automatic":cfg["automatic"],"catalog":catalog})
+    let catalog:Vec<Value>=items["entries"].as_array().into_iter().flatten().rev().take(20).map(|x|json!({"id":x["id"],"kind":x["kind"],"caption":x["caption"],"emotion":x["emotion"],"useReference":x["useReference"]})).collect();
+    json!({"enabled":cfg["enabled"],"automatic":cfg["automatic"],"style":cfg["character"].as_str().unwrap_or("").chars().take(600).collect::<String>(),"hasReference":path.join("reference.image").is_file(),"catalog":catalog})
 }
 fn snapshot(service: &Service, full: bool) -> Result<Value, String> {
     let path = root(service)?;
@@ -373,6 +374,10 @@ pub fn schedule(service: &Service, prompt: &str, output: &Value, target: Option<
         "心情卡",
         "小剧场",
         "生成",
+        "画桌宠",
+        "画你",
+        "画自己",
+        "参考图",
     ]
     .iter()
     .any(|x| prompt.contains(x));
@@ -408,11 +413,17 @@ pub fn schedule(service: &Service, prompt: &str, output: &Value, target: Option<
         let Ok(path) = root(&service) else { return };
         let outcome = (|| -> Result<(), String> {
             let cfg = settings(&path)?;
+            let reference = if path.join("reference.image").is_file() {
+                let bytes = fs::read(path.join("reference.image")).map_err(|_| "无法读取参考图。")?;
+                if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 { return Err("参考图大小无效。".into()); }
+                Some(bytes)
+            } else { None };
+            let reference_key = reference.as_ref().map(|bytes| format!("{:x}", Sha256::digest(bytes))).unwrap_or_default();
             let items = gallery(&path)?;
             let plan = run_node(
                 &path,
                 false,
-                json!({"action":"plan","settings":cfg,"document":document,"visual":visual,"prompt":prompt,"catalog":items["entries"],"now":now()}),
+                json!({"action":"plan","settings":cfg,"document":document,"visual":visual,"prompt":prompt,"catalog":items["entries"],"referenceKey":reference_key,"now":now()}),
             )?;
             if plan.is_null() {
                 return Ok(());
@@ -436,17 +447,11 @@ pub fn schedule(service: &Service, prompt: &str, output: &Value, target: Option<
                 if cfg["managedRuntime"] == true {
                     crate::companion_comfy::ensure(Some(&cancel))?;
                 }
-                let reference = if path.join("reference.image").exists() {
-                    Some(STANDARD.encode(
-                        fs::read(path.join("reference.image")).map_err(|_| "无法读取参考图。")?,
-                    ))
-                } else {
-                    None
-                };
+                let reference = reference.as_ref().map(|bytes| STANDARD.encode(bytes));
                 let result = run_node(
                     &path,
                     false,
-                    json!({"action":"generate","settings":cfg,"prompt":plan["prompt"],"reference":reference,"cancelFile":cancel}),
+                    json!({"action":"generate","settings":cfg,"prompt":plan["prompt"],"useReference":plan["useReference"],"reference":reference,"cancelFile":cancel}),
                 )?;
                 let bytes = STANDARD
                     .decode(result["bytes"].as_str().ok_or("绘图没有返回图片。")?)
@@ -768,11 +773,20 @@ mod tests {
         cfg["enabled"] = json!(true); cfg["managedRuntime"] = json!(true);
         cfg["baseUrl"] = json!(crate::companion_comfy::BASE_URL);
         cfg["workflow"] = json!(workflow); cfg["timeoutSeconds"] = json!(600);
+        if let Ok(style) = std::env::var("PENGUINPAL_COMFY_STYLE") { cfg["character"] = json!(style.chars().take(600).collect::<String>()); }
+        if let Some(file) = std::env::var_os("PENGUINPAL_COMFY_REFERENCE_PROFILE") {
+            let profile: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+            for key in ["referenceDenoise", "referenceStyle", "referenceNegative"] { cfg[key] = profile[key].clone(); }
+        }
         write(&path.join("settings.json"), &cfg).unwrap();
+        let reference = std::env::var_os("PENGUINPAL_COMFY_REFERENCE");
+        if let Some(file) = &reference { fs::write(path.join("reference.image"), fs::read(file).unwrap()).unwrap(); }
         let start = Instant::now();
-        schedule(&service, "给我画张开心的表情包", &json!({
+        let prompt = if reference.is_some() { "按参考图给我画张桌宠开心的表情包" } else { "给我画张开心的表情包" };
+        let description = if reference.is_some() { "same 2D anime chibi character as reference, smiling softly, keep original line art, flat colors, hairstyle, blue eyes, penguin costume and cyan headset" } else { "a single orange and white chibi tabby cat, oversized head, tiny body, very wide round eyes and a small open mouth in shock, one paw lifted, crisp ink contours and simple flat colors, 2D anime sticker" };
+        schedule(&service, prompt, &json!({
             "messageId":"local-live-test-reply", "visualDocument":{"pet":{"mood":86,"personality":"playful"}},
-            "visual":{"kind":"sticker","description":"funny orange cartoon cat laughing with eyes closed, exaggerated happy face, simple white background","caption":"今天也要开心呀","reuseId":""}
+            "visual":{"kind":"sticker","description":description,"caption":"今天也要开心呀","reuseId":"","useReference":reference.is_some()}
         }), None);
         while DRAWING.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(720) {
             std::thread::sleep(Duration::from_millis(500));
@@ -785,12 +799,14 @@ mod tests {
         assert_eq!(entries[0]["messageId"], "local-live-test-reply");
         assert_eq!(entries[0]["emotion"], "happy");
         assert_eq!(entries[0]["personality"], "playful");
+        assert_eq!(entries[0]["useReference"], reference.is_some());
+        if reference.is_some() { assert_eq!(entries[0]["referenceKey"].as_str().unwrap().len(), 64); }
         let bytes = fs::read(image_path(&path, entries[0]["file"].as_str().unwrap()).unwrap()).unwrap();
         assert!(bytes.starts_with(&[137,80,78,71,13,10,26,10]));
         assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 512);
         assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 512);
         fs::create_dir_all(&evidence).unwrap();
-        fs::write(evidence.join("happy-sticker.png"), &bytes).unwrap();
+        fs::write(evidence.join(if reference.is_some() { "reference-sticker.png" } else { "happy-sticker.png" }), &bytes).unwrap();
         fs::write(evidence.join("inference.json"), serde_json::to_vec_pretty(&json!({
             "seconds":start.elapsed().as_secs_f64(),"width":512,"height":512,"bytes":bytes.len(),
             "runtime":crate::companion_comfy::status(false),"attachment":entries[0],"scope":"real native scheduler, managed lifecycle, frontend workflow and Node adapter; synthetic text reply, no cloud chat or WeChat"

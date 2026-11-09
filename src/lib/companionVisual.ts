@@ -1,14 +1,17 @@
 export type VisualKind='none'|'sticker'|'mood_card'|'scene'
-export interface VisualSettings {enabled:boolean;automatic:boolean;managedRuntime:boolean;baseUrl:string;workflow:string;character:string;cooldownMinutes:number;dailyLimit:number;timeoutSeconds:number;wechatEnabled:boolean;hasWorkflow?:boolean;hasReference?:boolean}
-export interface VisualEntry {id:string;kind:VisualKind;caption:string;emotion:string;personality:string;mood:number;at:number;messageId:string;path:string;reused:boolean}
+export interface VisualSettings {enabled:boolean;automatic:boolean;managedRuntime:boolean;baseUrl:string;workflow:string;character:string;referenceDenoise?:number;referenceStyle?:string;referenceNegative?:string;cooldownMinutes:number;dailyLimit:number;timeoutSeconds:number;wechatEnabled:boolean;hasWorkflow?:boolean;hasReference?:boolean}
+export interface VisualEntry {id:string;kind:VisualKind;caption:string;emotion:string;personality:string;mood:number;at:number;messageId:string;path:string;reused:boolean;useReference?:boolean;referenceKey?:string;referenceProfile?:string;styleKey?:string}
 export interface VisualBoard {settings:VisualSettings;entries:VisualEntry[];error:string;job:{state?:string;kind?:VisualKind;message?:string};runtime?:{installed:boolean;state:string;root?:string;model?:string;baseUrl:string;idleSeconds:number;error?:string;install?:{state?:string;message?:string;progress?:number}};wechat:{connected:boolean;account?:string;error?:string;queued?:number;processing?:number;sending?:number;failed?:number;uncertain?:number;imagesUncertain?:number;receive?:{polledAt?:number;received?:number;accepted?:number;ignored?:number}}}
 export const visualLabel=(kind:VisualKind)=>({none:'图片',sticker:'表情包',mood_card:'今日心情卡',scene:'小剧场'}[kind])
-export const defaultVisualSettings=():VisualSettings=>({enabled:false,automatic:true,managedRuntime:false,baseUrl:'http://127.0.0.1:8188',workflow:'',character:'expressive everyday chat reaction meme, freely choose a funny animal, cartoon face or simple everyday subject to match the conversation',cooldownMinutes:30,dailyLimit:4,timeoutSeconds:180,wechatEnabled:false})
+export const wechatMemeStyle='2D chibi anime reaction sticker, crisp dark contour lines, simple flat color fills, cel animation frame, oversized head and tiny body, exaggerated readable comic expression, one animal or cartoon subject, plain white background, no collage, no text or watermark'
+export const animeReferenceStyle={referenceDenoise:0.2,referenceStyle:'2D anime illustration, clean dark line art, flat cel shading, soft painted highlights, original chibi proportions and original color palette',referenceNegative:'3D render, photorealistic, plastic toy, realistic doll, glossy vinyl, CGI, realistic hair strands'}
+export const defaultVisualSettings=():VisualSettings=>({enabled:false,automatic:true,managedRuntime:false,baseUrl:'http://127.0.0.1:8188',workflow:'',character:wechatMemeStyle,referenceDenoise:0.2,referenceStyle:'',referenceNegative:'',cooldownMinutes:30,dailyLimit:4,timeoutSeconds:180,wechatEnabled:false})
 
-// Ordinary chat memes use text-to-image; reference workflows remain optional.
+// Ordinary memes use text-to-image; native requests can derive a reference graph for this exact preset.
 export function managedWorkflow(model='DreamShaper8_LCM.safetensors'){
   const graph=JSON.parse(starterWorkflow(model))
-  Object.assign(graph['5'].inputs,{steps:6,cfg:1.5,sampler_name:'lcm',scheduler:'normal',denoise:1})
+  Object.assign(graph['5'].inputs,{steps:8,cfg:2,sampler_name:'lcm',scheduler:'normal',denoise:1})
+  graph['3'].inputs.text+=', 3D render, photorealistic, photograph, plastic toy, realistic doll, CGI, glossy vinyl, detailed fur, realistic fur, individual hair strands, realistic lighting, volumetric shading, soft edges, detailed texture'
   return JSON.stringify(graph,null,2)
 }
 
