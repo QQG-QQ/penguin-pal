@@ -9,13 +9,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$version = $Tag.TrimStart('v')
+$version = ($Tag -split '-v')[-1].TrimStart('v')
+$product = "PenguinPal Companion"
 if ([string]::IsNullOrWhiteSpace($Name)) {
-  $Name = "PenguinPal Assistant $version"
+  $Name = "$product $version"
 }
 $assets = @(
-  (Join-Path $root "src-tauri\target\release\bundle\nsis\PenguinPal Assistant_${version}_x64-setup.exe"),
-  (Join-Path $root "src-tauri\target\release\bundle\msi\PenguinPal Assistant_${version}_x64_en-US.msi")
+  (Join-Path $root "src-tauri\target\release\bundle\nsis\${product}_${version}_x64-setup.exe"),
+  (Join-Path $root "src-tauri\target\release\bundle\msi\${product}_${version}_x64_en-US.msi")
 )
 
 foreach ($asset in $assets) {
