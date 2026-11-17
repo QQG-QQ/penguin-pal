@@ -24,7 +24,7 @@ test('long actions finish their builtin video, unknown and invalid durations kee
  assert.equal(media.motionDuration({clips:[{slot:'greet',durationMs:999999}]},'greet'),15000)
 })
 test('single builtin provides standard activities and Codex aliases with real local media',()=>{
- assert.equal(pack.id,'builtin');assert.equal(pack.name,'内置企鹅');assert.equal(new Set(pack.clips.map(c=>c.slot)).size,26)
+ assert.equal(pack.id,'builtin');assert.equal(pack.name,'内置企鹅');assert.equal(new Set(pack.clips.map(c=>c.slot)).size,27)
  // Custom packs may still provide perform clips; the removed built-in videos are optional.
  assert.ok(media.motionSlots.includes('perform'))
  for(const slot of media.motionSlots.filter(slot=>slot!=='perform')){const c=pack.clips.find(c=>c.slot===slot);assert.ok(c,slot);for(const s of [c,c.enter,c.exit].filter(Boolean)){assert.ok(s.frames.length>0);for(const name of [s.poster,s.video,...s.frames]){assert.match(name,/^[a-z0-9-]+\.(png|webm)$/);assert.ok(existsSync(new URL('../penguin/companion-v4/'+name,import.meta.url)),name)}}}
@@ -32,6 +32,16 @@ test('single builtin provides standard activities and Codex aliases with real lo
  assert.equal(pack.clips.find(c=>c.slot==='blink').loop,false);assert.equal(pack.clips.find(c=>c.slot==='rest').loop,true)
 })
 
+test('builtin perform clips are frame-only, bounded and complete',()=>{
+ const perform=pack.clips.filter(c=>c.slot==='perform')
+ assert.equal(perform.length,2)
+ for(const c of perform){
+  assert.ok(c.frames.length>0&&c.frames.length<=120,c.id)
+  assert.equal(c.loop,false,c.id);assert.equal(c.video,undefined,c.id)
+  assert.ok(existsSync(new URL('../penguin/companion-v4/'+c.poster,import.meta.url)),c.poster)
+  for(const name of c.frames)assert.ok(existsSync(new URL('../penguin/companion-v4/'+name,import.meta.url)),name)
+ }
+})
 test('seven real-source actions include full-rate enter and exit fallback sequences',()=>{
  for(const slot of ['poke','tail','eat','rest','sweep','talk','annoyed']){
   const c=pack.clips.find(c=>c.slot===slot)

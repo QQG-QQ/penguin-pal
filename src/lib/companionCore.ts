@@ -7,6 +7,7 @@ export interface Preferences {
   edgeDock: boolean; autoHide: boolean; notifications: boolean
   animationPack:string; videoAnimations:boolean; springDrag:boolean; statusAnimations:boolean
   musicMode:'audio'|'off'
+  scene:'none'|'rain'|'snow'
 }
 export interface CompanionState {
   schema: number; energy: number; hunger: number; affection: number; savedAt: number
@@ -24,7 +25,7 @@ export const defaultCompanion = (now: number): CompanionState => ({ schema: 1, e
     surfaces: true, awareness: false, reducedMotion: false, quiet: false, codexEvents: true, allowWorkChat: false,
     movement: 'still', size: 1, rhythm: 'balanced', walkSpeed: 55, hoverPause: true,
     topmost: true, fullscreenHide: true, passthrough: false, autostart: false, personality: 'gentle',
-    edgeDock: true, autoHide: true, notifications: true, animationPack:'builtin',videoAnimations:true,springDrag:true,statusAnimations:true,musicMode:'audio' } })
+    edgeDock: true, autoHide: true, notifications: true, animationPack:'builtin',videoAnimations:true,springDrag:true,statusAnimations:true,musicMode:'audio',scene:'none' } })
 const clamp = (v: number, min = 0, max = 100) => Math.min(max, Math.max(min, v))
 
 const mergedBuiltinPacks = new Set(['penguin-greeting-video','doubao-walk-right-20261021','doubao-walk-pair-20261021','doubao-core-20261021','doubao-gray-20261021'])

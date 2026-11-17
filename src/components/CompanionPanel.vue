@@ -10,7 +10,7 @@ const emit = defineEmits<{
 const privacy = ref(false),tab=ref<'home'|'actions'|'media'>('home'),category=ref('互动')
 function showTab(value:'home'|'actions'|'media'){tab.value=value;emit('expand',value!=='home')}
 const actions:{group:string;label:string;activity?:Activity;care?:CareAction;performance?:string}[]=[
-  {group:'互动',label:'挥手',activity:'greet'},{group:'互动',label:'开心',activity:'happy'},{group:'互动',label:'摸摸',care:'pat'},{group:'互动',label:'戳戳',care:'poke'},{group:'互动',label:'尾巴',care:'tail'},{group:'互动',label:'随机表演',activity:'perform'},
+  {group:'互动',label:'挥手',activity:'greet'},{group:'互动',label:'开心',activity:'happy'},{group:'互动',label:'摸摸',care:'pat'},{group:'互动',label:'戳戳',care:'poke'},{group:'互动',label:'尾巴',care:'tail'},{group:'互动',label:'随机表演',activity:'perform'},{group:'互动',label:'全息终端',performance:'holo-terminal'},{group:'互动',label:'跃起',performance:'jump-boost'},
   {group:'生活',label:'小鱼',care:'feed'},{group:'生活',label:'休息',care:'rest'},{group:'生活',label:'醒来',activity:'wake'},{group:'生活',label:'扫地',activity:'sweep'},
   {group:'表情',label:'发呆',activity:'think'},{group:'表情',label:'张望',activity:'look'},{group:'表情',label:'眨眼',activity:'blink'},{group:'表情',label:'说话',activity:'talk'},{group:'表情',label:'小脾气',activity:'annoyed'}]
 function play(item:typeof actions[number]){if(item.care)emit('care',item.care);else if(item.performance)emit('performance',item.performance);else if(item.activity)emit('action',item.activity)}
@@ -49,6 +49,7 @@ const toggles: { key: keyof Preferences; label: string }[] = [
     <div v-if="expanded" class="advanced">
       <div class="rule"></div><label class="caption">大小</label>
       <div class="choices"><button v-for="item in [{label:'小',value:.8},{label:'中',value:1},{label:'大',value:1.2}]" :key="item.value" :class="{ selected: state.preferences.size === item.value }" @click="patch({ size: item.value })">{{ item.label }}</button></div>
+      <label class="caption">场景氛围</label><div class="choices"><button v-for="(label, value) in { none: '无', rain: '雨', snow: '雪' }" :class="{ selected: state.preferences.scene === value }" @click="patch({ scene: (value as Preferences['scene']) })">{{ label }}</button></div>
       <div class="mini-actions"><button @click="emit('action', 'think')">发呆</button><button @click="emit('action', 'sweep')">扫地</button><button @click="emit('care', 'pat')">摸摸</button></div>
       <label class="caption">陪伴节奏</label><div class="choices"><button v-for="(label, value) in { calm: '安静', balanced: '适中', lively: '活泼' }" :class="{ selected: state.preferences.rhythm === value }" @click="patch({ rhythm: value })">{{ label }}</button></div>
       <label class="caption">走路速度</label><div class="choices"><button v-for="(label, value) in { '35': '慢', '55': '适中', '80': '快' }" :class="{ selected: state.preferences.walkSpeed === Number(value) }" @click="patch({ walkSpeed: Number(value) })">{{ label }}</button></div>
@@ -64,7 +65,7 @@ const toggles: { key: keyof Preferences; label: string }[] = [
       <p class="hint">给{{petName||'企鹅'}}换一个动作，任务状态由{{ codexEnabled ? ' Codex ' : '工作感知' }}提供。</p>
       <div class="choices"><button v-for="group in ['互动','生活','表情']" :key="group" :class="{selected:category===group}" @click="category=group">{{group}}</button></div>
       <div class="action-grid"><button v-for="item in actions.filter(a=>a.group===category)" :key="item.label" @click="play(item)"><span aria-hidden="true">{{item.label==='挥手'?'✦':item.label==='小鱼'?'♡':'·'}}</span>{{item.label}}</button></div>
-      <p class="hint">14 个动作均配透明短视频<br/>关闭视频可使用帧图；拖动可贴边停靠。</p>
+      <p class="hint">全息终端与跃起为逐帧表演，其余动作配透明短视频<br/>关闭视频可使用帧图；拖动可贴边停靠。</p>
       <button v-if="codexEnabled" class="install" @click="emit('codex')">打开 Codex 聊天 ↗</button>
     </div>
     <div v-else class="motion-library">

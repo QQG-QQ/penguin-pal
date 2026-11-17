@@ -56,6 +56,7 @@ pub struct Preferences {
     pub spring_drag: bool,
     pub status_animations: bool,
     pub music_mode: MusicMode,
+    pub scene: Scene,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -78,6 +79,18 @@ pub enum Personality {
     Playful,
     Quiet,
     Warm,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Scene {
+    None,
+    Rain,
+    Snow,
+}
+impl Default for Scene {
+    fn default() -> Self {
+        Scene::None
+    }
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -108,6 +121,7 @@ impl Default for Preferences {
             spring_drag: true,
             status_animations: true,
             music_mode: MusicMode::Audio,
+            scene: Scene::None,
         }
     }
 }
