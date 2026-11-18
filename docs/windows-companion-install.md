@@ -1,6 +1,6 @@
 # Windows 安装与启动
 
-从 [GitHub Releases](https://github.com/QQG-QQ/penguin-pal/releases/latest) 下载 `PenguinPal-Companion-0.9.21-windows-x64-setup.exe`，双击并按向导完成安装。安装到当前用户；提供桌面快捷方式、开始菜单入口和卸载程序。全新安装通常不需要管理员权限；迁移机器级旧版 MSI 或安装缺少的 WebView2 时可能需要管理员确认。
+从 [GitHub Releases](https://github.com/QQG-QQ/penguin-pal/releases/latest) 下载 `PenguinPal-Companion-0.9.22-windows-x64-setup.exe`，双击并按向导完成安装。安装到当前用户；提供桌面快捷方式、开始菜单入口和卸载程序。全新安装通常不需要管理员权限；迁移机器级旧版 MSI 或安装缺少的 WebView2 时可能需要管理员确认。
 
 安装后双击桌面“PenguinPal 企鹅桌宠”即可启动，无需源码、Rust 或开发服务器。企鹅本身可以独立运行；气泡模型聊天与自动整理记忆需要本机安装并登录 Codex，同时 PATH 中有 Node.js，沿用当前 Codex 模型配置。无需为桌宠手动建立可见 Codex 会话。同步、记忆及主动搭话的设置和数据范围见 [同步与数据说明](companion-sync.md)。
 
@@ -19,12 +19,16 @@
 
 发布同时提供同名 `.exe.sha256` 校验文件。新桌宠的“软件更新”只下载已通过 SHA-256 校验的正式 Companion 包，仍由用户运行安装程序。
 
-开发时，以安装配置构建默认 companion 应用，再用 PowerShell 7 单独生成安装包：
+发版用一条命令完成构建、打包和上传：
 
 ```powershell
-npm exec tauri build -- --no-bundle --config src-tauri/tauri.companion-installer.conf.json
-pwsh -NoProfile -File ./scripts/package-companion.ps1 -OutputDirectory ./outputs/installers
+pwsh -NoProfile -File ./scripts/release-companion.ps1              # 构建 + 打包 + 上传
+pwsh -NoProfile -File ./scripts/release-companion.ps1 -SkipUpload  # 只构建打包，产物在临时目录
 ```
+
+必须使用 `src-tauri/tauri.companion-installer.conf.json`（产品名“PenguinPal 企鹅桌宠”）。用默认 `tauri.conf.json` 构建出来的产品名是“PenguinPal Companion”，Windows 会把它当成另一个软件并排安装，而且资产名也不符合更新器约定。脚本会在三处拦截这种错误：二进制 ProductName、安装包文件名、上传后的资产摘要。
+
+打包脚本也可单独使用：`pwsh -NoProfile -File ./scripts/package-companion.ps1 -OutputDirectory ./outputs/installers`。
 
 此命令仅适用于默认 companion 构建。安装包包含已构建的应用和内置动画；私有独立助手模式的 Codex/MCP 运行时不打入此安装包。Windows 缺少 WebView2 时，安装向导会使用 Tauri 默认引导方式安装所需运行时。
 

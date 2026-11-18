@@ -1,10 +1,11 @@
-#Requires -Version 7.0
+﻿#Requires -Version 5.1
 param([string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+$product = 'PenguinPal 企鹅桌宠'
 Push-Location -LiteralPath $repo
 try {
-  $targetDirectory = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $repo) } else { Join-Path $repo 'src-tauri/target' }
+  $targetDirectory = if ($env:CARGO_TARGET_DIR) { if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) { $env:CARGO_TARGET_DIR } else { Join-Path $repo $env:CARGO_TARGET_DIR } } else { Join-Path $repo 'src-tauri/target' }
   $releaseDirectory = Join-Path $targetDirectory 'release'
   $binary = Join-Path $releaseDirectory 'penguin-pal.exe'
   if (!(Test-Path -LiteralPath $binary -PathType Leaf)) {
@@ -15,7 +16,7 @@ try {
   $sourceHash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
   $version = (Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version
   $binaryVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($binary)
-  if ($binaryVersion.ProductVersion -ne $version -or $binaryVersion.ProductName -ne 'PenguinPal 企鹅桌宠') {
+  if ($binaryVersion.ProductVersion -ne $version -or $binaryVersion.ProductName -ne $product) {
     throw 'The binary version/product does not match the companion installer configuration; rebuild before packaging'
   }
   $originalBytes = [IO.File]::ReadAllBytes($binary)
@@ -25,7 +26,7 @@ try {
   $encoding = [Text.Encoding]::GetEncoding(28591)
   $expectedBytes = $encoding.GetBytes($encoding.GetString($originalBytes).Replace('__TAURI_BUNDLE_TYPE_VAR_UNK', '__TAURI_BUNDLE_TYPE_VAR_NSS'))
   $hasher = [Security.Cryptography.SHA256]::Create()
-  try { $expectedHash = [Convert]::ToHexString($hasher.ComputeHash($expectedBytes)) } finally { $hasher.Dispose() }
+  try { $expectedHash = -join ($hasher.ComputeHash($expectedBytes) | ForEach-Object { $_.ToString('x2') }) } finally { $hasher.Dispose() }
   try {
     & (Join-Path $repo 'node_modules/.bin/tauri.cmd') bundle --bundles nsis --config src-tauri/tauri.companion-installer.conf.json --ci
     if ($LASTEXITCODE -ne 0) { throw "Installer bundling failed: $LASTEXITCODE" }
@@ -38,7 +39,7 @@ try {
       [IO.File]::WriteAllBytes($binary, $originalBytes)
     }
   }
-  $installers = @(Get-ChildItem -LiteralPath (Join-Path $releaseDirectory 'bundle/nsis') -Filter "*_$($version)_x64-setup.exe")
+  $installers = @(Get-ChildItem -LiteralPath (Join-Path $releaseDirectory 'bundle/nsis') -Filter "$($product)_$($version)_x64-setup.exe")
   if ($installers.Count -ne 1) { throw "Expected one installer for $version, found $($installers.Count)" }
   if ($OutputDirectory) {
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
@@ -49,6 +50,6 @@ try {
     Copy-Item -LiteralPath $installers[0].FullName -Destination $destination -Force
   } else { $destination = $installers[0].FullName }
   $checksum = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
-  [IO.File]::WriteAllText("$destination.sha256", "$checksum  $([IO.Path]::GetFileName($destination))`n", [Text.UTF8Encoding]::new($false))
+  [IO.File]::WriteAllText("$destination.sha256", "$checksum  $([IO.Path]::GetFileName($destination))`n", (New-Object System.Text.UTF8Encoding($false)))
   [ordered]@{version=$version;installer=$destination;sha256=(Get-FileHash -LiteralPath $destination).Hash.ToLowerInvariant();applicationSha256=$sourceHash.ToLowerInvariant();applicationAfterBundleSha256=$packagedHash.ToLowerInvariant();expectedInstalledApplicationSha256=$expectedHash.ToLowerInvariant()} | ConvertTo-Json
 } finally { Pop-Location }
