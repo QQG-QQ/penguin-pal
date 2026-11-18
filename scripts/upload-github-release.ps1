@@ -14,15 +14,26 @@ $product = "PenguinPal Companion"
 if ([string]::IsNullOrWhiteSpace($Name)) {
   $Name = "$product $version"
 }
-$assets = @(
-  (Join-Path $root "src-tauri\target\release\bundle\nsis\${product}_${version}_x64-setup.exe"),
-  (Join-Path $root "src-tauri\target\release\bundle\msi\${product}_${version}_x64_en-US.msi")
-)
-
-foreach ($asset in $assets) {
-  if (-not (Test-Path -LiteralPath $asset)) {
-    throw "Missing release asset: $asset"
+# The in-app updater only accepts PenguinPal-Companion-<version>-windows-<arch>-setup.exe
+# (see src-tauri/src/companion_updates.rs), so stage build output under that name.
+$staging = Join-Path $env:TEMP "penguinpal-release-$version"
+New-Item -ItemType Directory -Force -Path $staging | Out-Null
+$sources = @{
+  (Join-Path $root "src-tauri\target\release\bundle\nsis\${product}_${version}_x64-setup.exe") = "PenguinPal-Companion-$version-windows-x64-setup.exe"
+  (Join-Path $root "src-tauri\target\release\bundle\msi\${product}_${version}_x64_en-US.msi") = "PenguinPal-Companion-$version-windows-x64.msi"
+}
+$assets = @()
+foreach ($src in $sources.Keys) {
+  if (-not (Test-Path -LiteralPath $src)) {
+    throw "Missing release asset: $src"
   }
+  $dst = Join-Path $staging $sources[$src]
+  Copy-Item -LiteralPath $src -Destination $dst -Force
+  $hash = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash.ToLower()
+  "$hash  $($sources[$src])" | Set-Content -LiteralPath "$dst.sha256" -Encoding ascii -NoNewline
+  $assets += $dst
+  $assets += "$dst.sha256"
+  Write-Host "Staged: $($sources[$src]) ($([math]::Round((Get-Item -LiteralPath $dst).Length / 1MB, 1)) MB)"
 }
 
 function Get-GithubToken {
