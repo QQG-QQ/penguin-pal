@@ -230,9 +230,14 @@ struct Runtime {
     status: String,
     last_sync: u64,
     active: bool,
-    import: Option<Document>,
+    import: Option<BackupImport>,
     failures: u32,
     next_attempt: u64,
+}
+
+struct BackupImport {
+    document: Option<Document>,
+    ai_tools: Option<crate::ai_tools::SettingsArchive>,
 }
 struct Running(Arc<AtomicBool>);
 fn acquire_sync(running: &Arc<AtomicBool>, timeout: Duration) -> Result<Running, String> {
@@ -283,7 +288,11 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 fn backup(document: &Document) -> Value {
     json!({"format":"penguinpal-companion","version":1,"sha256":digest(&serde_json::to_vec(document).unwrap()),"data":document})
 }
+#[cfg(test)]
 fn decode_backup(bytes: &[u8]) -> Result<Document, String> {
+    decode_backup_with_ai_tools(bytes).map(|(document, _)| document)
+}
+fn decode_backup_with_ai_tools(bytes: &[u8]) -> Result<(Document, Option<String>), String> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err("备份超过大小上限。".into());
     }
@@ -297,7 +306,10 @@ fn decode_backup(bytes: &[u8]) -> Result<Document, String> {
     if value["sha256"] != digest(&serde_json::to_vec(&document).unwrap()) {
         return Err("备份校验失败；文件可能不完整。".into());
     }
-    Ok(document)
+    let ai_tools = value.get("aiToolsDpapi").map(|block| {
+        block.as_str().map(str::to_owned).ok_or("AI 工具备份字段无效。")
+    }).transpose()?;
+    Ok((document, ai_tools))
 }
 impl Service {
     pub fn new(root: &Path, seed: Value) -> Result<Self, String> {
@@ -973,6 +985,7 @@ impl Service {
 pub async fn companion_sync(
     window: WebviewWindow,
     service: tauri::State<'_, Service>,
+    ai_tools: tauri::State<'_, crate::ai_tools::AiTools>,
     action: String,
     payload: Option<Value>,
 ) -> Result<Value, String> {
@@ -980,6 +993,7 @@ pub async fn companion_sync(
         return Err("仅允许桌宠主窗口调用。".into());
     }
     let service = service.inner().clone();
+    let ai_tools = ai_tools.inner().clone();
     let app = window.app_handle().clone();
     tauri::async_runtime::spawn_blocking(move||{
         let data=payload.unwrap_or(Value::Null);
@@ -1018,20 +1032,59 @@ pub async fn companion_sync(
             "export"=>{
                 service.ingest()?;
                 let document=service.inner.lock().map_err(|_|"同步状态忙。")?.disk.document.clone();
-                let bundle=backup(&document);
+                let mut bundle=backup(&document);
+                if let Some(block) = ai_tools.backup_block(&app)? {
+                    bundle["aiToolsDpapi"] = json!(block);
+                }
+                let bytes = serde_json::to_vec_pretty(&bundle).map_err(|_| "无法编码企鹅备份。")?;
+                if bytes.len() as u64 > MAX_BYTES {
+                    return Err("企鹅备份超过导入文件的大小上限。".into());
+                }
                 let Some(file)=app.dialog().file().add_filter("企鹅数据",&["json"]).set_file_name("penguinpal-backup.json").blocking_save_file()else{return Ok(json!({"cancelled":true}));};
-                let path=file.into_path().map_err(|_|"导出路径无效。")?;write(&path,&serde_json::to_vec_pretty(&bundle).unwrap())?;
+                let path=file.into_path().map_err(|_|"导出路径无效。")?;
+                write(&path,&bytes)?;
                 return Ok(json!({"path":path}));
             }
             "previewImport"=>{
-                let Some(file)=app.dialog().file().add_filter("企鹅数据",&["json"]).blocking_pick_file()else{return Ok(json!({"cancelled":true}));};
-                let document=decode_backup(&read(&file.into_path().map_err(|_|"导入路径无效。")?)?)?;
-                let summary=json!({"memories":document.memories.iter().filter(|m|!m.deleted).count(),"conversations":document.conversations.len(),"mood":document.pet.mood});
-                service.inner.lock().map_err(|_|"同步状态忙。")?.import=Some(document);return Ok(summary);
+                service.inner.lock().map_err(|_|"同步状态忙。")?.import = None;
+                let Some(file)=app.dialog().file().add_filter("企鹅数据",&["json","ppai"]).blocking_pick_file()else{return Ok(json!({"cancelled":true}));};
+                let path = file.into_path().map_err(|_| "导入路径无效。")?;
+                let bytes = read(&path)?;
+                let (document, archive, locked) = if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("ppai")) {
+                    let archive = crate::ai_tools::SettingsArchive::decode_encrypted(&bytes)?
+                        .ok_or("请使用导出时的 Windows 用户恢复这份 AI 工具档案。")?;
+                    (None, Some(archive), false)
+                } else {
+                    let (document, block) = decode_backup_with_ai_tools(&bytes)?;
+                    let archive = block.as_deref().map(crate::ai_tools::SettingsArchive::decode_block)
+                        .transpose()?.flatten();
+                    let locked = block.is_some() && archive.is_none();
+                    (Some(document), archive, locked)
+                };
+                let summary = json!({
+                    "memories":document.as_ref().map(|data| data.memories.iter().filter(|m| !m.deleted).count()),
+                    "conversations":document.as_ref().map(|data| data.conversations.len()),
+                    "mood":document.as_ref().map(|data| data.pet.mood),
+                    "aiTools":archive.is_some(),
+                    "aiToolsLocked":locked,
+                });
+                service.inner.lock().map_err(|_|"同步状态忙。")?.import = Some(BackupImport { document, ai_tools: archive });
+                return Ok(summary);
             }
             "import"=>{
-                let document=service.inner.lock().map_err(|_|"同步状态忙。")?.import.take().ok_or("请先选择并预览备份。")?;
-                service.record("restore",json!({"document":document}))?;
+                let restore = service.inner.lock().map_err(|_|"同步状态忙。")?.import.take().ok_or("请先选择并预览备份。")?;
+                let has_document = restore.document.is_some();
+                if let Some(document) = restore.document {
+                    service.record("restore",json!({"document":document}))?;
+                }
+                if let Some(archive) = restore.ai_tools {
+                    if let Err(error) = ai_tools.restore_block(archive) {
+                        if !has_document { return Err(error); }
+                        let mut status = service.status()?;
+                        status["backupWarning"] = json!(format!("宠物数据已恢复。AI 工具配置恢复失败。{error}"));
+                        return Ok(status);
+                    }
+                }
             }
             "backfill"=>return service.backfill(),
             "history"=>return service.history_search(&data),

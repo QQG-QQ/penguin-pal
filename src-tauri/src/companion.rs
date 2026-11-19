@@ -1146,6 +1146,7 @@ pub fn run() {
             }
             let crash_root = root.clone();
             app.manage(crate::companion_sync::Service::new(&root, serde_json::to_value(&state)?).map_err(std::io::Error::other)?);
+            app.manage(crate::ai_tools::AiTools::new(&root));
             let previous = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
                 companion_runtime::record(&crash_root, "panic", now());
@@ -1166,7 +1167,8 @@ pub fn run() {
             let controls = MenuItem::with_id(app, "controls", "快速控制", true, None::<&str>)?;
             let codex = MenuItem::with_id(app, "codex", "打开 Codex", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出企鹅", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &controls, &codex, &quit])?;
+            let ai_tools = MenuItem::with_id(app, "ai-tools", "AI 工具", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &controls, &codex, &ai_tools, &quit])?;
             let mut tray = TrayIconBuilder::with_id("penguinpal-companion")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -1190,6 +1192,10 @@ pub fn run() {
                     "codex" => {
                         let _ = companion_platform::open_codex();
                     }
+                    "ai-tools" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move { let _ = crate::ai_tools::show(&app); });
+                    }
                     "quit" => app.exit(0),
                     _ => (),
                 })
@@ -1205,6 +1211,12 @@ pub fn run() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            if std::env::args().any(|arg| arg == "--ai-tools" || (smoke_preview && arg == "--smoke-ai-tools")) {
+                let app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = crate::ai_tools::show(&app) { eprintln!("{error}"); app.exit(1); }
+                });
+            }
             if std::env::args().any(|arg| arg == "--smoke") {
                 let handle = app.handle().clone();
                 let seconds = std::env::var("PENGUINPAL_SMOKE_SECONDS")
@@ -1221,11 +1233,15 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
+            crate::ai_tools::companion_open_ai_tools,
+            crate::ai_tools::companion_ai_tools,
             crate::companion_chat::companion_chat,
             crate::companion_sync::companion_sync,
             companion_load,

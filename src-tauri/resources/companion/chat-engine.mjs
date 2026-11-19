@@ -109,7 +109,9 @@ let extra='context.knownFacts列出已有事实键：同一属性必须沿用已
     const mcp=Object.fromEntries(Object.keys(configResult.config?.mcp_servers??{}).map(name=>[name,{enabled:false}]))
     // ChatGPT accounts no longer accept the old gpt-5.4 default. Keep the
     // companion usable when the user has not selected a model explicitly.
-    const model=request.document?.brain?.config?.model?.trim()||'gpt-6.1-sol'
+    const activeConfig=configResult.config??{}
+    const followsCli=Boolean(activeConfig.model||(activeConfig.model_provider&&activeConfig.model_provider!=='openai'))
+    const model=request.document?.brain?.config?.model?.trim()||(followsCli?'':'gpt-6.1-sol')
     const {thread}=await rpc.request('thread/start',{ephemeral:true,cwd:request.cwd,approvalPolicy:'never',sandbox:'read-only',baseInstructions:instruction+'\n'+extra+(tone?'\n'+tone:''),developerInstructions:instruction+'\n'+extra,config:{mcp_servers:mcp},...(model?{model}:{})})
     let resolveTurn,rejectTurn
     const completed=new Promise((resolve,reject)=>{resolveTurn=resolve;rejectTurn=reject})

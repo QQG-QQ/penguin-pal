@@ -62,7 +62,7 @@ fn executable(name: &str) -> Option<PathBuf> {
         .map(|p| p.join(name))
         .find(|p| p.is_file())
 }
-fn codex() -> Result<PathBuf, String> {
+pub(crate) fn codex() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("CODEX_BIN")
         .map(PathBuf::from)
         .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "exe"))
@@ -381,6 +381,26 @@ fn learn_batch(service: &Service, view: &Value) -> Result<(), String> {
         )?;
     }
     result
+}
+
+pub(crate) fn learn_selected_session(
+    service: &Service,
+    chat: &ChatService,
+    sources: Vec<Value>,
+) -> Result<(), String> {
+    let _inference = chat.scheduler.acquire(Task::Interactive, Duration::from_secs(150))?;
+    let view = service.status()?;
+    if !social(&view)?.enabled {
+        return Err("请先在「记忆与主动陪伴」中开启记忆整理。".into());
+    }
+    let output = bridge(service, json!({
+        "action": "analysis", "document": view["document"], "sources": sources
+    }))?;
+    if !social(&service.status()?)?.enabled {
+        return Err("记忆整理已关闭。".into());
+    }
+    learn(service, &output, &sources, true)?;
+    sync_if_server(service, &view)
 }
 fn scan(service: &Service) -> Result<(), String> {
     let result = service.scan_history();

@@ -7,7 +7,7 @@ defineProps<{native:boolean;allowWorkChat:boolean}>()
 const emit=defineEmits<{changed:[SyncView,boolean];chat:[ChatView];workChat:[boolean]}>()
 const view=ref<SyncView>(),host=ref(''),port=ref(22),username=ref(''),password=ref(''),namespace=ref('my-penguin')
 const fingerprint=ref(''),known=ref(false),trusted=ref(false),busy=ref(false),error=ref(''),info=ref(''),memory=ref(''),reason=ref('')
-const preview=ref<{memories:number;conversations:number;mood:number}>()
+const preview=ref<{memories:number|null;conversations:number|null;mood:number|null;aiTools:boolean;aiToolsLocked:boolean}>()
 const archiveQuery=ref(''),archiveMessages=ref<SyncDocument['conversations']>([]),archiveOpen=ref(false)
 const sourceOf=(text:string)=>[...text.matchAll(/来源：([A-Za-z0-9_-]{1,80})/g)].pop()?.[1]
 async function searchArchive(sourceId=''){await run(async()=>{archiveOpen.value=true;archiveMessages.value=(await call('history',{query:archiveQuery.value,sourceId})).messages;if(!archiveMessages.value.length)info.value=sourceId?'本机没有这条历史原文。记忆已保留原话依据、时间和来源；较早原文可在采集电脑查找。':'没有找到匹配的已收录对话。'})}
@@ -30,8 +30,16 @@ async function action(name:string,payload:unknown=null,apply=false){await run(as
 async function install(){await run(async()=>{info.value=await invoke<string>('companion_install_hooks')})}
 async function backfill(){await run(async()=>{const result=await call('backfill');receive(result.status);info.value='已执行一轮扫描；其余历史将在后台分批继续，不受 7 天或单文件大小限制。'})}
 async function exportData(){await run(async()=>{const result=await call('export');if(!result.cancelled)info.value='已导出：'+result.path})}
-async function previewImport(){await run(async()=>{const result=await call('previewImport');if(!result.cancelled)preview.value=result})}
-async function importData(){await action('import',null,true);if(!error.value)preview.value=undefined}
+async function previewImport(){await run(async()=>{preview.value=undefined;const result=await call('previewImport');if(!result.cancelled)preview.value=result})}
+async function importData(){
+  await run(async()=>{
+    const result=await call('import')
+    receive(result, preview.value?.memories != null)
+    preview.value=undefined
+    if(result.backupWarning)error.value=result.backupWarning
+    else info.value='备份已导入。'
+  })
+}
 async function addMemory(){if(!memory.value.trim())return;await action('memory',{text:memory.value});if(!error.value)memory.value=''}
 async function mood(delta:number){await action('mood',{delta,reason:reason.value});if(!error.value)reason.value=''}
 onMounted(async()=>{
@@ -76,9 +84,14 @@ onBeforeUnmount(()=>{disposed=true;password.value='';window.clearInterval(timer)
     <input v-model="reason" maxlength="400" placeholder="记录这次心情变化的原因"/>
     <div class="buttons"><button :disabled="busy" @click="mood(5)">开心了一点</button><button :disabled="busy" @click="mood(-5)">有点低落</button></div>
     <h3>导入与导出</h3>
-    <small>备份包含宠物状态、记忆、心情和近期对话；不包含服务器连接配置、密码或设备布局。导入合并记忆和对话，并恢复心情与养成数值。本地模式恢复备份中的宠物身份，服务器模式保留服务器身份。</small>
+    <small>备份包含宠物状态、记忆、心情、近期对话和桌宠管理的 AI 工具配置。AI 工具配置经 Windows 加密，可由导出时的 Windows 用户恢复。导入会合并记录并恢复养成数值。</small>
     <div class="buttons"><button :disabled="busy" @click="exportData">导出备份</button><button :disabled="busy" @click="previewImport">选择备份导入</button></div>
-    <div v-if="preview" class="status">将导入 {{preview.memories}} 条记忆、{{preview.conversations}} 条对话，恢复心情 {{Math.round(preview.mood)}}。<div class="buttons"><button :disabled="busy" @click="importData">确认导入</button><button @click="preview=undefined">取消</button></div></div>
+    <div v-if="preview" class="status">
+      <div v-if="preview.mood != null">将导入 {{preview.memories}} 条记忆、{{preview.conversations}} 条对话，恢复心情 {{Math.round(preview.mood)}}。</div>
+      <div v-if="preview.aiTools">将合并 AI 工具供应商、项目快照和模型单价。</div>
+      <div v-if="preview.aiToolsLocked">请使用导出时的 Windows 用户恢复 AI 工具配置。本次可导入宠物数据。</div>
+      <div class="buttons"><button :disabled="busy" @click="importData">确认导入</button><button @click="preview=undefined">取消</button></div>
+    </div>
     <p v-if="busy" role="status">正在处理…</p><p v-if="info" role="status" class="status">{{info}}</p><p v-if="error" role="alert" class="error">{{error}}</p>
   </div>
 </template>

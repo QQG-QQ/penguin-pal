@@ -34,6 +34,18 @@ test('bubble reply, learning and opener use ephemeral inference and preserve sel
     assert.ok(!rpc.calls.some(x=>x.method==='thread/resume'));assert.equal(rpc.closed,true)
   }
 })
+test('bubble follows the active CLI configuration unless a companion model was explicitly chosen',async()=>{
+  for(const override of ['', 'explicit-model']){
+    const rpc=mock()
+    const request=rpc.request.bind(rpc)
+    rpc.request=(method,params)=>method==='config/read'
+      ? Promise.resolve({config:{model:'direct-provider-model',model_provider:'penguinpal-direct'}})
+      : request(method,params)
+    await run({action:'reply',sources:[source],document:{brain:{config:{model:override}}},prompt:'小鱼'}, {factory:()=>rpc})
+    const start=rpc.calls.find(x=>x.method==='thread/start').params
+    assert.equal(start.model,override||undefined)
+  }
+})
 test('read-only history import never starts or resumes a thread and excludes tools and commentary',async()=>{
   const rpc=mock();const result=await run({action:'read',threadId:'old'},{factory:()=>rpc})
   assert.deepEqual(result.messages.map(x=>x.role),['user','assistant'])

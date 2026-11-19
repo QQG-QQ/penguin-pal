@@ -10,6 +10,10 @@ interface LegacyFile{id:string;name:string;kind:string;bytes:number}
 interface UpdateInfo{status:string;currentVersion:string;latestVersion:string|null;assetName:string|null;downloadable:boolean;message:string}
 const tab=ref<'status'|'data'|'updates'|'sync'>('status'),health=ref<Health|null>(null),files=ref<LegacyFile[]>([])
 const selected=ref<string[]>([]),preview=ref(''),info=ref(''),error=ref(''),busy=ref(false),refreshing=ref(false),update=ref<UpdateInfo|null>(null),cpu=ref<number|null>(null)
+async function openAiTools(){
+  try { await invoke('companion_open_ai_tools') }
+  catch (e) { error.value=String(e) }
+}
 let timer:number|undefined,disposed=false,lastCpu:{time:number;value:number}|undefined
 const age=computed(()=>health.value?.bridge.lastReceived?new Date(health.value.bridge.lastReceived).toLocaleString():'尚未收到；配置存在不代表已获信任')
 const mib=(bytes:number|null|undefined)=>bytes==null?'未知':`${(bytes/1048576).toFixed(1)} MB`
@@ -37,7 +41,7 @@ onBeforeUnmount(()=>{disposed=true;preview.value='';window.clearInterval(timer)}
 
 <template>
   <section class="diagnostics" aria-label="企鹅设置与诊断">
-    <header><div><strong>桌宠工具箱</strong><small>Companion {{health?.version??'0.3.0'}}</small></div><button class="back" @click="emit('close')">返回</button></header>
+    <header><div><strong>桌宠工具箱</strong><small>Companion {{health?.version??'0.3.0'}}</small></div><button :disabled="!native" @click="openAiTools">AI 工具</button><button class="back" @click="emit('close')">返回</button></header>
     <nav><button v-for="item in [{id:'status',label:'状态与恢复'},{id:'sync',label:'同步与数据'},{id:'data',label:'旧资料导出'},{id:'updates',label:'软件更新'}] as const" :class="{active:tab===item.id}" @click="chooseTab(item.id)">{{item.label}}</button></nav>
     <p v-if="!native" class="note">浏览器预览。诊断与旧资料操作仅在桌面版可用。</p>
     <div v-if="tab==='status'">

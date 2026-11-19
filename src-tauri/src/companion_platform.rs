@@ -390,21 +390,23 @@ pub fn open_folder(path: &std::path::Path) -> Result<(), String> {
     }
 }
 pub fn open_releases() -> Result<(), String> {
+    open_page("https://github.com/QQG-QQ/penguin-pal/releases")
+}
+
+pub fn open_page(url: &'static str) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         std::process::Command::new("rundll32.exe")
-            .args([
-                "url.dll,FileProtocolHandler",
-                "https://github.com/QQG-QQ/penguin-pal/releases",
-            ])
+            .args(["url.dll,FileProtocolHandler", url])
             .creation_flags(0x08000000)
             .spawn()
-            .map_err(|_| "无法打开发布页")?;
+            .map_err(|_| "无法打开网页")?;
         Ok(())
     }
     #[cfg(not(windows))]
     {
+        let _ = url;
         Err("仅支持 Windows".into())
     }
 }

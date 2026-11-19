@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import type { MediaPack } from '../lib/companionMedia'
 import type { Activity, CareAction, CompanionState, Preferences } from '../lib/companionCore'
 const props = defineProps<{ state: CompanionState; status: string; connection: string; expanded: boolean; packs:MediaPack[]; native:boolean; importing:boolean; systemReduced:boolean; musicStatus:string; codexEnabled:boolean; petName?:string }>()
@@ -8,6 +9,53 @@ const emit = defineEmits<{
   preference: [Partial<Preferences>]; expand: [boolean]; snap: []; tools: []; importPack:[]; refreshPacks:[]; packFolder:[]
 }>()
 const privacy = ref(false),tab=ref<'home'|'actions'|'media'>('home'),category=ref('互动')
+interface QuickProvider { id: string; name: string; model?: string; inUse?: boolean }
+const switchOpen = ref(false), switchBusy = ref(false), switchMessage = ref('')
+const choices = ref<QuickProvider[]>([]), selectedProvider = ref('')
+const activeProvider = ref('')
+const stagedSwitch = ref<{ title: string; revision: string; id: string } | null>(null)
+function aiRequest<T>(action: string, fields: Record<string, unknown> = {}) {
+  return invoke<T>('companion_ai_tools', { request: { action, client: 'codex', ...fields } })
+}
+async function switching(work: () => Promise<void>) {
+  if (switchBusy.value) return
+  switchBusy.value = true
+  switchMessage.value = ''
+  try { await work() } catch (e) { switchMessage.value = String(e) }
+  finally { switchBusy.value = false }
+}
+async function openSwitch() {
+  switchOpen.value = !switchOpen.value
+  stagedSwitch.value = null
+  if (!switchOpen.value) return
+  await switching(loadChoices)
+}
+async function loadChoices() {
+  const result = await aiRequest<{ providers: QuickProvider[] }>('quickProviders')
+  choices.value = result.providers
+  activeProvider.value = result.providers.find(item => item.inUse)?.name ?? ''
+  if (!choices.value.some(item => item.id === selectedProvider.value && !item.inUse)) selectedProvider.value = ''
+}
+function previewSwitch() {
+  void switching(async () => {
+    const id = selectedProvider.value
+    const preview = await aiRequest<{ title: string; revision: string; files: string[] }>('preview', {
+      operation: { kind: 'provider', id },
+    })
+    if (!preview.files.length) { switchMessage.value = '该配置已生效。'; return }
+    stagedSwitch.value = { ...preview, id }
+  })
+}
+function confirmSwitch() {
+  const plan = stagedSwitch.value
+  if (!plan) return
+  stagedSwitch.value = null
+  void switching(async () => {
+    await aiRequest('apply', { operation: { kind: 'provider', id: plan.id }, revision: plan.revision })
+    await loadChoices()
+    switchMessage.value = '已切换，下一次启动的 Codex 会读取新配置。'
+  })
+}
 function showTab(value:'home'|'actions'|'media'){tab.value=value;emit('expand',value!=='home')}
 const actions:{group:string;label:string;activity?:Activity;care?:CareAction;performance?:string}[]=[
   {group:'互动',label:'挥手',activity:'greet'},{group:'互动',label:'开心',activity:'happy'},{group:'互动',label:'摸摸',care:'pat'},{group:'互动',label:'戳戳',care:'poke'},{group:'互动',label:'尾巴',care:'tail'},{group:'互动',label:'随机表演',activity:'perform'},{group:'互动',label:'全息终端',performance:'holo-terminal'},{group:'互动',label:'跃起',performance:'jump-boost'},
@@ -44,6 +92,22 @@ const toggles: { key: keyof Preferences; label: string }[] = [
         :class="{ selected: props.state.preferences.movement === mode }" :aria-pressed="props.state.preferences.movement === mode" @click="movement(mode)">{{ label }}</button>
     </div>
     <div class="panel-footer"><button @click="emit('expand', !expanded)">{{ expanded ? '收起设置' : '更多设置' }}</button><button @click="emit('tools')">工具箱</button><button v-if="codexEnabled" @click="emit('codex')">Codex ↗</button><button @click="emit('hide')">隐藏</button></div>
+    <button v-if="native" class="install" :disabled="switchBusy" @click="openSwitch">切换 Codex 供应商</button>
+    <div v-if="switchOpen" class="switcher">
+      <small v-if="activeProvider" aria-live="polite">使用中 · {{ activeProvider }}</small>
+      <template v-if="stagedSwitch">
+        <small>{{ stagedSwitch.title }}</small>
+        <div class="mini-actions"><button @click="stagedSwitch = null">取消</button><button @click="confirmSwitch">备份并切换</button></div>
+      </template>
+      <template v-else>
+        <select v-model="selectedProvider" :disabled="switchBusy" aria-label="已有 Codex 供应商">
+          <option value="" disabled>选择已有配置</option>
+          <option v-for="item in choices" :key="item.id" :value="item.id" :disabled="item.inUse">{{ item.name }}{{ item.model ? ' · ' + item.model : '' }}{{ item.inUse ? ' · 使用中' : '' }}</option>
+        </select>
+        <button class="install" :disabled="switchBusy || !selectedProvider" @click="previewSwitch">预览切换</button>
+      </template>
+      <small v-if="switchMessage" role="status">{{ switchMessage }}</small>
+    </div>
     <div class="rule"></div><label class="bridge-toggle"><input id="music-mode" type="checkbox" :checked="state.preferences.musicMode!=='off'" @change="patch({musicMode:($event.target as HTMLInputElement).checked?'audio':'off'})" />音乐打碟 · 双彩灯</label>
     <small role="status">{{musicStatus}}</small><small>关闭面板后，自动跟随播放器和浏览器的声音律动；暂停或静音后停止。持续人声、游戏声音也可能触发。</small>
     <div v-if="expanded" class="advanced">

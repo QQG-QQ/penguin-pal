@@ -2537,7 +2537,7 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "penguin-pal"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2551,6 +2551,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "ssh2",
  "tauri",
@@ -2562,9 +2563,12 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.2",
+ "toml_edit 0.25.4+spec-1.1.0",
  "uuid",
  "whisper-rs",
  "windows 0.61.3",
+ "winreg 0.55.0",
+ "zstd",
 ]
 
 [[package]]
@@ -3619,6 +3623,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap 2.13.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "serialize-to-javascript"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4568,6 +4585,7 @@ dependencies = [
  "indexmap 2.13.0",
  "toml_datetime 1.0.0+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 0.7.15",
 ]
 
@@ -4748,6 +4766,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
@@ -5912,3 +5936,31 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50adf04cf3ec914b0b9905c9dde90c80fe74bfd701e331fc80a39c512c525278"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498d94ad68720c89b4fbe41b9090850651e68cb2dd9210ce7ffbff3a94653819"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.3+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f729a06d0257428fd9d997ac8db7e1407bd0262ab016b085b36bc52957c0052d"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
