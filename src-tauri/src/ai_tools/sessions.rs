@@ -1039,6 +1039,7 @@ fn usage_file(client: Client, path: &Path, is_child: bool) -> Result<Vec<UsageEn
     let mut model = "未知模型".to_owned();
     let mut provider = None;
     let mut previous: Option<Tokens> = None;
+    let mut codex_meta = None;
     let mut entries = Vec::new();
     let mut assistant: HashMap<String, usize> = HashMap::new();
     let number = |v: &Value| v.as_u64().unwrap_or(0);
@@ -1051,6 +1052,13 @@ fn usage_file(client: Client, path: &Path, is_child: bool) -> Result<Vec<UsageEn
         let (id, model, provider, time, mut tokens) = match client {
             Client::Codex => {
                 let p = &record["payload"];
+                if record["type"] == "session_meta" && codex_meta.is_none() {
+                    // Forks may contain the parent's metadata after their own.
+                    codex_meta = Some((
+                        nonempty(&p["forked_from_id"]).is_some(),
+                        timestamp(&record["timestamp"]),
+                    ));
+                }
                 if let Some(name) = nonempty(&p["model"]) {
                     model = name.chars().take(120).collect();
                 }
@@ -1058,6 +1066,15 @@ fn usage_file(client: Client, path: &Path, is_child: bool) -> Result<Vec<UsageEn
                     provider = Some(name.chars().take(120).collect::<String>());
                 }
                 if p["type"] != "token_count" {
+                    return;
+                }
+                let time = timestamp(&record["timestamp"]);
+                let (is_fork, created_at) = codex_meta.unwrap_or_default();
+                if is_fork
+                    && time
+                        .zip(created_at)
+                        .is_some_and(|(time, created)| time < created)
+                {
                     return;
                 }
                 let info = &p["info"];
@@ -1070,7 +1087,8 @@ fn usage_file(client: Client, path: &Path, is_child: bool) -> Result<Vec<UsageEn
                     let last = codex_tokens(&info["last_token_usage"]);
                     if let Some(before) = baseline {
                         total.delta(&before)
-                    } else if is_child && last != Tokens::default() {
+                    } else if is_fork || (is_child && last != Tokens::default()) {
+                        // The first cumulative total can include the parent's usage.
                         last
                     } else {
                         total
@@ -1082,7 +1100,7 @@ fn usage_file(client: Client, path: &Path, is_child: bool) -> Result<Vec<UsageEn
                     None,
                     Some(model.as_str()),
                     provider.as_deref(),
-                    timestamp(&record["timestamp"]),
+                    time,
                     tokens,
                 )
             }
@@ -1253,6 +1271,7 @@ fn usage_file(client: Client, path: &Path, is_child: bool) -> Result<Vec<UsageEn
                 client != Client::Codex
                     || [
                         b"\"token_count\"".as_slice(),
+                        b"\"session_meta\"",
                         b"\"model\"",
                         b"\"model_provider\"",
                     ]
@@ -1383,6 +1402,62 @@ mod tests {
         assert_eq!(rows[1].tokens.input - rows[1].tokens.cached, 10);
         assert_eq!(rows[1].tokens.output, 5);
         assert_eq!(rows[1].time.unwrap() - rows[0].time.unwrap(), 3_600_000);
+    }
+
+    #[test]
+    fn codex_forks_exclude_inherited_token_usage() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("rollout-fork.jsonl");
+        let usage = |input, output, cached| json!({"input_tokens": input, "output_tokens": output, "cached_input_tokens": cached});
+        let request = |timestamp: &str, total: Value, last: Value| {
+            json!({"type": "event_msg", "timestamp": timestamp, "payload": {
+                "type": "token_count", "info": {"total_token_usage": total, "last_token_usage": last}
+            }})
+        };
+        let first = request(
+            "2026-11-20T02:01:00Z",
+            usage(10_100, 1_005, 9_080),
+            usage(100, 5, 80),
+        );
+        let later = request(
+            "2026-11-20T02:02:00Z",
+            usage(10_170, 1_008, 9_130),
+            usage(70, 3, 50),
+        );
+        let inherited = request(
+            "2026-11-20T01:00:00Z",
+            usage(9_900, 995, 8_950),
+            usage(60, 3, 50),
+        );
+        let lines = [
+            json!({"type": "session_meta", "timestamp": "2026-11-20T02:00:00Z", "payload": {"forked_from_id": "parent"}}),
+            json!({"type": "session_meta", "timestamp": "2026-11-19T00:00:00Z", "payload": {}}),
+            inherited,
+            first.clone(),
+            first,
+            later,
+        ];
+        fs::write(&path, lines.map(|row| row.to_string()).join("\n")).unwrap();
+
+        let rows = usage_file(Client::Codex, &path, false).unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (
+                rows[0].tokens.input,
+                rows[0].tokens.output,
+                rows[0].tokens.cached
+            ),
+            (100, 5, 80)
+        );
+        assert_eq!(
+            (
+                rows[1].tokens.input,
+                rows[1].tokens.output,
+                rows[1].tokens.cached
+            ),
+            (70, 3, 50)
+        );
     }
 
     #[test]
