@@ -12,6 +12,8 @@ type Client = string
 type Page = 'tools' | 'accounts' | 'extensions' | 'projects' | 'sessions' | 'usage' | 'backups'
 
 interface Provider { id: string; name: string; official: boolean; model?: string; host?: string; inUse?: boolean; modelChoice?: boolean; savedDirect?: boolean; installed?: boolean }
+interface QuotaWindow { remainingPercent: number; resetsAt: number | null }
+interface CodexQuota { fiveHours: QuotaWindow | null; weekly: QuotaWindow | null }
 interface ClientView {
   id: Client; label: string; config: string; current: Provider | null
   error: string | null; providers: Provider[]; executable?: string | null
@@ -72,6 +74,13 @@ const addingConnection = ref<'options' | 'relay' | 'official' | null>(null)
 const direct = ref<{ name: string; endpoint: string; model: string; key: string } | null>(null)
 const directModelEditor = ref<{ id: string; model: string } | null>(null)
 const accountStatus = ref<AccountStatus | null>(null)
+const codexQuota = ref<CodexQuota | null>(null)
+const quotaPercent = new Intl.NumberFormat('zh-CN', { style: 'percent', maximumFractionDigits: 1 })
+const quotaTime = new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', hourCycle: 'h23' })
+const quotaWindows = computed(() => [
+  { title: '5 小时', window: codexQuota.value?.fiveHours },
+  { title: '每周', window: codexQuota.value?.weekly },
+])
 type McpDefinition = { type: 'stdio' | 'http' | 'sse'; command?: string; url?: string; args?: string[]; cwd?: string }
 const mcpEditor = ref<{ name: string; definition?: McpDefinition; preservesPrivateFields?: boolean } | null>(null)
 const skillPicker = ref(false)
@@ -147,6 +156,7 @@ async function loadPage() {
 function focusPage(next: Page) {
   void task(async () => {
     page.value = next
+    if (next !== 'tools') codexQuota.value = null
     closeConnectionEditor()
     mcpEditor.value = null
     skillPicker.value = false
@@ -159,6 +169,7 @@ function focusClient(next: Client) {
     client.value = next
     closeConnectionEditor()
     accountStatus.value = null
+    codexQuota.value = null
     showAllApps.value = false
     query.value = ''
     history.value = []
@@ -310,10 +321,23 @@ function selectAccount(account: Account) {
       button: '切换账号',
       execute: async () => {
         accountStatus.value = await request<AccountStatus>('applyAccount', { client: app, id: account.id, revision: preview.revision })
+        if (app === 'codex') codexQuota.value = null
         notice.value = '账号已切换。可在「配置回滚」中恢复。'
       },
     }
   })
+}
+
+function readCodexQuota() {
+  void task(async () => {
+    codexQuota.value = null
+    codexQuota.value = await request<CodexQuota>('readCodexQuota')
+  })
+}
+
+function quotaResetTime(seconds: number | null) {
+  const date = new Date((seconds ?? NaN) * 1000)
+  return Number.isFinite(date.getTime()) ? '重置于 ' + quotaTime.format(date) : '重置时间暂未提供'
 }
 
 function removeAccount(account: Account) {
@@ -595,10 +619,25 @@ onMounted(refresh)
               <div v-if="!detail.provider.managedByClient || item.modelChoice || item.inUse || item.savedDirect" class="actions">
                 <span v-if="item.inUse" class="active-label" title="已写入当前客户端配置"><i aria-hidden="true"></i>使用中</span>
                 <span v-if="item.installed" class="muted">已写入模型列表</span>
+                <button v-if="client === 'codex' && item.official" type="button" :disabled="busy"
+                  :aria-expanded="!!codexQuota" aria-controls="codex-quota" @click="readCodexQuota">{{ codexQuota ? '刷新额度' : '查看额度' }}</button>
                 <button v-if="!detail.provider.managedByClient || item.savedDirect" :disabled="busy" @click="check(item, item.inUse && !item.savedDirect)">检查</button>
                 <button v-if="item.savedDirect && !item.model && !item.inUse && !item.installed" type="button" :disabled="busy"
                   @click="directModelEditor = { id: item.id, model: '' }">补充模型 ID</button>
                 <button v-if="!item.inUse && !item.installed" class="primary" :disabled="busy" @click="apply({ kind: item.modelChoice ? 'nativeModel' : 'provider', id: item.id })">{{ item.official ? '切回官方' : ['workbuddy', 'omp'].includes(client) ? '写入模型' : '切换' }}</button>
+              </div>
+            </div>
+            <div v-if="client === 'codex' && item.official && codexQuota" id="codex-quota" class="codex-quota" aria-live="polite">
+              <div v-for="entry in quotaWindows" :key="entry.title" class="quota-window">
+                <div class="spread">
+                  <strong>{{ entry.title }}</strong>
+                  <span v-if="entry.window">剩余 {{ quotaPercent.format(entry.window.remainingPercent / 100) }}</span>
+                </div>
+                <template v-if="entry.window">
+                  <progress :value="entry.window.remainingPercent" max="100" :aria-label="entry.title + '剩余额度'" />
+                  <small>{{ quotaResetTime(entry.window.resetsAt) }}</small>
+                </template>
+                <small v-else>官方账号暂未返回此额度</small>
               </div>
             </div>
             <form v-if="directModelEditor && directModelEditor.id === item.id" class="inline-form relay-model-form" @submit.prevent="saveDirectModel">
@@ -793,6 +832,10 @@ small{display:block;color:#526579;overflow-wrap:anywhere;margin-top:4px}
 .provider-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid #dce6ed;border-radius:9px;margin:8px 0}
 .provider-row.in-use{background:#edf7ff;border-color:#6a9fbd}
 .provider-row > div:first-child{min-width:0;overflow-wrap:anywhere}
+.codex-quota{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0 0 12px}
+.quota-window{padding:10px 12px;background:#edf7ff;border:1px solid #dce6ed;border-radius:9px}
+.quota-window span{color:#215d7f;font-weight:650}
+.quota-window progress{display:block;width:100%;height:8px;margin:8px 0 6px;accent-color:#2877a4}
 .active-label{display:inline-flex;gap:6px;align-items:center;color:#215d7f;font-weight:650;white-space:nowrap}
 .active-label i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#2877a4}
 .actions{gap:7px;flex-wrap:wrap;justify-content:flex-end}

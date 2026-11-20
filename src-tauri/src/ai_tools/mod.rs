@@ -1,5 +1,6 @@
 mod accounts;
 mod codex_models;
+mod codex_quota;
 mod extensions;
 mod mcp_yaml;
 mod native_models;
@@ -250,6 +251,7 @@ enum Request {
         operation: Operation,
     },
     RefreshCodexModels,
+    ReadCodexQuota,
     AccountStatus {
         client: Client,
     },
@@ -1020,6 +1022,12 @@ pub(crate) async fn companion_ai_tools(
     let service = service.inner().clone();
     let chat = chat.inner().clone();
 
+    if matches!(&request, Request::ReadCodexQuota) {
+        let user = user_home(&app)?;
+        return tauri::async_runtime::spawn_blocking(move || Ok(json!(codex_quota::read(&user)?)))
+            .await
+            .map_err(|_| "官方额度查询中断。")?;
+    }
     if matches!(&request, Request::RefreshCodexModels) {
         let user = user_home(&app)?;
         let config = Client::Codex.config(&user);
