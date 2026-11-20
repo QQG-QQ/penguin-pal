@@ -167,6 +167,13 @@ function focusClient(next: Client) {
 }
 
 async function prepare(operation: Operation) {
+  if (operation.kind === 'provider' || operation.kind === 'nativeModel') {
+    const result = await request<{ changed: boolean }>('switch', { client: client.value, operation })
+    await overview()
+    await loadPage()
+    notice.value = result.changed ? '已更新客户端配置。' : '此配置已经生效。'
+    return
+  }
   const app = client.value
   const preview = await request<{ title: string; files: string[]; revision: string; summary: string[] }>('preview', { client: app, operation })
   if (!preview.files.length) {
@@ -185,7 +192,7 @@ async function prepare(operation: Operation) {
       await loadPage()
       if (operation.kind === 'mcp') mcpEditor.value = null
       if (operation.kind === 'importSkills') skillPicker.value = false
-      notice.value = operation.kind === 'provider' || operation.kind === 'profile' || operation.kind === 'nativeModel'
+      notice.value = operation.kind === 'profile'
         ? '配置已应用。正在运行的客户端会话可能需要重开才能读取新配置。'
         : '配置已保存。可在「配置回滚」中撤销。'
     },
@@ -486,7 +493,7 @@ onMounted(refresh)
             <div class="actions"><button type="button" :disabled="busy" @click="direct = null">取消</button><button class="primary" :disabled="busy">保存中转</button></div>
           </form>
           <div v-for="item in detail.provider.providers" :key="item.id" class="provider-row" :class="{ 'in-use': item.inUse }">
-            <div><strong>{{ item.name }}</strong><small>{{ [item.model, item.host].filter(Boolean).join(' · ') || (item.official ? '使用客户端的官方登录' : '沿用客户端默认连接') }}</small></div>
+            <div><strong>{{ item.name }}</strong><small>{{ [(item.inUse || item.modelChoice || ['workbuddy', 'omp'].includes(client)) ? item.model : '', item.host].filter(Boolean).join(' · ') || (item.official ? '使用客户端的官方登录' : '沿用客户端默认连接') }}</small></div>
             <div v-if="!detail.provider.managedByClient || item.modelChoice || item.inUse || item.savedDirect" class="actions">
               <span v-if="item.inUse" class="active-label" title="已写入当前客户端配置"><i aria-hidden="true"></i>使用中</span>
               <span v-if="item.installed" class="muted">已写入模型列表</span>

@@ -13,7 +13,6 @@ interface QuickProvider { id: string; name: string; model?: string; inUse?: bool
 const switchOpen = ref(false), switchBusy = ref(false), switchMessage = ref('')
 const choices = ref<QuickProvider[]>([]), selectedProvider = ref('')
 const activeProvider = ref('')
-const stagedSwitch = ref<{ title: string; revision: string; id: string } | null>(null)
 function aiRequest<T>(action: string, fields: Record<string, unknown> = {}) {
   return invoke<T>('companion_ai_tools', { request: { action, client: 'codex', ...fields } })
 }
@@ -26,7 +25,6 @@ async function switching(work: () => Promise<void>) {
 }
 async function openSwitch() {
   switchOpen.value = !switchOpen.value
-  stagedSwitch.value = null
   if (!switchOpen.value) return
   await switching(loadChoices)
 }
@@ -36,24 +34,13 @@ async function loadChoices() {
   activeProvider.value = result.providers.find(item => item.inUse)?.name ?? ''
   if (!choices.value.some(item => item.id === selectedProvider.value && !item.inUse)) selectedProvider.value = ''
 }
-function previewSwitch() {
+function switchProvider() {
   void switching(async () => {
-    const id = selectedProvider.value
-    const preview = await aiRequest<{ title: string; revision: string; files: string[] }>('preview', {
-      operation: { kind: 'provider', id },
+    const result = await aiRequest<{ changed: boolean }>('switch', {
+      operation: { kind: 'provider', id: selectedProvider.value },
     })
-    if (!preview.files.length) { switchMessage.value = '该配置已生效。'; return }
-    stagedSwitch.value = { ...preview, id }
-  })
-}
-function confirmSwitch() {
-  const plan = stagedSwitch.value
-  if (!plan) return
-  stagedSwitch.value = null
-  void switching(async () => {
-    await aiRequest('apply', { operation: { kind: 'provider', id: plan.id }, revision: plan.revision })
     await loadChoices()
-    switchMessage.value = '已切换，下一次启动的 Codex 会读取新配置。'
+    switchMessage.value = result.changed ? '已更新 Codex 配置。' : '此配置已经生效。'
   })
 }
 function showTab(value:'home'|'actions'|'media'){tab.value=value;emit('expand',value!=='home')}
@@ -95,17 +82,11 @@ const toggles: { key: keyof Preferences; label: string }[] = [
     <button v-if="native" class="install" :disabled="switchBusy" @click="openSwitch">切换 Codex 供应商</button>
     <div v-if="switchOpen" class="switcher">
       <small v-if="activeProvider" aria-live="polite">使用中 · {{ activeProvider }}</small>
-      <template v-if="stagedSwitch">
-        <small>{{ stagedSwitch.title }}</small>
-        <div class="mini-actions"><button @click="stagedSwitch = null">取消</button><button @click="confirmSwitch">备份并切换</button></div>
-      </template>
-      <template v-else>
-        <select v-model="selectedProvider" :disabled="switchBusy" aria-label="已有 Codex 供应商">
-          <option value="" disabled>选择已有配置</option>
-          <option v-for="item in choices" :key="item.id" :value="item.id" :disabled="item.inUse">{{ item.name }}{{ item.model ? ' · ' + item.model : '' }}{{ item.inUse ? ' · 使用中' : '' }}</option>
-        </select>
-        <button class="install" :disabled="switchBusy || !selectedProvider" @click="previewSwitch">预览切换</button>
-      </template>
+      <select v-model="selectedProvider" :disabled="switchBusy" aria-label="已有 Codex 供应商">
+        <option value="" disabled>选择已有配置</option>
+        <option v-for="item in choices" :key="item.id" :value="item.id" :disabled="item.inUse">{{ item.name }}{{ item.inUse && item.model ? ' · ' + item.model : '' }}{{ item.inUse ? ' · 使用中' : '' }}</option>
+      </select>
+      <button class="install" :disabled="switchBusy || !selectedProvider" @click="switchProvider">切换</button>
       <small v-if="switchMessage" role="status">{{ switchMessage }}</small>
     </div>
     <div class="rule"></div><label class="bridge-toggle"><input id="music-mode" type="checkbox" :checked="state.preferences.musicMode!=='off'" @change="patch({musicMode:($event.target as HTMLInputElement).checked?'audio':'off'})" />音乐打碟 · 双彩灯</label>

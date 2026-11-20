@@ -163,20 +163,14 @@ fn use_catalog(doc: &mut DocumentMut, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn switch_plan(
-    user: &Path,
-    provider: &Provider,
-    discovery: Option<&Discovery>,
-) -> Result<Vec<Change>, String> {
+pub(super) fn switch_plan(user: &Path, provider: &Provider) -> Result<Vec<Change>, String> {
     let mut changes = provider.plan(user)?;
     let config = changes.last_mut().ok_or("未找到 Codex 配置修改。")?;
     let home = Client::Codex.home(user);
     let live = toml(config.before.as_deref())?;
     let mut next = toml(config.after.as_deref())?;
     let source = source_for(provider)?;
-    let discovered = discovery.filter(|result| source.as_ref() == Some(&result.source));
     // A provider's saved model only supplies an initial default for a fresh configuration.
-    // A discovery result can be incomplete and must never change an existing selection.
     let reference = item_text(&live, CATALOG_KEY);
     if live.contains_key("model") || !reference.is_empty() {
         copy_fields(&mut next, &live, &MODEL_FIELDS);
@@ -185,40 +179,22 @@ pub(super) fn switch_plan(
     }
 
     let managed = is_managed(&home, reference);
-    let mut catalog = None;
     if reference.is_empty() || managed {
-        if let Some(discovered) = discovered {
-            (catalog, _) = cache_catalog(&home, discovered, item_text(&next, "model"))?;
-        }
-        if let Some(change) = &catalog {
-            use_catalog(&mut next, &change.path)?;
-        } else if let Some(path) = source
-            .as_deref()
-            .map(|source| managed_path(&home, source))
-            .filter(|path| {
-                let selected = item_text(&next, "model");
-                metadata(path).any(|entry| {
-                    entry["slug"]
-                        .as_str()
-                        .is_some_and(|slug| selected.is_empty() || slug == selected)
-                })
+        let target_catalog = source.as_deref().map(|source| managed_path(&home, source));
+        if let Some(path) = target_catalog.as_deref().filter(|path| {
+            let selected = item_text(&next, "model");
+            metadata(path).any(|entry| {
+                entry["slug"]
+                    .as_str()
+                    .is_some_and(|slug| selected.is_empty() || slug == selected)
             })
-        {
-            use_catalog(&mut next, &path)?;
-        } else if managed
-            && source
-                .as_deref()
-                .map(|source| managed_path(&home, source))
-                .as_deref()
-                != Some(Path::new(reference))
-        {
+        }) {
+            use_catalog(&mut next, path)?;
+        } else if managed && target_catalog.as_deref() != Some(Path::new(reference)) {
             next.remove(CATALOG_KEY);
         }
     }
     config.after = Some(next.to_string().into_bytes());
-    if let Some(catalog) = catalog {
-        changes.insert(0, catalog);
-    }
     Ok(changes)
 }
 
@@ -312,7 +288,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovery_prefers_live_selection_and_preserves_manual_catalog() {
+    fn switching_prefers_live_selection_and_preserves_manual_catalog() {
         let temp = tempfile::tempdir().unwrap();
         let user = temp.path();
         let path = Client::Codex.config(user);
@@ -327,27 +303,11 @@ mod tests {
             "saved-v1",
         )
         .unwrap();
-        let source = source_for(&provider).unwrap().unwrap();
-        let ids = model_ids(&json!({"data":[{"id":"live-v2"},{"id":"saved-v1"}]})).unwrap();
-        for discovery in [
-            None,
-            Some(Discovery {
-                source: source.clone(),
-                ids,
-            }),
-        ] {
-            let next = switch_plan(user, &provider, discovery.as_ref()).unwrap();
-            let doc = toml(next.last().unwrap().after.as_deref()).unwrap();
-            assert_eq!(doc["model"].as_str(), Some("live-v2"));
-            assert_eq!(doc["model_reasoning_effort"].as_str(), Some("high"));
-            assert_eq!(doc["model_catalog_json"].as_str(), Some("custom.json"));
-        }
-        let ids = model_ids(&json!({"models":[{"slug":"saved-v1"}]})).unwrap();
-        let next = switch_plan(user, &provider, Some(&Discovery { source, ids })).unwrap();
-        assert_eq!(
-            toml(next.last().unwrap().after.as_deref()).unwrap()["model"].as_str(),
-            Some("live-v2")
-        );
+        let next = switch_plan(user, &provider).unwrap();
+        let doc = toml(next.last().unwrap().after.as_deref()).unwrap();
+        assert_eq!(doc["model"].as_str(), Some("live-v2"));
+        assert_eq!(doc["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(doc["model_catalog_json"].as_str(), Some("custom.json"));
         assert!(model_ids(&json!({"data":[]})).is_err());
     }
 
@@ -453,7 +413,7 @@ mod tests {
         let mut doc = DocumentMut::new();
         use_catalog(&mut doc, &local).unwrap();
         std::fs::write(&config, doc.to_string()).unwrap();
-        let next = switch_plan(user, &provider, None).unwrap();
+        let next = switch_plan(user, &provider).unwrap();
         assert!(toml(next.last().unwrap().after.as_deref())
             .unwrap()
             .get("model_catalog_json")

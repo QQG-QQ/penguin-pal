@@ -937,18 +937,36 @@ pub(super) fn current(client: Client, user: &Path) -> Result<Provider, String> {
     Ok(provider)
 }
 
-pub(super) fn original(client: Client, user: &Path) -> Option<Provider> {
-    if !client.manages_config() {
-        return None;
-    }
-    if !client.config(user).is_file() {
+fn same_connection(live: &ConnectionInfo, saved: &ConnectionInfo) -> bool {
+    !live.endpoint.is_empty()
+        && live.endpoint.trim_end_matches('/') == saved.endpoint.trim_end_matches('/')
+        && live.key == saved.key
+        && live.uses_auth_header == saved.uses_auth_header
+}
+
+const ORIGINAL_ID: &str = "original-local";
+
+pub(super) fn original(client: Client, user: &Path, known: &[Provider]) -> Option<Provider> {
+    if !client.manages_config()
+        || !client.config(user).is_file()
+        || known
+            .iter()
+            .any(|p| p.client == client && p.id == ORIGINAL_ID)
+    {
         return None;
     }
     let mut provider = current(client, user).ok()?;
     if provider.official || provider.switchable().is_err() {
         return None;
     }
-    provider.id = "original-local".into();
+    let info = provider.info().ok()?;
+    if known
+        .iter()
+        .any(|p| p.client == client && p.info().is_ok_and(|saved| same_connection(&info, &saved)))
+    {
+        return None;
+    }
+    provider.id = ORIGINAL_ID.into();
     provider.name = "本机原配置".into();
     Some(provider)
 }
@@ -984,6 +1002,18 @@ pub(super) fn list_for(client: Client, user: &Path, imported: &[Provider]) -> Va
     let available: Vec<_> = imported
         .iter()
         .filter(|provider| provider.client == client)
+        .filter(|provider| {
+            provider.id != ORIGINAL_ID
+                || !provider.info().is_ok_and(|original| {
+                    imported.iter().any(|saved| {
+                        saved.client == client
+                            && saved.id != ORIGINAL_ID
+                            && saved
+                                .info()
+                                .is_ok_and(|info| same_connection(&original, &info))
+                    })
+                })
+        })
         .collect();
     let mut choices = vec![official.view()];
     choices.extend(available.iter().map(|provider| provider.view()));
@@ -1121,6 +1151,55 @@ pub(super) fn find(id: &str, client: Client, imported: &[Provider]) -> Result<Pr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_relay_is_hidden_only_when_a_saved_relay_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let user = temp.path();
+        let path = Client::Codex.config(user);
+        assert!(path.starts_with(user));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let saved = Provider::new_direct(
+            Client::Codex,
+            "Saved relay",
+            "https://fixture.example/v1",
+            "fixture-key",
+            "old-model",
+        )
+        .unwrap();
+        let live = Provider::new_direct(
+            Client::Codex,
+            "Live relay",
+            "https://fixture.example/v1",
+            "fixture-key",
+            "live-model",
+        )
+        .unwrap();
+        let write_live = |provider: &Provider| {
+            let changes = provider.plan(user).unwrap();
+            std::fs::write(&path, changes[0].after.as_ref().unwrap()).unwrap();
+        };
+        write_live(&live);
+        let original = original(Client::Codex, user, &[]).unwrap();
+        assert!(super::original(Client::Codex, user, std::slice::from_ref(&saved)).is_none());
+
+        let list = list_for(Client::Codex, user, &[saved.clone(), original.clone()]);
+        assert_eq!(list["providers"].as_array().unwrap().len(), 2);
+        assert_eq!(list["current"]["name"], "Saved relay");
+        assert_eq!(list["current"]["model"], "live-model");
+
+        let other_key = Provider::new_direct(
+            Client::Codex,
+            "Other account",
+            "https://fixture.example/v1",
+            "other-fixture-key",
+            "old-model",
+        )
+        .unwrap();
+        let list = list_for(Client::Codex, user, &[other_key, original]);
+        assert_eq!(list["providers"].as_array().unwrap().len(), 3);
+        assert_eq!(list["current"]["name"], "本机原配置");
+    }
 
     #[test]
     fn provider_checks_skip_anonymous_requests() {

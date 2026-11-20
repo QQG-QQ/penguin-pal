@@ -48,7 +48,6 @@ impl AiTools {
 struct WindowState {
     skill_source: Option<PathBuf>,
     sessions: HashMap<String, Session>,
-    discovered_codex_models: Option<codex_models::Discovery>,
 }
 
 impl AiTools {
@@ -62,14 +61,8 @@ impl AiTools {
         let mut settings: Settings =
             load_private(&self.root.join("settings.bin"))?.unwrap_or_default();
         for client in Client::ALL {
-            if !settings
-                .providers
-                .iter()
-                .any(|provider| provider.client == client && provider.id == "original-local")
-            {
-                if let Some(provider) = providers::original(client, user) {
-                    settings.providers.push(provider);
-                }
+            if let Some(provider) = providers::original(client, user, &settings.providers) {
+                settings.providers.push(provider);
             }
         }
         if settings.providers.is_empty() && settings.profiles.is_empty() {
@@ -231,6 +224,10 @@ enum Operation {
 enum Request {
     Overview,
     QuickProviders,
+    Switch {
+        client: Client,
+        operation: Operation,
+    },
     RefreshCodexModels,
     AccountStatus {
         client: Client,
@@ -388,11 +385,7 @@ fn plan(
             (
                 format!("{} · 切换到 {}", client.label(), provider.name),
                 if client == Client::Codex {
-                    codex_models::switch_plan(
-                        user,
-                        &provider,
-                        state.discovered_codex_models.as_ref(),
-                    )?
+                    codex_models::switch_plan(user, &provider)?
                 } else {
                     provider.plan(user)?
                 },
@@ -789,11 +782,23 @@ fn perform(
                 "revision":storage::revision(&changes), "summary":summary(&operation, client, &user, &settings, &changes)}),
             )
         }
-        Request::Apply {
-            client,
-            operation,
-            revision,
-        } => {
+        Request::Apply { .. } | Request::Switch { .. } => {
+            let (client, operation, revision) = match request {
+                Request::Apply {
+                    client,
+                    operation,
+                    revision,
+                } => (client, operation, Some(revision)),
+                Request::Switch { client, operation }
+                    if matches!(
+                        operation,
+                        Operation::Provider { .. } | Operation::NativeModel { .. }
+                    ) =>
+                {
+                    (client, operation, None)
+                }
+                _ => return Err("此操作需要预览。".into()),
+            };
             let (title, changes) = plan(
                 &operation,
                 client,
@@ -802,7 +807,7 @@ fn perform(
                 &state,
                 &root.join("skills"),
             )?;
-            if revision != storage::revision(&changes) {
+            if revision.is_some_and(|revision| revision != storage::revision(&changes)) {
                 return Err("配置自预览后发生变化，请重新预览。".into());
             }
             if !changes.is_empty()
@@ -810,18 +815,14 @@ fn perform(
                     operation,
                     Operation::Provider { .. } | Operation::Profile { .. }
                 )
-                && !settings
-                    .providers
-                    .iter()
-                    .any(|p| p.client == client && p.id == "original-local")
             {
-                if let Some(original) = providers::original(client, &user) {
+                if let Some(original) = providers::original(client, &user, &settings.providers) {
                     settings.providers.push(original);
                     save_private(&settings_path, &settings)?;
                 }
             }
             let backup = storage::commit(root, &title, changes)?;
-            Ok(json!({"backup": backup}))
+            Ok(json!({"changed": backup.is_some(), "backup": backup}))
         }
         Request::SaveProfile { client, name } => {
             let name = name.trim();
@@ -886,14 +887,9 @@ pub(crate) async fn companion_ai_tools(
         && matches!(
             &request,
             Request::QuickProviders
-                | Request::Preview {
+                | Request::Switch {
                     client: Client::Codex,
                     operation: Operation::Provider { .. }
-                }
-                | Request::Apply {
-                    client: Client::Codex,
-                    operation: Operation::Provider { .. },
-                    ..
                 }
         );
     if window.label() != WINDOW && !quick {
@@ -918,21 +914,6 @@ pub(crate) async fn companion_ai_tools(
         })
         .await
         .map_err(|_| "模型刷新中断。")?;
-    }
-    if let Request::Preview {
-        client: Client::Codex,
-        operation: Operation::Provider { id },
-    } = &request
-    {
-        let settings: Settings =
-            load_private(&manager.root.join("settings.bin"))?.unwrap_or_default();
-        let provider = providers::find(id, Client::Codex, &settings.providers)?;
-        let discovered = codex_models::discover(&provider).await.ok();
-        manager
-            .state
-            .lock()
-            .map_err(|_| "AI 工具状态忙。")?
-            .discovered_codex_models = discovered;
     }
     if let Request::TestProvider { client, id } = request {
         let provider = tauri::async_runtime::spawn_blocking(move || {
