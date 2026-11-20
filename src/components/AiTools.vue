@@ -17,6 +17,7 @@ interface ClientView {
   error: string | null; providers: Provider[]; executable?: string | null
   mcpSupported?: boolean; mcpSse?: boolean
   supportsDirect?: boolean; canLaunchAuth?: boolean
+  unifiedHistory?: boolean
   configured: boolean; configuredModel?: string; managedByClient?: boolean; sessionLogs?: boolean
 }
 interface Skill { id: string; name: string; source: string; enabled: boolean }
@@ -44,6 +45,7 @@ type Operation =
   | { kind: 'importSkills'; ids: string[]; targets: string[] }
   | { kind: 'prompt'; text: string }
   | { kind: 'localSkill' }
+  | { kind: 'codexHistory'; enabled: boolean }
   | { kind: 'toggleSkill'; id: string; enabled: boolean }
 
 const pages: { id: Page; label: string }[] = [
@@ -185,16 +187,20 @@ async function prepare(operation: Operation) {
     details: [...preview.summary, ...(preview.files.length > 7
       ? [...preview.files.slice(0, 6), '共 ' + preview.files.length + ' 个文件']
       : preview.files)],
-    button: '备份并应用',
+    button: operation.kind === 'codexHistory' ? (operation.enabled ? '开启统一' : '关闭统一') : '备份并应用',
     execute: async () => {
       await request('apply', { client: app, operation, revision: preview.revision })
       await overview()
       await loadPage()
       if (operation.kind === 'mcp') mcpEditor.value = null
       if (operation.kind === 'importSkills') skillPicker.value = false
-      notice.value = operation.kind === 'profile'
-        ? '配置已应用。正在运行的客户端会话可能需要重开才能读取新配置。'
-        : '配置已保存。可在「配置回滚」中撤销。'
+      if (operation.kind === 'codexHistory') {
+        notice.value = operation.enabled ? '已开启统一会话历史。重新打开 Codex 后使用新配置。' : '已关闭统一会话历史。'
+      } else {
+        notice.value = operation.kind === 'profile'
+          ? '配置已应用。正在运行的客户端会话可能需要重开才能读取新配置。'
+          : '配置已保存。可在「配置回滚」中撤销。'
+      }
     },
   }
 }
@@ -480,6 +486,15 @@ onMounted(refresh)
             <p>{{ cli.version || '未找到可执行版本' }}</p>
             <p v-if="cli.executables.length > 1" class="muted">发现多个可执行入口，首项优先。</p>
             <p v-for="path in cli.executables" :key="path" class="path">{{ path }}</p>
+          </div>
+        </section>
+        <section v-if="client === 'codex'" class="card">
+          <div class="spread">
+            <div>
+              <h2>统一 Codex 会话历史</h2>
+              <p class="muted">{{ detail.provider.unifiedHistory ? '已开启。新建聊天跨官方和中转使用同一会话标识。' : '让开启后新建的官方与中转聊天出现在同一续聊列表。' }}</p>
+            </div>
+            <button :disabled="busy" :aria-pressed="Boolean(detail.provider.unifiedHistory)" @click="apply({ kind: 'codexHistory', enabled: !detail.provider.unifiedHistory })">{{ detail.provider.unifiedHistory ? '关闭统一' : '开启统一' }}</button>
           </div>
         </section>
         <section v-if="currentApp?.supportsDirect || !detail.provider.managedByClient || detail.provider.providers.length" class="card">

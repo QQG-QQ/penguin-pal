@@ -125,9 +125,9 @@ impl Change {
 }
 
 #[derive(Deserialize, Serialize)]
-struct Backup {
+pub(super) struct Backup {
     title: String,
-    changes: Vec<Change>,
+    pub changes: Vec<Change>,
 }
 
 #[derive(Serialize)]
@@ -207,7 +207,7 @@ fn valid_backup_id(id: &str) -> bool {
     id.len() == 51 && id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
 }
 
-fn backup(root: &Path, id: &str) -> Result<Backup, String> {
+pub(super) fn backup(root: &Path, id: &str) -> Result<Backup, String> {
     if !valid_backup_id(id) {
         return Err("备份编号无效。".into());
     }
@@ -215,7 +215,7 @@ fn backup(root: &Path, id: &str) -> Result<Backup, String> {
         .ok_or_else(|| "备份不存在。".into())
 }
 
-pub(super) fn backups(root: &Path) -> Result<Vec<BackupInfo>, String> {
+pub(super) fn backup_ids(root: &Path) -> Result<Vec<String>, String> {
     let entries = match fs::read_dir(root.join("backups")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -228,7 +228,11 @@ pub(super) fn backups(root: &Path) -> Result<Vec<BackupInfo>, String> {
         .filter(|id| valid_backup_id(id))
         .collect();
     ids.sort_unstable_by(|a, b| b.cmp(a));
-    Ok(ids
+    Ok(ids)
+}
+
+pub(super) fn backups(root: &Path) -> Result<Vec<BackupInfo>, String> {
+    Ok(backup_ids(root)?
         .into_iter()
         .take(40)
         .map(|id| {
@@ -255,7 +259,7 @@ pub(super) fn rollback(root: &Path, id: &str, user: &Path) -> Result<Option<Stri
             continue;
         }
         if codex_switch && change.path == codex_config {
-            changes.push(super::codex_models::undo_switch(change, current)?);
+            changes.push(super::codex_models::undo_config(change, current, true)?);
             continue;
         }
         if current != change.after {
@@ -264,7 +268,11 @@ pub(super) fn rollback(root: &Path, id: &str, user: &Path) -> Result<Option<Stri
                 label(&change.path)
             ));
         }
-        changes.push(change.reversed());
+        if change.path == codex_config {
+            changes.push(super::codex_models::undo_config(change, current, false)?);
+        } else {
+            changes.push(change.reversed());
+        }
     }
     commit(root, &format!("恢复 · {}", backup.title), changes)
 }

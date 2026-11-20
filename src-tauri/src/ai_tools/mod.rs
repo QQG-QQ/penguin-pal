@@ -191,6 +191,9 @@ enum Operation {
     NativeModel {
         id: String,
     },
+    CodexHistory {
+        enabled: bool,
+    },
     Provider {
         id: String,
     },
@@ -360,7 +363,7 @@ fn plan(
     user: &Path,
     settings: &Settings,
     state: &WindowState,
-    library: &Path,
+    root: &Path,
 ) -> Result<(String, Vec<Change>), String> {
     if let Operation::NativeModel { id } = operation {
         let changes = native_models::select(client, user, id)?;
@@ -378,8 +381,20 @@ fn plan(
     {
         return Err("该客户端的配置需在客户端内管理。".into());
     }
-    let (title, changes) = match operation {
+    let (title, mut changes) = match operation {
         Operation::NativeModel { .. } => return Err("此客户端不支持该模型选择方式。".into()),
+        Operation::CodexHistory { enabled } if client == Client::Codex => (
+            if *enabled {
+                "开启统一 Codex 会话历史"
+            } else {
+                "关闭统一 Codex 会话历史"
+            }
+            .into(),
+            codex_models::history_plan(user, *enabled)?
+                .into_iter()
+                .collect(),
+        ),
+        Operation::CodexHistory { .. } => return Err("只有 Codex 可以统一会话历史。".into()),
         Operation::Provider { id } => {
             let provider = providers::find(id, client, &settings.providers)?;
             (
@@ -439,7 +454,7 @@ fn plan(
         ),
         Operation::ImportSkills { ids, targets } => (
             format!("导入 {} 个本机 Skill", ids.len()),
-            extensions::library_skills(user, library, ids, targets)?,
+            extensions::library_skills(user, &root.join("skills"), ids, targets)?,
         ),
         Operation::LocalSkill => (
             format!("{} · 安装本地 Skill", client.label()),
@@ -474,6 +489,18 @@ fn plan(
             )
         }
     };
+    if client == Client::Codex
+        && matches!(
+            operation,
+            Operation::Provider { .. } | Operation::Profile { .. }
+        )
+    {
+        let path = client.config(user);
+        if let Some(config) = changes.iter_mut().find(|change| change.path == path) {
+            codex_models::keep_unified_selection(config)?;
+            codex_models::restore_legacy_definition(root, config)?;
+        }
+    }
     Ok((title, storage::changed(changes)))
 }
 
@@ -495,6 +522,16 @@ fn summary(
     };
     let mut lines = Vec::new();
     match operation {
+        Operation::CodexHistory { enabled } => {
+            lines.push(if *enabled {
+                "开启后新聊天共用一个供应商标识。切换后续聊可能把聊天上下文发给当前供应商，部分加密内容可能无法续用。"
+            } else {
+                "新聊天恢复使用各自的供应商标识。已建立的统一会话保留最近一次使用的供应商定义。"
+            }.into());
+            lines.push(
+                "既有会话文件和历史数据库保持原样。桌宠的「会话」可查看各供应商的本机历史。".into(),
+            );
+        }
         Operation::Mcp { targets, .. } if !targets.is_empty() => {
             lines.push(format!(
                 "写入客户端 · {}",
@@ -769,14 +806,7 @@ fn perform(
         }
         Request::ReadMcp { .. } => Err("请在客户端内管理 MCP。".into()),
         Request::Preview { client, operation } => {
-            let (title, changes) = plan(
-                &operation,
-                client,
-                &user,
-                &settings,
-                &state,
-                &root.join("skills"),
-            )?;
+            let (title, changes) = plan(&operation, client, &user, &settings, &state, root)?;
             Ok(
                 json!({"title":title, "files":changes.iter().map(|c| &c.path).collect::<Vec<_>>(),
                 "revision":storage::revision(&changes), "summary":summary(&operation, client, &user, &settings, &changes)}),
@@ -799,14 +829,7 @@ fn perform(
                 }
                 _ => return Err("此操作需要预览。".into()),
             };
-            let (title, changes) = plan(
-                &operation,
-                client,
-                &user,
-                &settings,
-                &state,
-                &root.join("skills"),
-            )?;
+            let (title, changes) = plan(&operation, client, &user, &settings, &state, root)?;
             if revision.is_some_and(|revision| revision != storage::revision(&changes)) {
                 return Err("配置自预览后发生变化，请重新预览。".into());
             }

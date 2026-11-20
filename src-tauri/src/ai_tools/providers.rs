@@ -257,7 +257,45 @@ const GEMINI_FIELDS: &[&str] = &[
     "GEMINI_MODEL",
     "GEMINI_API_KEY_AUTH_MECHANISM",
 ];
-const OWNED_CODEX_ID: &str = "penguinpal-direct";
+pub(super) const LEGACY_CODEX_PROVIDER: &str = "penguinpal-direct";
+
+fn codex_provider_signature(provider: &dyn toml_edit::TableLike) -> String {
+    let mut fields: Vec<_> = provider
+        .iter()
+        .map(|(key, value)| (key, value.to_string().trim().to_owned()))
+        .collect();
+    fields.sort_unstable();
+    serde_json::to_string(&fields).unwrap_or_default()
+}
+
+pub(super) fn codex_definitions(
+    doc: &mut DocumentMut,
+) -> Result<&mut dyn toml_edit::TableLike, String> {
+    doc.entry("model_providers")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_like_mut()
+        .ok_or_else(|| "model_providers 必须是 TOML 表。".into())
+}
+
+pub(super) fn register_codex_route(doc: &mut DocumentMut, route: Item) -> Result<(), String> {
+    let signature =
+        codex_provider_signature(route.as_table_like().ok_or("Codex 供应商定义无效。")?);
+    let digest = crate::companion_sync::digest(signature.as_bytes());
+    let provider_id = format!("penguinpal-{}", &digest[..24]);
+    let definitions = codex_definitions(doc)?;
+    if let Some(existing) = definitions.get(&provider_id) {
+        if !existing
+            .as_table_like()
+            .is_some_and(|entry| codex_provider_signature(entry) == signature)
+        {
+            return Err("此中转的 Codex 供应商定义已被修改，请在客户端核对。".into());
+        }
+    } else {
+        definitions.insert(&provider_id, route);
+    }
+    doc.insert("model_provider", toml_edit::value(provider_id));
+    Ok(())
+}
 
 pub(super) fn toml(bytes: Option<&[u8]>) -> Result<DocumentMut, String> {
     std::str::from_utf8(bytes.unwrap_or_default())
@@ -530,19 +568,20 @@ impl Provider {
                     env::var(env_key).ok().filter(|key| !key.trim().is_empty())
                 };
                 let selected = item_text(&doc, "model_provider");
-                let official_mirror = selected == "custom"
-                    && ["", "openai", "openai official", "openai 官方"]
-                        .iter()
-                        .any(|name| string("name").eq_ignore_ascii_case(name))
-                    && route
-                        .and_then(|r| r.get("requires_openai_auth"))
-                        .and_then(Item::as_bool)
-                        == Some(true)
-                    && key.is_none()
-                    && env_key.is_empty()
-                    && route.is_some_and(|r| {
-                        r.get("http_headers").is_none() && r.get("env_http_headers").is_none()
-                    });
+                let official_mirror =
+                    matches!(selected, "custom" | super::codex_models::UNIFIED_PROVIDER)
+                        && ["", "openai", "openai official", "openai 官方"]
+                            .iter()
+                            .any(|name| string("name").eq_ignore_ascii_case(name))
+                        && route
+                            .and_then(|r| r.get("requires_openai_auth"))
+                            .and_then(Item::as_bool)
+                            == Some(true)
+                        && key.is_none()
+                        && env_key.is_empty()
+                        && route.is_some_and(|r| {
+                            r.get("http_headers").is_none() && r.get("env_http_headers").is_none()
+                        });
                 if endpoint.is_empty() && !matches!(selected, "" | "openai") && !official_mirror {
                     return Err("该 Codex 配置缺少显式直连地址。".into());
                 }
@@ -751,16 +790,7 @@ impl Provider {
                             table.insert("experimental_bearer_token", toml_edit::value(key));
                         }
                     }
-                    doc.entry("model_providers")
-                        .or_insert(Item::Table(Table::new()))
-                        .as_table_mut()
-                        .ok_or("model_providers 必须是 TOML 表。")?
-                        .insert(OWNED_CODEX_ID, Item::Table(table));
-                    doc.insert("model_provider", toml_edit::value(OWNED_CODEX_ID));
-                } else if let Some(providers) =
-                    doc.get_mut("model_providers").and_then(Item::as_table_mut)
-                {
-                    providers.remove(OWNED_CODEX_ID);
+                    register_codex_route(&mut doc, Item::Table(table))?;
                 }
                 doc.to_string().into_bytes()
             }
@@ -1071,6 +1101,12 @@ pub(super) fn list_for(client: Client, user: &Path, imported: &[Provider]) -> Va
         }
         view
     });
+    let unified_history = client == Client::Codex
+        && active.as_ref().is_ok_and(|(_, provider)| {
+            provider
+                .codex()
+                .is_ok_and(|doc| super::codex_models::unified(&doc))
+        });
     let configured = client.home(user).exists();
     let configured_model = if client == Client::Codex && active_view.is_none() {
         read_config(&client.config(user))
@@ -1086,6 +1122,7 @@ pub(super) fn list_for(client: Client, user: &Path, imported: &[Provider]) -> Va
         "config": client.config(user),
         "current": active_view,
         "configuredModel": configured_model,
+        "unifiedHistory": unified_history,
         "error": active.err(),
         "providers": choices,
     })

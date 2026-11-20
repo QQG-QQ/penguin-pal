@@ -5,13 +5,17 @@ use std::{
 };
 
 use serde_json::{json, Value};
-use toml_edit::DocumentMut;
+use toml_edit::{value, DocumentMut, Item, Table};
 
 use super::{
-    providers::{current, item_text, toml, Client, Provider},
-    storage::{read, read_config, Change},
+    providers::{
+        codex_definitions, current, item_text, register_codex_route, toml, Client, Provider,
+        LEGACY_CODEX_PROVIDER,
+    },
+    storage::{self, read, read_config, Change},
 };
 
+pub(super) const UNIFIED_PROVIDER: &str = "penguinpal-unified-history";
 const MODEL_FIELDS: [&str; 2] = ["model", "model_reasoning_effort"];
 const CATALOG_KEY: &str = "model_catalog_json";
 const CATALOG_DIR: &str = "penguinpal-models";
@@ -198,6 +202,88 @@ pub(super) fn switch_plan(user: &Path, provider: &Provider) -> Result<Vec<Change
     Ok(changes)
 }
 
+pub(super) fn unified(doc: &DocumentMut) -> bool {
+    item_text(doc, "model_provider") == UNIFIED_PROVIDER
+}
+
+fn unify_selection(doc: &mut DocumentMut) -> Result<(), String> {
+    let id = item_text(doc, "model_provider");
+    let route = if matches!(id, "" | "openai") {
+        if doc.contains_key("openai_base_url") {
+            return Err("请先清除 OpenAI 默认地址覆盖，再启用会话统一。".into());
+        }
+        let mut official = Table::new();
+        official.insert("name", value("OpenAI"));
+        official.insert("requires_openai_auth", value(true));
+        official.insert("supports_websockets", value(true));
+        official.insert("wire_api", value("responses"));
+        Item::Table(official)
+    } else {
+        let item = definitions(doc)
+            .and_then(|entries| entries.get(id))
+            .ok_or("当前 Codex 供应商缺少独立定义，请先在桌宠中切换到已保存的供应商。")?;
+        let route = item.as_table_like().ok_or("当前 Codex 供应商定义无效。")?;
+        if doc.contains_key("openai_base_url")
+            || route.get("requires_openai_auth").and_then(Item::as_bool) == Some(true)
+            || route
+                .get("base_url")
+                .and_then(Item::as_str)
+                .is_none_or(str::is_empty)
+        {
+            return Err(
+                "当前供应商配置无法安全共用会话标识，请先在桌宠中切换到已保存的供应商。".into(),
+            );
+        }
+        item.clone()
+    };
+    codex_definitions(doc)?.insert(UNIFIED_PROVIDER, route);
+    doc.insert("model_provider", value(UNIFIED_PROVIDER));
+    Ok(())
+}
+
+pub(super) fn keep_unified_selection(config: &mut Change) -> Result<(), String> {
+    if unified(&toml(config.before.as_deref())?) {
+        let mut next = toml(config.after.as_deref())?;
+        unify_selection(&mut next)?;
+        config.after = Some(next.to_string().into_bytes());
+    }
+    Ok(())
+}
+
+pub(super) fn history_plan(user: &Path, enabled: bool) -> Result<Option<Change>, String> {
+    let path = Client::Codex.config(user);
+    let before = read_config(&path)?;
+    let mut live = toml(before.as_deref())?;
+    if unified(&live) == enabled {
+        return Ok(None);
+    }
+    if enabled {
+        unify_selection(&mut live)?;
+    } else if let Some(route) = definitions(&live)
+        .and_then(|entries| entries.get(UNIFIED_PROVIDER))
+        .cloned()
+    {
+        let fields = route.as_table_like().ok_or("当前统一供应商配置无效。")?;
+        if fields
+            .get("base_url")
+            .and_then(Item::as_str)
+            .is_some_and(|url| !url.is_empty())
+        {
+            register_codex_route(&mut live, route)?;
+        } else {
+            live.remove("model_provider");
+        }
+    } else {
+        live.remove("model_provider");
+    }
+    // Leave the unified definition available to the threads already bound to it.
+    Ok(Some(Change::new(
+        path,
+        before,
+        live.to_string().into_bytes(),
+    )))
+}
+
 fn copy_fields(target: &mut DocumentMut, source: &DocumentMut, keys: &[&str]) {
     for key in keys {
         if let Some(value) = source.get(key) {
@@ -212,31 +298,76 @@ fn copy_fields(target: &mut DocumentMut, source: &DocumentMut, keys: &[&str]) {
     }
 }
 
-pub(super) fn undo_switch(config: &Change, live_bytes: Option<Vec<u8>>) -> Result<Change, String> {
-    let before = toml(config.before.as_deref())?;
-    let saved = toml(config.after.as_deref())?;
-    let live = toml(live_bytes.as_deref())?;
-    let mut expected = saved.clone();
-    let mut comparable = live.clone();
-    for key in MODEL_FIELDS.into_iter().chain([CATALOG_KEY]) {
-        expected.remove(key);
-        comparable.remove(key);
-    }
-    if expected.to_string() != comparable.to_string() {
-        return Err("Codex 配置还有其它改动，无法安全回滚供应商。".into());
-    }
+fn definitions(doc: &DocumentMut) -> Option<&dyn toml_edit::TableLike> {
+    doc.get("model_providers")?.as_table_like()
+}
 
-    let mut restored = before;
-    copy_fields(&mut restored, &live, &MODEL_FIELDS);
-    let reference = item_text(&live, CATALOG_KEY);
-    if reference != item_text(&saved, CATALOG_KEY)
-        || (!reference.is_empty()
-            && config
-                .path
-                .parent()
-                .is_none_or(|home| !is_managed(home, reference)))
-    {
-        copy_fields(&mut restored, &live, &[CATALOG_KEY]);
+pub(super) fn restore_legacy_definition(root: &Path, config: &mut Change) -> Result<(), String> {
+    let mut next = toml(config.after.as_deref())?;
+    if definitions(&next).is_some_and(|entries| entries.contains_key(LEGACY_CODEX_PROVIDER)) {
+        return Ok(());
+    }
+    for id in storage::backup_ids(root)?.into_iter().take(40) {
+        let Ok(backup) = storage::backup(root, &id) else {
+            continue;
+        };
+        let route = backup
+            .changes
+            .iter()
+            .filter(|change| change.path == config.path)
+            .flat_map(|change| [&change.after, &change.before])
+            .filter_map(|bytes| toml(bytes.as_deref()).ok())
+            .find_map(|snapshot| {
+                let item = definitions(&snapshot)?.get(LEGACY_CODEX_PROVIDER)?;
+                item.as_table_like().map(|_| item.clone())
+            });
+        if let Some(route) = route {
+            codex_definitions(&mut next)?.insert(LEGACY_CODEX_PROVIDER, route);
+            config.after = Some(next.to_string().into_bytes());
+            break;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn undo_config(
+    config: &Change,
+    live_bytes: Option<Vec<u8>>,
+    switch: bool,
+) -> Result<Change, String> {
+    let mut restored = toml(config.before.as_deref())?;
+    let live = toml(live_bytes.as_deref())?;
+    if switch {
+        let saved = toml(config.after.as_deref())?;
+        let mut expected = saved.clone();
+        let mut comparable = live.clone();
+        for key in MODEL_FIELDS.into_iter().chain([CATALOG_KEY]) {
+            expected.remove(key);
+            comparable.remove(key);
+        }
+        if expected.to_string() != comparable.to_string() {
+            return Err("Codex 配置还有其它改动，无法安全回滚供应商。".into());
+        }
+
+        copy_fields(&mut restored, &live, &MODEL_FIELDS);
+        let reference = item_text(&live, CATALOG_KEY);
+        if reference != item_text(&saved, CATALOG_KEY)
+            || (!reference.is_empty()
+                && config
+                    .path
+                    .parent()
+                    .is_none_or(|home| !is_managed(home, reference)))
+        {
+            copy_fields(&mut restored, &live, &[CATALOG_KEY]);
+        }
+    }
+    if let Some(providers) = definitions(&live).filter(|table| !table.is_empty()) {
+        let target = codex_definitions(&mut restored)?;
+        for (id, provider) in providers.iter() {
+            if id != UNIFIED_PROVIDER || !target.contains_key(id) {
+                target.insert(id, provider.clone());
+            }
+        }
     }
     let output = restored.to_string();
     Ok(Change {
@@ -309,6 +440,159 @@ mod tests {
         assert_eq!(doc["model_reasoning_effort"].as_str(), Some("high"));
         assert_eq!(doc["model_catalog_json"].as_str(), Some("custom.json"));
         assert!(model_ids(&json!({"data":[]})).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unified_history_preserves_auth_boundaries_and_is_reversible() {
+        let fixture = tempfile::tempdir().unwrap();
+        let user = fixture.path();
+        let path = Client::Codex.config(user);
+        assert!(path.starts_with(user));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "model = 'live-model'\n").unwrap();
+        let enable = history_plan(user, true).unwrap().unwrap();
+        storage::commit(user, "开启统一 Codex 会话历史", vec![enable]).unwrap();
+        assert_eq!(
+            current(Client::Codex, user).unwrap().view()["official"],
+            true
+        );
+        assert!(history_plan(user, true).unwrap().is_none());
+        let relay = Provider::new_direct(
+            Client::Codex,
+            "Fixture",
+            "https://fixture.example/v1",
+            "fixture-key",
+            "old-model",
+        )
+        .unwrap();
+        let mut forward = switch_plan(user, &relay).unwrap();
+        keep_unified_selection(&mut forward[0]).unwrap();
+        let relay_config = toml(forward[0].after.as_deref()).unwrap();
+        assert!(unified(&relay_config));
+        assert_eq!(item_text(&relay_config, "model"), "live-model");
+        let alias = &relay_config["model_providers"][UNIFIED_PROVIDER];
+        assert_eq!(
+            alias["base_url"].as_str(),
+            Some("https://fixture.example/v1")
+        );
+        assert!(alias.get("requires_openai_auth").is_none());
+        let switch = storage::commit(user, "Codex · 切换到中转", forward)
+            .unwrap()
+            .unwrap();
+        storage::rollback(user, &switch, user).unwrap();
+        let rolled_back = toml(read_config(&path).unwrap().as_deref()).unwrap();
+        let alias = &rolled_back["model_providers"][UNIFIED_PROVIDER];
+        assert_eq!(alias["requires_openai_auth"].as_bool(), Some(true));
+        assert!(alias.get("base_url").is_none());
+        assert!(alias.get("experimental_bearer_token").is_none());
+        assert!(unified(&rolled_back));
+
+        let mut forward = switch_plan(user, &relay).unwrap();
+        keep_unified_selection(&mut forward[0]).unwrap();
+        storage::commit(user, "Codex · 切换到中转", forward).unwrap();
+        let disable = history_plan(user, false).unwrap().unwrap();
+        let normal = toml(disable.after.as_deref()).unwrap();
+        assert!(!unified(&normal));
+        let active = item_text(&normal, "model_provider");
+        let definitions = definitions(&normal).unwrap();
+        assert_eq!(
+            definitions.get(active).unwrap().to_string(),
+            definitions.get(UNIFIED_PROVIDER).unwrap().to_string()
+        );
+    }
+
+    #[test]
+    fn unification_rejects_official_credentials_on_a_relay_route() {
+        let mut doc = toml(Some(b"model_provider = 'external'\n[model_providers.external]\nbase_url = 'https://fixture.example/v1'\nrequires_openai_auth = true\n")).unwrap();
+        let original = doc.to_string();
+        assert!(unify_selection(&mut doc).is_err());
+        assert_eq!(doc.to_string(), original);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restores_old_definition_without_changing_current_provider_or_model() {
+        let fixture = tempfile::tempdir().unwrap();
+        let user = fixture.path();
+        let path = Client::Codex.config(user);
+        assert!(path.starts_with(user));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = b"model_provider = 'penguinpal-direct'\n[model_providers.penguinpal-direct]\nname = 'Old relay'\nbase_url = 'https://fixture.example/v1'\nwire_api = 'responses'\n";
+        let after = b"model = 'new-model'\nmodel_provider = 'openai'\n";
+        std::fs::write(&path, before).unwrap();
+        storage::commit(
+            user,
+            "Codex · 切换到官方",
+            vec![Change::new(
+                path.clone(),
+                Some(before.to_vec()),
+                after.to_vec(),
+            )],
+        )
+        .unwrap();
+        let mut change = Change::new(path.clone(), Some(after.to_vec()), after.to_vec());
+        restore_legacy_definition(user, &mut change).unwrap();
+        let fixed = toml(change.after.as_deref()).unwrap();
+        assert_eq!(fixed["model_provider"].as_str(), Some("openai"));
+        assert_eq!(fixed["model"].as_str(), Some("new-model"));
+        assert_eq!(
+            fixed["model_providers"][LEGACY_CODEX_PROVIDER]["name"].as_str(),
+            Some("Old relay")
+        );
+        let restored = change.after.clone();
+        restore_legacy_definition(user, &mut change).unwrap();
+        assert_eq!(change.after, restored);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn switching_and_undo_keep_definitions_for_both_relays() {
+        let fixture = tempfile::tempdir().unwrap();
+        let user = fixture.path();
+        let config = Client::Codex.config(user);
+        assert!(config.starts_with(user));
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let relay = |label, endpoint| {
+            Provider::new_direct(Client::Codex, label, endpoint, "fixture-key", "saved-model")
+                .unwrap()
+        };
+        let first = relay("First relay", "https://first.fixture.example/v1");
+        let second = relay("Second relay", "https://second.fixture.example/v1");
+        std::fs::write(&config, "model = 'live-model'\n").unwrap();
+        let mut ids = Vec::new();
+        for provider in [&first, &second] {
+            let changes = switch_plan(user, provider).unwrap();
+            let doc = toml(changes[0].after.as_deref()).unwrap();
+            ids.push(item_text(&doc, "model_provider").to_owned());
+            let id = storage::commit(user, "Codex · 切换到中转", changes)
+                .unwrap()
+                .unwrap();
+            if ids.len() == 2 {
+                storage::rollback(user, &id, user).unwrap();
+            }
+        }
+        assert_ne!(ids[0], ids[1]);
+        let restored = toml(read_config(&config).unwrap().as_deref()).unwrap();
+        assert_eq!(item_text(&restored, "model_provider"), ids[0]);
+        assert_eq!(item_text(&restored, "model"), "live-model");
+        let official = switch_plan(user, &Provider::official(Client::Codex)).unwrap();
+        let doc = toml(official[0].after.as_deref()).unwrap();
+        assert!(doc.get("model_provider").is_none());
+        let defs = definitions(&doc).unwrap();
+        assert_eq!(
+            defs.get(&ids[0]).unwrap()["base_url"].as_str(),
+            Some("https://first.fixture.example/v1")
+        );
+        assert_eq!(
+            defs.get(&ids[1]).unwrap()["base_url"].as_str(),
+            Some("https://second.fixture.example/v1")
+        );
+        storage::commit(user, "Codex · 切换到官方", official).unwrap();
+        let again = switch_plan(user, &first).unwrap();
+        let doc = toml(again[0].after.as_deref()).unwrap();
+        assert_eq!(item_text(&doc, "model_provider"), ids[0]);
+        assert_eq!(definitions(&doc).unwrap().len(), 2);
     }
 
     #[cfg(windows)]
