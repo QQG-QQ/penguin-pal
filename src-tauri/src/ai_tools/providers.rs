@@ -415,6 +415,17 @@ fn is_placeholder(value: &str) -> bool {
     value.eq_ignore_ascii_case("PROXY_MANAGED") || value.eq_ignore_ascii_case("PROXY_TOKEN")
 }
 
+fn validate_model_id(model: &str) -> Result<(), String> {
+    if model.chars().count() > 120
+        || model
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err("请输入有效的模型 ID。".into());
+    }
+    Ok(())
+}
+
 impl Provider {
     pub(super) fn new_direct(
         client: Client,
@@ -433,31 +444,41 @@ impl Provider {
         if name.is_empty()
             || name.chars().count() > 80
             || name.chars().any(char::is_control)
-            || model.is_empty()
-            || model.chars().count() > 120
-            || model.chars().any(char::is_whitespace)
             || key.is_empty()
             || key.len() > 8192
             || key.chars().any(char::is_control)
             || is_placeholder(key)
         {
-            return Err("请输入有效的名称、模型 ID 和 API Key。".into());
+            return Err("请输入有效的名称和 API Key。".into());
         }
+        validate_model_id(model)?;
         let url = endpoint.as_str().trim_end_matches('/');
         let settings = match client {
             Client::Codex => {
                 let mut config = DocumentMut::new();
                 config["model_provider"] = toml_edit::value("direct");
-                config["model"] = toml_edit::value(model);
+                if !model.is_empty() {
+                    config["model"] = toml_edit::value(model);
+                }
                 config["model_providers"]["direct"]["base_url"] = toml_edit::value(url);
                 config["model_providers"]["direct"]["wire_api"] = toml_edit::value("responses");
                 json!({"config":config.to_string(),"auth":{"OPENAI_API_KEY":key}})
             }
             Client::Claude => {
-                json!({"model":model,"env":{"ANTHROPIC_BASE_URL":url,"ANTHROPIC_AUTH_TOKEN":key}})
+                let mut settings =
+                    json!({"env":{"ANTHROPIC_BASE_URL":url,"ANTHROPIC_AUTH_TOKEN":key}});
+                if !model.is_empty() {
+                    settings["model"] = json!(model);
+                }
+                settings
             }
             Client::Gemini => {
-                json!({"config":{"model":{"name":model}},"env":{"GOOGLE_GEMINI_BASE_URL":url,"GEMINI_API_KEY":key}})
+                let mut settings =
+                    json!({"env":{"GOOGLE_GEMINI_BASE_URL":url,"GEMINI_API_KEY":key}});
+                if !model.is_empty() {
+                    settings["config"] = json!({"model":{"name":model}});
+                }
+                settings
             }
             _ if super::native_models::supports_direct(client) => {
                 json!({"direct":{"url":url,"key":key,"model":model}})
@@ -473,6 +494,22 @@ impl Provider {
         };
         provider.switchable()?;
         Ok(provider)
+    }
+
+    pub(super) fn set_native_relay_model(&mut self, model: &str) -> Result<(), String> {
+        let model = model.trim();
+        validate_model_id(model)?;
+        if model.is_empty() {
+            return Err("请填写模型 ID。".into());
+        }
+        let direct = self
+            .settings
+            .get_mut("direct")
+            .and_then(Value::as_object_mut)
+            .filter(|_| self.id.starts_with("direct-"))
+            .ok_or("找不到可编辑的中转配置。")?;
+        direct.insert("model".into(), json!(model));
+        Ok(())
     }
 
     pub fn official(client: Client) -> Self {
@@ -515,10 +552,7 @@ impl Provider {
     fn info(&self) -> Result<ConnectionInfo, String> {
         if let Some(spec) = self.settings.get("direct") {
             let endpoint = spec["url"].as_str().ok_or("中转地址无效。")?;
-            let model = spec["model"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .ok_or("模型无效。")?;
+            let model = spec["model"].as_str().ok_or("模型无效。")?;
             let key = spec["key"]
                 .as_str()
                 .filter(|value| !value.is_empty() && !is_placeholder(value))
@@ -1188,6 +1222,76 @@ pub(super) fn find(id: &str, client: Client, imported: &[Provider]) -> Result<Pr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_relay_without_model_preserves_selection_or_uses_client_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let user = temp.path();
+        let path = Client::Codex.config(user);
+        assert!(path.starts_with(user));
+        let relay = Provider::new_direct(
+            Client::Codex,
+            "Fixture",
+            "https://fixture.example/v1",
+            "fixture-key",
+            " ",
+        )
+        .unwrap();
+        let changes = super::super::codex_models::switch_plan(user, &relay).unwrap();
+        let config = toml(changes.last().unwrap().after.as_deref()).unwrap();
+        assert!(!config.contains_key("model"));
+        assert!(Provider::codex_route(&config).is_some());
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "model = 'current-model'\n").unwrap();
+        let changes = super::super::codex_models::switch_plan(user, &relay).unwrap();
+        let config = toml(changes.last().unwrap().after.as_deref()).unwrap();
+        assert_eq!(config["model"].as_str(), Some("current-model"));
+
+        for client in [Client::Claude, Client::Gemini] {
+            let relay = Provider::new_direct(
+                client,
+                "Fixture",
+                "https://fixture.example/v1",
+                "fixture-key",
+                "",
+            )
+            .unwrap();
+            assert!(relay.info().unwrap().model.is_empty());
+            assert!(relay.settings.get("model").is_none());
+            assert!(relay.settings.get("config").is_none());
+        }
+    }
+
+    #[test]
+    fn native_relay_accepts_model_after_saving_connection() {
+        let temp = tempfile::tempdir().unwrap();
+        let user = temp.path();
+        let path = Client::Pi.config(user);
+        assert!(path.starts_with(user));
+        let mut relay = Provider::new_direct(
+            Client::Pi,
+            "Fixture",
+            "https://fixture.example/v1",
+            "fixture-key",
+            "",
+        )
+        .unwrap();
+        assert!(relay.info().unwrap().model.is_empty());
+        assert_eq!(
+            relay.plan(user).err().as_deref(),
+            Some(super::super::native_models::MISSING_RELAY_MODEL)
+        );
+        assert!(!path.exists());
+
+        relay.set_native_relay_model("chosen-model").unwrap();
+        let changes = relay.plan(user).unwrap();
+        let config = json_object(changes[0].after.as_deref()).unwrap();
+        assert_eq!(
+            config["providers"][&relay.id]["models"][0]["id"],
+            "chosen-model"
+        );
+    }
 
     #[test]
     fn original_relay_is_hidden_only_when_a_saved_relay_matches() {

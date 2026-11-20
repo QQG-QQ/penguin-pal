@@ -1,7 +1,9 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -103,18 +105,50 @@ fn token(value: &Value) -> Option<&str> {
     value.as_str().filter(|value| !value.trim().is_empty())
 }
 
+fn codex_file_store(config: &toml_edit::DocumentMut) -> bool {
+    config
+        .get("cli_auth_credentials_store")
+        .and_then(toml_edit::Item::as_str)
+        .is_none_or(|mode| mode == "file")
+}
+
+fn ensure_codex_file_store(config: &toml_edit::DocumentMut) -> Result<(), String> {
+    if codex_file_store(config) {
+        Ok(())
+    } else {
+        Err("当前 Codex 使用其他凭据存储，请在 Codex 的账号菜单管理登录。".into())
+    }
+}
+
+fn codex_live(bytes: Vec<u8>) -> Result<Live, String> {
+    let doc = json_doc(&bytes)?;
+    let credentials = &doc["tokens"];
+    if doc["auth_mode"] == "apikey" || token(&credentials["access_token"]).is_none() {
+        return Ok(Live::default());
+    }
+    let account = token(&credentials["account_id"]);
+    let identity = token(&credentials["id_token"])
+        .and_then(jwt_subject)
+        .map(|subject| format!("{subject}:{}", account.unwrap_or_default()))
+        .or_else(|| account.map(str::to_owned));
+    Ok(Live {
+        identity,
+        parts: BTreeMap::from([("primary".into(), bytes)]),
+    })
+}
+
 fn reading(client: Client, user: &Path) -> Result<Live, String> {
     let mut live = Live::default();
     if client == Client::Codex {
         let bytes = read_config(&client.config(user))?;
         let config = toml(bytes.as_deref())?;
-        if config
-            .get("cli_auth_credentials_store")
-            .and_then(toml_edit::Item::as_str)
-            .is_some_and(|mode| mode != "file")
-        {
+        if !codex_file_store(&config) {
             return Ok(live);
         }
+        return read_config(&credential_file(client, user))?
+            .map(codex_live)
+            .transpose()
+            .map(Option::unwrap_or_default);
     }
     if client == Client::Workbuddy {
         let dir = workbuddy_dir(user);
@@ -190,21 +224,6 @@ fn reading(client: Client, user: &Path) -> Result<Live, String> {
     }
     let doc = json_doc(&bytes)?;
     let identity = match client {
-        Client::Codex => {
-            let credentials = &doc["tokens"];
-            if doc["auth_mode"] == "apikey" || token(&credentials["access_token"]).is_none() {
-                return Ok(live);
-            }
-            token(&credentials["id_token"])
-                .and_then(jwt_subject)
-                .map(|subject| {
-                    format!(
-                        "{subject}:{}",
-                        credentials["account_id"].as_str().unwrap_or_default()
-                    )
-                })
-                .or_else(|| token(&credentials["account_id"]).map(str::to_owned))
-        }
         Client::Claude => {
             if token(&doc["claudeAiOauth"]["accessToken"]).is_none() {
                 return Ok(live);
@@ -359,7 +378,11 @@ fn replace_live(
 }
 
 pub(super) fn status(root: &Path, user: &Path, client: Client) -> Result<Value, String> {
-    let supported = can_capture(client);
+    let supported = if client == Client::Codex {
+        codex_file_store(&toml(read_config(&client.config(user))?.as_deref())?)
+    } else {
+        can_capture(client)
+    };
     let live = if supported {
         Some(reading(client, user)?)
     } else {
@@ -371,6 +394,7 @@ pub(super) fn status(root: &Path, user: &Path, client: Client) -> Result<Value, 
     Ok(
         json!({"canLaunch":can_launch(client),"canCapture":supported,
         "loginNote":match client {
+            Client::Codex if !supported => "当前 Codex 使用其他凭据存储，请在 Codex 的账号菜单管理登录。",
             Client::Gemini => "账号在 Gemini CLI 的 /auth 内管理。",
             Client::Copilot => "登录后，在 Copilot CLI 用 /user switch 切换已保存的 GitHub 账号。",
             Client::Kimi => "桌宠发起 Kimi Code 设备码登录。",
@@ -384,13 +408,18 @@ pub(super) fn capture(root: &Path, user: &Path, client: Client, label: &str) -> 
     if !can_capture(client) {
         return Err("此客户端通过原生入口管理登录。".into());
     }
+    let label = account_label(label)?;
+    let mut book = account_book(root)?;
+    replace_live(&mut book, client, reading(client, user)?, Some(label))?;
+    save_private(&root.join("accounts.bin"), &book)
+}
+
+fn account_label(label: &str) -> Result<&str, String> {
     let label = label.trim();
     if label.is_empty() || label.chars().count() > 64 || label.chars().any(char::is_control) {
         return Err("请填写 1 至 64 字的账号备注。".into());
     }
-    let mut book = account_book(root)?;
-    replace_live(&mut book, client, reading(client, user)?, Some(label))?;
-    save_private(&root.join("accounts.bin"), &book)
+    Ok(label)
 }
 
 fn same_live_revision(a: &Live, b: &Live) -> bool {
@@ -482,15 +511,7 @@ fn switch_changes(user: &Path, account: &Account) -> Result<Vec<Change>, String>
         let path = client.config(user);
         let before = read_config(&path)?;
         let mut config = toml(before.as_deref())?;
-        if config
-            .get("cli_auth_credentials_store")
-            .and_then(toml_edit::Item::as_str)
-            .is_some_and(|mode| mode != "file")
-        {
-            return Err(
-                "Codex 当前使用系统凭据存储或临时登录，请通过 Codex 原生账号入口切换。".into(),
-            );
-        }
+        ensure_codex_file_store(&config)?;
         config["cli_auth_credentials_store"] = toml_edit::value("file");
         changes.push(Change::new(path, before, config.to_string().into_bytes()));
     } else if client == Client::Claude {
@@ -575,12 +596,117 @@ pub(super) fn preserve_current(root: &Path, user: &Path, client: Client) -> Resu
     Ok(())
 }
 
-pub(super) fn launch(
-    root: &Path,
-    user: &Path,
-    client: Client,
-    alternate: bool,
-) -> Result<String, String> {
+pub(super) struct CodexLogin {
+    child: Child,
+    home: tempfile::TempDir,
+    label: String,
+}
+
+impl CodexLogin {
+    pub(super) fn start(
+        root: &Path,
+        user: &Path,
+        label: &str,
+        device: bool,
+    ) -> Result<Self, String> {
+        let label = account_label(label)?.to_owned();
+        let config = toml(read_config(&Client::Codex.config(user))?.as_deref())?;
+        ensure_codex_file_store(&config)?;
+        if config
+            .get("forced_login_method")
+            .and_then(toml_edit::Item::as_str)
+            == Some("api")
+        {
+            return Err("当前 Codex 配置只允许 API 登录。".into());
+        }
+        let executable =
+            sessions::executable(Client::Codex).ok_or("未找到 Codex，请先安装并刷新。")?;
+        std::fs::create_dir_all(root).map_err(|_| "无法准备官方登录目录。")?;
+        let home = tempfile::Builder::new()
+            .prefix("codex-login-")
+            .tempdir_in(root)
+            .map_err(|_| "无法准备官方登录目录。")?;
+        let mut policy = toml_edit::DocumentMut::new();
+        if let Some(workspaces) = config.get("forced_chatgpt_workspace_id") {
+            policy["forced_chatgpt_workspace_id"] = workspaces.clone();
+        }
+        std::fs::write(home.path().join("config.toml"), policy.to_string())
+            .map_err(|_| "无法准备官方登录配置。")?;
+        preserve_current(root, user, Client::Codex)?;
+        let mut command = Command::new(executable);
+        command
+            .current_dir(home.path())
+            .env("CODEX_HOME", home.path())
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY")
+            .args([
+                "login",
+                "-c",
+                "chatgpt_base_url=\"https://chatgpt.com/backend-api/\"",
+                "-c",
+                "cli_auth_credentials_store=\"file\"",
+            ]);
+        if device {
+            command.arg("--device-auth");
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x10);
+        }
+        let child = command.spawn().map_err(|_| "无法启动 Codex 官方登录。")?;
+        Ok(Self { child, home, label })
+    }
+
+    pub(super) fn wait(&mut self, canceled: &AtomicBool) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(15 * 60);
+        while !canceled.load(Ordering::Relaxed) && Instant::now() < deadline {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .map_err(|_| "无法读取 Codex 登录结果。")?
+            {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err("Codex 授权未完成，请查看登录窗口并重试。".into())
+                };
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        Err(if canceled.load(Ordering::Relaxed) {
+            "已取消添加账号。"
+        } else {
+            "Codex 授权已超时，请重试。"
+        }
+        .into())
+    }
+
+    pub(super) fn save(&self, root: &Path) -> Result<bool, String> {
+        let bytes = read_config(&self.home.path().join("auth.json"))?
+            .ok_or("Codex 未生成官方登录记录，请重试。")?;
+        let mut book = account_book(root)?;
+        let live = codex_live(bytes)?;
+        let existing = book
+            .accounts
+            .iter()
+            .any(|account| account.client == Client::Codex && same(account, &live));
+        let label = (!existing).then_some(self.label.as_str());
+        replace_live(&mut book, Client::Codex, live, label)?;
+        save_private(&root.join("accounts.bin"), &book)?;
+        Ok(!existing)
+    }
+}
+
+impl Drop for CodexLogin {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() && self.child.kill().is_ok() {
+            let _ = self.child.wait();
+        }
+    }
+}
+
+pub(super) fn launch(root: &Path, user: &Path, client: Client) -> Result<String, String> {
     let desktop_name = match client {
         Client::Dsh => Some(("DeepSeek Harness", "DeepSeek Harness.exe")),
         Client::Workbuddy => Some(("WorkBuddy", "WorkBuddy.exe")),
@@ -597,26 +723,6 @@ pub(super) fn launch(
     std::fs::create_dir_all(&login_dir).map_err(|_| "无法准备官方登录目录。")?;
     command.current_dir(&login_dir);
     let message = match client {
-        Client::Codex => {
-            command.args([
-                "login",
-                "-c",
-                "chatgpt_base_url=\"https://chatgpt.com/backend-api/\"",
-            ]);
-            let config = read_config(&client.config(user))?;
-            let config = toml(config.as_deref())?;
-            if config
-                .get("cli_auth_credentials_store")
-                .and_then(toml_edit::Item::as_str)
-                .is_none_or(|mode| mode == "file")
-            {
-                command.args(["-c", "cli_auth_credentials_store=\"file\""]);
-            }
-            if alternate {
-                command.arg("--device-auth");
-            }
-            "已发起 ChatGPT 登录。完成后刷新，便可收录账号。"
-        }
         Client::Claude => {
             command
                 .args(["auth", "login"])
@@ -779,6 +885,69 @@ fn client_running(_: Client) -> Result<bool, String> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_adds_another_official_account_before_switching() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let user = fixture.path().join("user");
+        let archive = fixture.path().join("ai-tools");
+        let file = credential_file(Client::Codex, &user);
+        assert!(file.starts_with(&user), "run with fixture CODEX_HOME unset");
+        let credentials = |subject| {
+            let claims = URL_SAFE_NO_PAD.encode(json!({"sub":subject}).to_string());
+            json_bytes(&json!({"auth_mode":"chatgpt","tokens":{
+                "id_token":format!("fixture.{claims}.unused"),
+                "access_token":format!("fixture-access-{subject}"),
+                "account_id":"fixture-shared-workspace"
+            }}))
+            .unwrap()
+        };
+        let first = credentials("first");
+        let second = credentials("second");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, &first).unwrap();
+        capture(&archive, &user, Client::Codex, "账号甲").unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        let mut login = CodexLogin {
+            child: Command::new("cmd.exe")
+                .args(["/d", "/c", "exit", "0"])
+                .spawn()
+                .unwrap(),
+            home,
+            label: "账号乙".into(),
+        };
+        std::fs::write(login.home.path().join("auth.json"), &second).unwrap();
+        login.wait(&AtomicBool::new(false)).unwrap();
+        assert!(login.save(&archive).unwrap());
+        login.label = "重复授权备注".into();
+        assert!(!login.save(&archive).unwrap());
+        let pending_home = login.home.path().to_owned();
+        drop(login);
+
+        assert!(!pending_home.exists());
+        assert_eq!(std::fs::read(&file).unwrap(), first);
+        let visible = status(&archive, &user, Client::Codex).unwrap();
+        assert_eq!(visible["accounts"][0]["active"], true);
+        assert_eq!(visible["accounts"][1]["active"], false);
+        assert!(!visible.to_string().contains("fixture-access"));
+        let book = account_book(&archive).unwrap();
+        assert_eq!(book.accounts.len(), 2);
+        assert_eq!(book.accounts[1].label, "账号乙");
+        storage::commit(
+            &archive,
+            "fixture switch",
+            switch_changes(&user, &book.accounts[1]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), second);
+        assert_eq!(
+            status(&archive, &user, Client::Codex).unwrap()["accounts"][1]["active"],
+            true
+        );
+    }
 
     #[test]
     fn account_switch_changes_only_deepseek_account_grant() {

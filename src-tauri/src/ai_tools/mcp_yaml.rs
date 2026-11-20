@@ -76,7 +76,11 @@ pub(super) fn dsh_direct_plan(
     let (_, active_models) = super::native_models::catalog(Client::Dsh, user)?;
     let model = active_models
         .first()
+        .filter(|entry| !entry.model.is_empty())
         .map_or(direct.model, |entry| entry.model.as_str());
+    if model.is_empty() {
+        return Err(super::native_models::MISSING_RELAY_MODEL.into());
+    }
     let live_provider = existing.iter().find_map(|plugin| {
         (plugin["id"].as_str() == Some("llm-pi-ai"))
             .then(|| plugin["config"]["providers"].get(direct.id))

@@ -41,6 +41,8 @@ pub(super) struct DirectModel<'a> {
     pub key: &'a str,
 }
 
+pub(super) const MISSING_RELAY_MODEL: &str = "没有可沿用的模型，请先为这条中转补充模型 ID。";
+
 pub(super) fn direct_plan(
     client: Client,
     user: &Path,
@@ -79,6 +81,9 @@ pub(super) fn direct_plan(
             .filter(|model| !model.is_empty())
             .unwrap_or(model)
             .to_owned();
+        if model.is_empty() {
+            return Err(MISSING_RELAY_MODEL.into());
+        }
         if client == Client::Grokbuild {
             let mut entry = toml_edit::Table::new();
             for (field, value) in [
@@ -123,6 +128,9 @@ pub(super) fn direct_plan(
             .and_then(model_suffix)
             .unwrap_or(model)
             .to_owned();
+        if model.is_empty() {
+            return Err(MISSING_RELAY_MODEL.into());
+        }
         let provider_path = std::env::var_os("COPILOT_PROVIDERS_CONFIG")
             .map(std::path::PathBuf::from)
             .filter(|path| path.is_absolute())
@@ -164,6 +172,9 @@ pub(super) fn direct_plan(
         ]);
     }
     let after = if client == Client::Workbuddy {
+        if model.is_empty() {
+            return Err(MISSING_RELAY_MODEL.into());
+        }
         let raw: Value = before
             .as_deref()
             .filter(|bytes| !bytes.is_empty())
@@ -215,6 +226,9 @@ pub(super) fn direct_plan(
                     .as_str()
                     .filter(|model| !model.is_empty())
                     .unwrap_or(model);
+                if model.is_empty() {
+                    return Err(MISSING_RELAY_MODEL.into());
+                }
                 insert_provider(
                     &mut document,
                     "providers",
@@ -236,6 +250,9 @@ pub(super) fn direct_plan(
                     .and_then(model_suffix)
                     .unwrap_or(model)
                     .to_owned();
+                if model.is_empty() {
+                    return Err(MISSING_RELAY_MODEL.into());
+                }
                 let legacy = document.get("provider").is_some();
                 if legacy && document.get("providers").is_some() {
                     return Err(
@@ -266,6 +283,9 @@ pub(super) fn direct_plan(
                     .and_then(model_suffix)
                     .unwrap_or(model)
                     .to_owned();
+                if model.is_empty() {
+                    return Err(MISSING_RELAY_MODEL.into());
+                }
                 let reference = format!("{id}/{model}");
                 let root = object_entry(&mut document, "models")?;
                 insert_provider(
@@ -326,6 +346,9 @@ fn yaml_provider_plan(
     .filter(|value| !value.is_empty())
     .unwrap_or(model)
     .to_owned();
+    if model.is_empty() {
+        return Err(MISSING_RELAY_MODEL.into());
+    }
     let root = config
         .as_mapping_mut()
         .ok_or("客户端 YAML 配置必须是对象。")?;

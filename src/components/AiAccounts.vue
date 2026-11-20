@@ -1,35 +1,62 @@
 <script lang="ts">
 export interface Account { id: string; label: string; active: boolean }
-export interface AccountStatus { canLaunch: boolean; canCapture: boolean; hasLive: boolean; accounts: Account[]; loginNote?: string }
+export interface AccountStatus { canLaunch: boolean; canCapture: boolean; hasLive: boolean; accounts: Account[]; loginNote?: string; loginPending?: boolean }
 </script>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-defineProps<{ status: AccountStatus; client: string; busy: boolean }>()
-const emit = defineEmits<{ login: [device: boolean]; capture: [label: string]; select: [account: Account]; remove: [account: Account] }>()
+import { ref, watch } from 'vue'
+const props = defineProps<{ status: AccountStatus; client: string; busy: boolean }>()
+const emit = defineEmits<{
+  login: [device: boolean, label?: string]
+  capture: [label: string]
+  select: [account: Account]
+  remove: [account: Account]
+  refreshLogin: []
+  cancelLogin: []
+}>()
 const label = ref('')
+
+watch(() => props.status.loginPending, (pending, _, onCleanup) => {
+  if (!pending) return
+  const timer = window.setInterval(() => emit('refreshLogin'), 1000)
+  onCleanup(() => window.clearInterval(timer))
+}, { immediate: true })
 </script>
 
 <template>
   <section class="card accounts">
     <div class="account-actions account-heading">
       <h2>官方账号</h2>
-      <div v-if="status.canLaunch" class="account-actions">
+      <div v-if="status.canLaunch && client !== 'codex'" class="account-actions">
         <button :disabled="busy" @click="emit('login', false)">发起官方登录</button>
-        <button v-if="client === 'codex'" :disabled="busy" @click="emit('login', true)">使用设备码</button>
       </div>
     </div>
     <template v-if="status.canCapture">
-      <p>{{ status.hasLive ? '检测到本机官方登录。' : '尚未检测到可收录的本机官方登录。' }} 授权完成后刷新，再收录当前账号。</p>
-      <form class="account-actions capture" @submit.prevent="emit('capture', label)">
-        <label>账号备注<input v-model.trim="label" required maxlength="64" placeholder="例如 工作账号" /></label>
-        <button :disabled="busy || !status.hasLive || !label">收录当前账号</button>
-      </form>
+      <template v-if="client === 'codex'">
+        <p>可保存多个 ChatGPT 账号。退出 Codex 后可切换账号。使用官方连接时，在直连配置里选择「切回官方」。</p>
+        <form class="account-actions capture" @submit.prevent="emit('login', false, label)">
+          <label>账号备注<input v-model.trim="label" required maxlength="64" placeholder="例如 工作账号" :disabled="busy || status.loginPending" /></label>
+          <button class="primary" :disabled="busy || status.loginPending || !label">添加官方账号</button>
+          <button type="button" :disabled="busy || status.loginPending || !label" @click="emit('login', true, label)">使用设备码</button>
+          <button v-if="status.hasLive" type="button" :disabled="busy || status.loginPending || !label" @click="emit('capture', label)">保存当前账号</button>
+        </form>
+        <div v-if="status.loginNote" class="account-actions login-status" aria-live="polite">
+          <span>{{ status.loginNote }}</span>
+          <button v-if="status.loginPending" type="button" :disabled="busy" @click="emit('cancelLogin')">取消登录</button>
+        </div>
+      </template>
+      <template v-else>
+        <p>{{ status.hasLive ? '检测到本机官方登录。' : '尚未检测到可收录的本机官方登录。' }} 授权完成后刷新，再收录当前账号。</p>
+        <form class="account-actions capture" @submit.prevent="emit('capture', label)">
+          <label>账号备注<input v-model.trim="label" required maxlength="64" placeholder="例如 工作账号" /></label>
+          <button :disabled="busy || !status.hasLive || !label">收录当前账号</button>
+        </form>
+      </template>
       <div v-for="account in status.accounts" :key="account.id" class="account-row">
         <strong>{{ account.label }}</strong>
         <div class="account-actions">
           <span v-if="account.active" class="active-label">● 当前登录</span>
-          <button v-else :disabled="busy" @click="emit('select', account)">切换账号</button>
+          <button v-else :disabled="busy || status.loginPending" @click="emit('select', account)">切换账号</button>
           <button :disabled="busy" @click="emit('remove', account)">移除副本</button>
         </div>
       </div>
@@ -48,6 +75,7 @@ const label = ref('')
 .account-row{border-top:1px solid #e3ebf1;padding:10px 0;overflow-wrap:anywhere}
 .capture{justify-content:flex-start;align-items:end;margin:12px 0}
 .capture label{display:grid;gap:5px;min-width:0;width:min(100%,255px)}
+.login-status{margin:10px 0 14px;color:#526578}
 .accounts small{display:block;margin-top:10px;color:#526578}
 .active-label{color:#215d7f;font-weight:650}
 </style>

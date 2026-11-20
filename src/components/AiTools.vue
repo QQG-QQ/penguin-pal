@@ -68,7 +68,9 @@ const notice = ref('')
 const infoNote = ref('')
 const confirm = ref<Confirm | null>(null)
 const profileName = ref('')
+const addingConnection = ref<'options' | 'relay' | 'official' | null>(null)
 const direct = ref<{ name: string; endpoint: string; model: string; key: string } | null>(null)
+const directModelEditor = ref<{ id: string; model: string } | null>(null)
 const accountStatus = ref<AccountStatus | null>(null)
 type McpDefinition = { type: 'stdio' | 'http' | 'sse'; command?: string; url?: string; args?: string[]; cwd?: string }
 const mcpEditor = ref<{ name: string; definition?: McpDefinition; preservesPrivateFields?: boolean } | null>(null)
@@ -84,6 +86,7 @@ const showAllApps = ref(false)
 const backups = ref<{ id: string; title: string; files: string[]; createdAt: string }[]>([])
 const cli = ref<{ executables: string[]; version: string | null } | null>(null)
 const currentApp = computed(() => clients.value.find(item => item.id === client.value))
+const accountPanelOpen = computed(() => page.value === 'accounts' || (page.value === 'tools' && addingConnection.value === 'official'))
 const visibleClients = computed(() => clients.value.filter(item => item.configured || item.executable || item.id === client.value))
 const otherClients = computed(() => clients.value.filter(item => !visibleClients.value.includes(item)))
 const mcpApps = computed(() => clients.value.filter(item => item.mcpSupported))
@@ -137,13 +140,14 @@ async function loadPage() {
   } else {
     detail.value = await request<Detail>('inspect', { client: app })
     prompt.value = detail.value.prompt?.text ?? ''
+    if (accountPanelOpen.value) accountStatus.value = await request<AccountStatus>('accountStatus', { client: app })
   }
 }
 
 function focusPage(next: Page) {
   void task(async () => {
     page.value = next
-    direct.value = null
+    closeConnectionEditor()
     mcpEditor.value = null
     skillPicker.value = false
     await loadPage()
@@ -153,7 +157,7 @@ function focusPage(next: Page) {
 function focusClient(next: Client) {
   void task(async () => {
     client.value = next
-    direct.value = null
+    closeConnectionEditor()
     accountStatus.value = null
     showAllApps.value = false
     query.value = ''
@@ -209,21 +213,79 @@ function apply(operation: Operation) {
   void task(() => prepare(operation))
 }
 
+function closeConnectionEditor() {
+  addingConnection.value = null
+  direct.value = null
+  directModelEditor.value = null
+}
+
+function toggleConnectionEditor() {
+  if (addingConnection.value) closeConnectionEditor()
+  else addingConnection.value = 'options'
+}
+
+function addRelay() {
+  addingConnection.value = 'relay'
+  direct.value ??= { name: '', endpoint: '', model: '', key: '' }
+}
+
+function addOfficialAccount() {
+  if (addingConnection.value === 'official' && accountStatus.value) return
+  void task(async () => {
+    addingConnection.value = 'official'
+    accountStatus.value = null
+    accountStatus.value = await request<AccountStatus>('accountStatus', { client: client.value })
+  })
+}
+
 function saveDirect() {
   void task(async () => {
     if (!direct.value) return
     await request<Provider>('saveDirect', { client: client.value, ...direct.value })
-    direct.value = null
+    closeConnectionEditor()
     await loadPage()
     notice.value = '中转已保存，可以检查连接或切换。'
   })
 }
 
-function startLogin(device: boolean) {
+function saveDirectModel() {
   void task(async () => {
-    const result = await request<{ message: string }>('startLogin', { client: client.value, device })
-    infoNote.value = result.message
+    if (!directModelEditor.value) return
+    await request('setDirectModel', { client: client.value, ...directModelEditor.value })
+    directModelEditor.value = null
     await loadPage()
+    notice.value = '模型 ID 已保存。'
+  })
+}
+
+function startLogin(device: boolean, label?: string) {
+  void task(async () => {
+    const result = await request<{ message: string }>('startLogin', { client: client.value, device, label })
+    if (client.value !== 'codex') infoNote.value = result.message
+    await loadPage()
+  })
+}
+
+let checkingLogin = false
+async function refreshCodexLogin() {
+  if (busy.value || checkingLogin || client.value !== 'codex' || !accountPanelOpen.value) return
+  checkingLogin = true
+  const previous = accountStatus.value
+  try {
+    const status = await request<AccountStatus>('accountStatus', { client: 'codex' })
+    if (accountStatus.value === previous && accountPanelOpen.value && client.value === 'codex') {
+      accountStatus.value = status
+    }
+  } catch (reason) {
+    if (accountPanelOpen.value && client.value === 'codex') error.value = String(reason)
+  } finally {
+    checkingLogin = false
+  }
+}
+
+function cancelCodexLogin() {
+  void task(async () => {
+    accountStatus.value = await request<AccountStatus>('cancelCodexLogin')
   })
 }
 
@@ -497,30 +559,60 @@ onMounted(refresh)
             <button :disabled="busy" :aria-pressed="Boolean(detail.provider.unifiedHistory)" @click="apply({ kind: 'codexHistory', enabled: !detail.provider.unifiedHistory })">{{ detail.provider.unifiedHistory ? '关闭统一' : '开启统一' }}</button>
           </div>
         </section>
-        <section v-if="currentApp?.supportsDirect || !detail.provider.managedByClient || detail.provider.providers.length" class="card">
-          <div class="spread"><h2>直连配置</h2><button v-if="currentApp?.supportsDirect" :disabled="busy" @click="direct = { name: '', endpoint: '', model: '', key: '' }">新增中转</button></div>
-          <form v-if="direct" class="editor direct-form" @submit.prevent="saveDirect">
-            <label>显示名称<input v-model.trim="direct.name" maxlength="80" required /></label>
-            <label>模型 ID<input v-model.trim="direct.model" maxlength="120" required /></label>
-            <label>API 地址<input v-model.trim="direct.endpoint" type="url" required placeholder="https://example.com/v1" /></label>
-            <label>API Key<input v-model.trim="direct.key" type="password" maxlength="8192" autocomplete="off" required /></label>
-            <small class="muted">{{ client === 'codex' || client === 'grokbuild' ? '使用 OpenAI Responses API。' : client === 'claude' ? '使用 Anthropic Messages API。' : client === 'gemini' ? '使用 Gemini 原生 API。' : '使用 OpenAI 兼容 Chat Completions API。' }}</small>
-            <div class="actions"><button type="button" :disabled="busy" @click="direct = null">取消</button><button class="primary" :disabled="busy">保存中转</button></div>
-          </form>
-          <div v-for="item in detail.provider.providers" :key="item.id" class="provider-row" :class="{ 'in-use': item.inUse }">
-            <div><strong>{{ item.name }}</strong><small>{{ [(item.inUse || item.modelChoice || ['workbuddy', 'omp'].includes(client)) ? item.model : '', item.host].filter(Boolean).join(' · ') || (item.official ? '使用客户端的官方登录' : '沿用客户端默认连接') }}</small></div>
-            <div v-if="!detail.provider.managedByClient || item.modelChoice || item.inUse || item.savedDirect" class="actions">
-              <span v-if="item.inUse" class="active-label" title="已写入当前客户端配置"><i aria-hidden="true"></i>使用中</span>
-              <span v-if="item.installed" class="muted">已写入模型列表</span>
-              <button v-if="!detail.provider.managedByClient || item.savedDirect" :disabled="busy" @click="check(item, item.inUse && !item.savedDirect)">检查</button>
-              <button v-if="!item.inUse && !item.installed" class="primary" :disabled="busy" @click="apply({ kind: item.modelChoice ? 'nativeModel' : 'provider', id: item.id })">{{ item.official ? '切回官方' : ['workbuddy', 'omp'].includes(client) ? '写入模型' : '切换' }}</button>
-            </div>
+        <section v-if="currentApp?.supportsDirect || currentApp?.canLaunchAuth || !detail.provider.managedByClient || detail.provider.providers.length" class="card">
+          <div class="spread">
+            <h2>直连配置</h2>
+            <button v-if="currentApp?.supportsDirect || currentApp?.canLaunchAuth" type="button" :disabled="busy"
+              :aria-expanded="addingConnection !== null" aria-controls="add-connection-panel" @click="toggleConnectionEditor">
+              {{ addingConnection ? '收起' : '新增连接' }}
+            </button>
           </div>
+          <div v-if="addingConnection" id="add-connection-panel">
+            <div class="actions connection-options">
+              <button v-if="currentApp?.supportsDirect" type="button" :disabled="busy"
+                :aria-pressed="addingConnection === 'relay'" @click="addRelay">添加中转</button>
+              <button v-if="currentApp?.canLaunchAuth" type="button" :disabled="busy"
+                :aria-pressed="addingConnection === 'official'" @click="addOfficialAccount">添加官方账号</button>
+            </div>
+            <form v-if="addingConnection === 'relay' && direct" class="editor direct-form" @submit.prevent="saveDirect">
+              <label>显示名称<input v-model.trim="direct.name" maxlength="80" required /></label>
+              <label>模型 ID（可选）
+                <input v-model.trim="direct.model" maxlength="120" aria-describedby="direct-model-help" />
+                <small id="direct-model-help" class="muted">{{ detail.provider.managedByClient ? '可以先留空保存，需要时再补充模型 ID。' : '留空时沿用当前模型，未选过模型时使用客户端默认值。' }}</small>
+              </label>
+              <label>API 地址<input v-model.trim="direct.endpoint" type="url" required placeholder="https://example.com/v1" /></label>
+              <label>API Key<input v-model.trim="direct.key" type="password" maxlength="8192" autocomplete="off" required /></label>
+              <small class="muted">{{ client === 'codex' || client === 'grokbuild' ? '使用 OpenAI Responses API。' : client === 'claude' ? '使用 Anthropic Messages API。' : client === 'gemini' ? '使用 Gemini 原生 API。' : '使用 OpenAI 兼容 Chat Completions API。' }}</small>
+              <div class="actions"><button type="button" :disabled="busy" @click="closeConnectionEditor">取消</button><button class="primary" :disabled="busy">保存中转</button></div>
+            </form>
+            <AiAccounts v-if="addingConnection === 'official' && accountStatus" :key="client" class="connection-accounts"
+              :status="accountStatus" :client="client" :busy="busy" @login="startLogin" @capture="captureAccount"
+              @select="selectAccount" @remove="removeAccount" @refresh-login="refreshCodexLogin" @cancel-login="cancelCodexLogin" />
+          </div>
+          <template v-for="item in detail.provider.providers" :key="item.id">
+            <div class="provider-row" :class="{ 'in-use': item.inUse }">
+              <div><strong>{{ item.name }}</strong><small>{{ [(item.inUse || item.modelChoice || ['workbuddy', 'omp'].includes(client)) ? item.model : '', item.host].filter(Boolean).join(' · ') || (item.official ? '使用客户端的官方登录' : '沿用客户端默认连接') }}</small></div>
+              <div v-if="!detail.provider.managedByClient || item.modelChoice || item.inUse || item.savedDirect" class="actions">
+                <span v-if="item.inUse" class="active-label" title="已写入当前客户端配置"><i aria-hidden="true"></i>使用中</span>
+                <span v-if="item.installed" class="muted">已写入模型列表</span>
+                <button v-if="!detail.provider.managedByClient || item.savedDirect" :disabled="busy" @click="check(item, item.inUse && !item.savedDirect)">检查</button>
+                <button v-if="item.savedDirect && !item.model && !item.inUse && !item.installed" type="button" :disabled="busy"
+                  @click="directModelEditor = { id: item.id, model: '' }">补充模型 ID</button>
+                <button v-if="!item.inUse && !item.installed" class="primary" :disabled="busy" @click="apply({ kind: item.modelChoice ? 'nativeModel' : 'provider', id: item.id })">{{ item.official ? '切回官方' : ['workbuddy', 'omp'].includes(client) ? '写入模型' : '切换' }}</button>
+              </div>
+            </div>
+            <form v-if="directModelEditor && directModelEditor.id === item.id" class="inline-form relay-model-form" @submit.prevent="saveDirectModel">
+              <input v-model.trim="directModelEditor.model" aria-label="模型 ID" maxlength="120" required placeholder="模型 ID" />
+              <button type="button" :disabled="busy" @click="directModelEditor = null">取消</button>
+              <button class="primary" :disabled="busy || !directModelEditor.model">保存模型</button>
+            </form>
+          </template>
         </section>
       </template>
 
       <AiAccounts v-if="page === 'accounts' && accountStatus" :key="client" :status="accountStatus" :client="client" :busy="busy"
-        @login="startLogin" @capture="captureAccount" @select="selectAccount" @remove="removeAccount" />
+        @login="startLogin" @capture="captureAccount" @select="selectAccount" @remove="removeAccount"
+        @refresh-login="refreshCodexLogin" @cancel-login="cancelCodexLogin" />
 
       <section v-if="page === 'projects' && detail?.provider.managedByClient" class="card">
         <p>{{ detail.provider.label }} 的这项配置请在客户端内管理。</p>
@@ -682,7 +774,7 @@ small{display:block;color:#526579;overflow-wrap:anywhere;margin-top:4px}
 .workspace-header,.spread,.list-row{justify-content:space-between}
 .workspace-header{margin-bottom:19px}
 .clients{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
-.clients button[aria-pressed=true],.session-list button[aria-pressed=true]{border-color:#3e7f9d;background:#e4f1f8}
+.clients button[aria-pressed=true],.session-list button[aria-pressed=true],.connection-options button[aria-pressed=true]{border-color:#3e7f9d;background:#e4f1f8}
 .clients i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#8797a4;margin-right:7px;vertical-align:2px}
 .clients i.installed{background:#27845a}
 .more-clients{display:flex;flex-wrap:wrap;gap:8px;flex-basis:100%;padding:9px;background:#e7eff5;border-radius:8px}
@@ -705,6 +797,9 @@ small{display:block;color:#526579;overflow-wrap:anywhere;margin-top:4px}
 .active-label i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#2877a4}
 .actions{gap:7px;flex-wrap:wrap;justify-content:flex-end}
 .tool-actions{justify-content:flex-start;margin:10px 0}
+.connection-options{margin:8px 0 12px}
+.connection-accounts{margin-top:12px;background:#f7fbfe}
+.relay-model-form{margin:8px 0 12px}
 .editor{display:grid;gap:10px;margin-top:14px;border-top:1px solid #e3ebf1;padding-top:14px}
 .editor label{display:grid;gap:5px;color:#3f5668}
 .direct-form{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:14px}

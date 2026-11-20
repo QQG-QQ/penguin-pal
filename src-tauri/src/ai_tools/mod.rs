@@ -12,7 +12,10 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +51,21 @@ impl AiTools {
 struct WindowState {
     skill_source: Option<PathBuf>,
     sessions: HashMap<String, Session>,
+    codex_login: Option<Arc<AtomicBool>>,
+    codex_login_note: Option<String>,
+}
+
+impl WindowState {
+    fn account_status(&self, root: &Path, user: &Path, client: Client) -> Result<Value, String> {
+        let mut status = accounts::status(root, user, client)?;
+        if client == Client::Codex {
+            status["loginPending"] = json!(self.codex_login.is_some());
+            if let Some(note) = &self.codex_login_note {
+                status["loginNote"] = json!(note);
+            }
+        }
+        Ok(status)
+    }
 }
 
 impl AiTools {
@@ -239,7 +257,9 @@ enum Request {
         client: Client,
         #[serde(default)]
         device: bool,
+        label: Option<String>,
     },
+    CancelCodexLogin,
     CaptureAccount {
         client: Client,
         label: String,
@@ -262,6 +282,12 @@ enum Request {
         name: String,
         endpoint: String,
         key: String,
+        #[serde(default)]
+        model: String,
+    },
+    SetDirectModel {
+        client: Client,
+        id: String,
         model: String,
     },
     Inspect {
@@ -708,7 +734,8 @@ fn perform(
         _ => {}
     }
 
-    let mut state = state.state.lock().map_err(|_| "AI 工具状态忙。")?;
+    let window = &state.state;
+    let mut state = window.lock().map_err(|_| "AI 工具状态忙。")?;
     let mut settings: Settings = load_private(&settings_path)?.unwrap_or_default();
     match request {
         Request::Overview => {
@@ -732,17 +759,72 @@ fn perform(
             &user,
             &settings.providers,
         )),
-        Request::AccountStatus { client } => accounts::status(root, &user, client),
-        Request::StartLogin { client, device } => {
-            Ok(json!({"message":accounts::launch(root, &user, client, device)?}))
+        Request::AccountStatus { client } => state.account_status(root, &user, client),
+        Request::StartLogin {
+            client: Client::Codex,
+            device,
+            label,
+        } => {
+            if state.codex_login.is_some() {
+                return Err("已有 Codex 登录正在进行。".into());
+            }
+            let mut login = accounts::CodexLogin::start(
+                root,
+                &user,
+                label.as_deref().unwrap_or_default(),
+                device,
+            )?;
+            let canceled = Arc::new(AtomicBool::new(false));
+            let worker_cancel = Arc::clone(&canceled);
+            let window = Arc::clone(window);
+            let root = root.to_owned();
+            std::thread::Builder::new()
+                .spawn(move || {
+                    let completed = login.wait(&worker_cancel);
+                    if let Ok(mut state) = window.lock() {
+                        let result = if worker_cancel.load(Ordering::Relaxed) {
+                            Err("已取消添加账号。".into())
+                        } else {
+                            completed.and_then(|()| login.save(&root))
+                        };
+                        drop(login);
+                        state.codex_login = None;
+                        state.codex_login_note = Some(match result {
+                            Ok(true) => "官方账号已保存，可以切换。".into(),
+                            Ok(false) => {
+                                "这个账号已保存。若要添加另一个，请在授权页面切换账号。".into()
+                            }
+                            Err(error) => error,
+                        });
+                    }
+                })
+                .map_err(|_| "无法启动 Codex 登录后台任务。")?;
+            state.codex_login = Some(canceled);
+            let message = if device {
+                "请按登录窗口提示输入设备码，授权成功后会自动保存账号。"
+            } else {
+                "请在浏览器选择要添加的账号，授权成功后会自动保存。"
+            };
+            state.codex_login_note = Some(message.into());
+            Ok(json!({"message":message}))
+        }
+        Request::StartLogin { client, .. } => {
+            Ok(json!({"message":accounts::launch(root, &user, client)?}))
+        }
+        Request::CancelCodexLogin => {
+            if let Some(canceled) = &state.codex_login {
+                canceled.store(true, Ordering::Relaxed);
+                state.codex_login_note = Some("正在取消登录。".into());
+            }
+            state.account_status(root, &user, Client::Codex)
         }
         Request::CaptureAccount { client, label } => {
             accounts::capture(root, &user, client, &label)?;
-            accounts::status(root, &user, client)
+            state.account_status(root, &user, client)
         }
         Request::RemoveAccount { client, id } => {
             accounts::remove(root, client, &id)?;
-            accounts::status(root, &user, client)
+            state.account_status(root, &user, client)
         }
         Request::PreviewAccount { client, id } => {
             let (title, changes) = accounts::plan(root, &user, client, &id)?;
@@ -763,7 +845,7 @@ fn perform(
                 accounts::preserve_current(root, &user, client)?;
             }
             storage::commit(root, &title, changes)?;
-            accounts::status(root, &user, client)
+            state.account_status(root, &user, client)
         }
         Request::SaveDirect {
             client,
@@ -786,6 +868,21 @@ fn perform(
             settings.providers.push(provider);
             save_private(&settings_path, &settings)?;
             Ok(view)
+        }
+        Request::SetDirectModel { client, id, model } => {
+            let id = id
+                .split_once(':')
+                .filter(|(prefix, _)| *prefix == client.id())
+                .map(|(_, id)| id)
+                .ok_or("中转编号无效。")?;
+            let provider = settings
+                .providers
+                .iter_mut()
+                .find(|provider| provider.client == client && provider.id == id)
+                .ok_or("找不到这条中转配置。")?;
+            provider.set_native_relay_model(&model)?;
+            save_private(&settings_path, &settings)?;
+            Ok(json!({"ok":true}))
         }
         Request::Inspect { client } => {
             let result = providers::list_for(client, &user, &settings.providers);
