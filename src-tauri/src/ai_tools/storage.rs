@@ -104,7 +104,7 @@ impl Change {
         Ok(())
     }
 
-    fn apply(&self) -> Result<(), String> {
+    pub(super) fn apply(&self) -> Result<(), String> {
         self.verify()?;
         match &self.after {
             Some(bytes) => persist(&self.path, bytes),
@@ -115,7 +115,7 @@ impl Change {
         }
     }
 
-    fn reversed(&self) -> Self {
+    pub(super) fn reversed(&self) -> Self {
         Self {
             path: self.path.clone(),
             before: self.after.clone(),
@@ -251,6 +251,10 @@ pub(super) fn rollback(root: &Path, id: &str, user: &Path) -> Result<Option<Stri
     let codex_config = super::providers::Client::Codex.config(user);
     let mut changes = Vec::new();
     for change in backup.changes.iter().rev() {
+        #[cfg(windows)]
+        if change.path == user.join(".gemini/antigravity-cli/settings.json") {
+            super::accounts::ensure_stopped(super::providers::Client::Agy)?;
+        }
         if let Some(client) = super::accounts::credential_client(&change.path) {
             super::accounts::ensure_stopped(client)?;
         }

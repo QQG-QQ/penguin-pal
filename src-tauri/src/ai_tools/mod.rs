@@ -1,4 +1,6 @@
 mod accounts;
+#[cfg(windows)]
+mod antigravity;
 mod codex_models;
 mod codex_quota;
 mod extensions;
@@ -50,6 +52,8 @@ impl AiTools {
 
 #[derive(Default)]
 struct WindowState {
+    #[cfg(windows)]
+    antigravity: antigravity::Runtime,
     skill_source: Option<PathBuf>,
     sessions: HashMap<String, Session>,
     codex_login: Option<Arc<AtomicBool>>,
@@ -245,6 +249,8 @@ enum Operation {
 #[serde(tag = "action", rename_all = "camelCase")]
 enum Request {
     Overview,
+    #[cfg(windows)]
+    Antigravity { command: antigravity::Action },
     QuickProviders,
     Switch {
         client: Client,
@@ -678,6 +684,11 @@ fn perform(
     let root = &*state.root;
     let settings_path = root.join("settings.bin");
     match request {
+        #[cfg(windows)]
+        Request::Antigravity { command } => {
+            return state.state.lock().map_err(|_| "AI 工具状态忙。")?
+                .antigravity.perform(app, root, &user, command);
+        }
         Request::PickSkill => {
             let choice = app.dialog().file().blocking_pick_folder();
             let Some(choice) = choice else {
@@ -745,6 +756,10 @@ fn perform(
                 .into_iter()
                 .map(|client| {
                     let mut info = providers::list_for(client, &user, &settings.providers);
+                    #[cfg(windows)]
+                    if client == Client::Agy {
+                        antigravity::describe(&mut info);
+                    }
                     info["mcpSupported"] = json!(extensions::supports_mcp(client));
                     info["mcpSse"] = json!(extensions::supports_sse(client));
                     info["supportsDirect"] =

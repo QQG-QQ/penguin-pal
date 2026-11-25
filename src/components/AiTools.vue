@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import AiAntigravity from './AiAntigravity.vue'
 import AiUsage from './AiUsage.vue'
 import AiMcpForm from './AiMcpForm.vue'
 import AiSkillImport from './AiSkillImport.vue'
@@ -18,7 +19,7 @@ interface ClientView {
   id: Client; label: string; config: string; current: Provider | null
   error: string | null; providers: Provider[]; executable?: string | null
   mcpSupported?: boolean; mcpSse?: boolean
-  supportsDirect?: boolean; canLaunchAuth?: boolean
+  supportsDirect?: boolean; canLaunchAuth?: boolean; antigravityManagement?: boolean
   unifiedHistory?: boolean
   configured: boolean; configuredModel?: string; managedByClient?: boolean; sessionLogs?: boolean
 }
@@ -92,9 +93,12 @@ const thread = ref<Thread | null>(null)
 const usage = ref<Report | null>(null)
 const usageSince = ref<number | null>(new Date().setHours(0, 0, 0, 0))
 const showAllApps = ref(false)
+const antigravityRefresh = ref(0)
 const backups = ref<{ id: string; title: string; files: string[]; createdAt: string }[]>([])
 const cli = ref<{ executables: string[]; version: string | null } | null>(null)
 const currentApp = computed(() => clients.value.find(item => item.id === client.value))
+const managesAntigravity = computed(() => currentApp.value?.antigravityManagement
+  && (page.value === 'tools' || page.value === 'accounts'))
 const accountPanelOpen = computed(() => page.value === 'accounts' || (page.value === 'tools' && addingConnection.value === 'official'))
 const visibleClients = computed(() => clients.value.filter(item => item.configured || item.executable || item.id === client.value))
 const otherClients = computed(() => clients.value.filter(item => !visibleClients.value.includes(item)))
@@ -138,7 +142,9 @@ async function loadHistory() {
 
 async function loadPage() {
   const app = client.value
-  if (page.value === 'sessions') {
+  if (managesAntigravity.value) {
+    antigravityRefresh.value++
+  } else if (page.value === 'sessions') {
     await loadHistory()
   } else if (page.value === 'usage') {
     usage.value = await request<Report>('usage', { client: app, since: usageSince.value })
@@ -540,7 +546,8 @@ onMounted(refresh)
       <p v-else-if="infoNote" class="banner neutral" role="status">{{ infoNote }}</p>
       <p v-else-if="notice" class="banner" role="status">{{ notice }}</p>
 
-      <template v-if="page === 'tools' && detail">
+      <AiAntigravity v-if="managesAntigravity" :refresh="antigravityRefresh" :accounts-only="page === 'accounts'" />
+      <template v-else-if="page === 'tools' && detail">
         <section class="card highlighted">
           <div class="spread">
             <div>

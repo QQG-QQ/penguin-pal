@@ -774,7 +774,7 @@ pub(super) fn launch(root: &Path, user: &Path, client: Client) -> Result<String,
 }
 
 #[cfg(windows)]
-fn installed_desktop(label: &str, exe: &str) -> Option<PathBuf> {
+pub(super) fn installed_desktop(label: &str, exe: &str) -> Option<PathBuf> {
     use winreg::{
         enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
         RegKey,
@@ -831,13 +831,6 @@ fn installed_desktop(_: &str, _: &str) -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn client_running(client: Client) -> Result<bool, String> {
-    use windows::Win32::{
-        Foundation::CloseHandle,
-        System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-            TH32CS_SNAPPROCESS,
-        },
-    };
     let names: &[&str] = match client {
         Client::Codex => &["codex.exe"],
         Client::Claude => &["claude.exe"],
@@ -845,7 +838,20 @@ fn client_running(client: Client) -> Result<bool, String> {
         Client::Kimi => &["kimi.exe"],
         Client::Dsh => &["dsh.exe", "DeepSeek Harness.exe"],
         Client::Workbuddy => &["WorkBuddy.exe"],
+        Client::Agy => &["agy.exe"],
         _ => &[],
+    };
+    process_names_running(names)
+}
+
+#[cfg(windows)]
+pub(super) fn process_names_running(names: &[&str]) -> Result<bool, String> {
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        },
     };
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
